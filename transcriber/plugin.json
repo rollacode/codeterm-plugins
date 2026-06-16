@@ -1,6 +1,6 @@
 {
   "id": "transcriber",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minCodeterm": "1.0.0",
   "hostApi": 2,
   "displayName": "Transcriber",

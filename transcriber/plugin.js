@@ -1,3 +1,4 @@
+// v0.1.1
 // Transcriber plugin — CodeTerm's speech-to-text backend (capability: transcriber).
 //
 // CodeTerm records the voice note and inserts the returned text; this plugin only

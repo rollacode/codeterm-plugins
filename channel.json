@@ -2,9 +2,19 @@
   "schemaVersion": 1,
   "name": "codeterm-plugins",
   "displayName": "CodeTerm Plugins",
-  "description": "Andrey's CodeTerm capability plugins — Transcriber, Bitwarden.",
+  "description": "Andrey's CodeTerm capability plugins \u2014 Transcriber, Bitwarden.",
   "plugins": [
-    { "id": "transcriber", "path": "transcriber", "version": "0.1.0", "minCodeterm": "1.0.0" },
-    { "id": "bitwarden", "path": "bitwarden", "version": "0.1.0", "minCodeterm": "1.0.0" }
+    {
+      "id": "transcriber",
+      "path": "transcriber",
+      "version": "0.1.1",
+      "minCodeterm": "1.0.0"
+    },
+    {
+      "id": "bitwarden",
+      "path": "bitwarden",
+      "version": "0.1.0",
+      "minCodeterm": "1.0.0"
+    }
   ]
 }
