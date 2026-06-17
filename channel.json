@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "name": "codeterm-plugins",
   "displayName": "CodeTerm Plugins",
-  "description": "Andrey's CodeTerm capability plugins — Git, Transcriber, Bitwarden, LM Studio.",
+  "description": "Andrey's CodeTerm capability plugins — Git, Transcriber, Bitwarden, LM Studio, Chat Preprocessor.",
   "plugins": [
     {
       "id": "lmstudio",
@@ -25,6 +25,12 @@
     {
       "id": "bitwarden",
       "path": "bitwarden",
+      "version": "0.1.0",
+      "minCodeterm": "1.0.0"
+    },
+    {
+      "id": "chat-preprocessor",
+      "path": "chat-preprocessor",
       "version": "0.1.0",
       "minCodeterm": "1.0.0"
     }
