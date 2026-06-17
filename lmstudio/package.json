@@ -1,0 +1,10 @@
+{
+  "name": "@codeterm/plugin-lmstudio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CodeTerm LM Studio plugin: a chatBackend transport that talks to a local LM Studio OpenAI-compatible server.",
+  "devDependencies": {
+    "@codeterm/plugin-sdk": "^1.4.7"
+  }
+}

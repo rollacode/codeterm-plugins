@@ -1,0 +1,24 @@
+{
+  "id": "lmstudio",
+  "version": "0.1.0",
+  "minCodeterm": "1.0.0",
+  "hostApi": 2,
+  "displayName": "LM Studio",
+  "description": "Chat with a local LM Studio model right inside a CodeTerm pane. A chatBackend transport: open a pane, `codeterm send` your message, get the reply — no terminal, no cloud. Talks to LM Studio's OpenAI-compatible server over the local network.",
+  "readme": "README.md",
+  "iconHint": "🤖",
+  "iconColor": "var(--ct-accent)",
+  "entry": "plugin.js",
+  "capabilities": {
+    "chatBackend": true
+  },
+  "permissions": {
+    "network": {
+      "allow": [
+        "localhost:1234",
+        "127.0.0.1:1234"
+      ]
+    }
+  },
+  "iconSvg": "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"3\" y=\"11\" width=\"18\" height=\"10\" rx=\"2\"/><circle cx=\"12\" cy=\"5\" r=\"2\"/><path d=\"M12 7v4\"/><line x1=\"8\" y1=\"16\" x2=\"8\" y2=\"16\"/><line x1=\"16\" y1=\"16\" x2=\"16\" y2=\"16\"/></svg>"
+}
