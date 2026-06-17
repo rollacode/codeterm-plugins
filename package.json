@@ -1,0 +1,30 @@
+{
+  "name": "codeterm-plugins",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Andrey's CodeTerm capability plugins — Git, Transcriber, Bitwarden. Authored in TypeScript against @codeterm/plugin-sdk, built to QuickJS-compatible plugin.js + split UI bundles.",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rollacode/codeterm-plugins.git"
+  },
+  "scripts": {
+    "build": "node scripts/build-plugin.mjs",
+    "build:all": "node scripts/build-plugin.mjs git && node scripts/build-plugin.mjs bitwarden && node scripts/build-plugin.mjs transcriber",
+    "typecheck": "tsc --noEmit",
+    "test": "npx tsx git/plugin.test.cjs && npx tsx bitwarden/plugin.test.cjs"
+  },
+  "devDependencies": {
+    "@codeterm/plugin-sdk": "^1.4.6",
+    "@git-diff-view/react": "^0.1.5",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "esbuild": "^0.28.1",
+    "lucide-react": "^1.7.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3"
+  }
+}

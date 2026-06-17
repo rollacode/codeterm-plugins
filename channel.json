@@ -2,12 +2,18 @@
   "schemaVersion": 1,
   "name": "codeterm-plugins",
   "displayName": "CodeTerm Plugins",
-  "description": "Andrey's CodeTerm capability plugins \u2014 Transcriber, Bitwarden.",
+  "description": "Andrey's CodeTerm capability plugins — Git, Transcriber, Bitwarden.",
   "plugins": [
+    {
+      "id": "git",
+      "path": "git",
+      "version": "0.1.0",
+      "minCodeterm": "1.0.0"
+    },
     {
       "id": "transcriber",
       "path": "transcriber",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "minCodeterm": "1.0.0"
     },
     {
