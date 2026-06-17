@@ -1,0 +1,43 @@
+# Chat Preprocessor plugin configuration.
+#
+# This file is the self-documenting source of truth for how the plugin augments
+# your outbound chat messages. An agent (or you) edits it directly — every field
+# is documented in the comment right above it, so "how to set this" lives next to
+# the value. The host parses this YAML and hands the plugin JSON via
+# host.settingsJson(); you never edit JSON by hand.
+#
+# After changing a value the plugin re-reads it live — no CodeTerm restart.
+
+# Master switch. When false the plugin is a no-op: every message passes through
+# untouched. Turn it on only once you've picked (and configured) a backend below.
+enabled: false
+
+# Where the context comes from. One of:
+#   mem    — search your CodeTerm memory (host.mem.search) and fold the top hits
+#            in as a bullet list. No network, no API key. The default.
+#   groq   — ask a Groq model (https://api.groq.com) to produce context for the
+#            message. Requires the groqApiKey secret (see below) and the
+#            api.groq.com network grant (already declared in plugin.json).
+#   worker — run a one-shot CodeTerm worker agent (host.worker) to produce the
+#            context, then fold in its report.
+# Anything else (or an unconfigured backend) → passthrough.
+backend: mem
+
+# Model identifier, used by the `groq` and `worker` backends to pick which model
+# answers. Ignored by the `mem` backend.
+#   - groq:   e.g. "llama-3.1-8b-instant" (the default), "llama-3.3-70b-versatile".
+#   - worker: the worker's own backend/model selection; leave blank for the
+#             session default.
+model: ""
+
+# How the <context> block is combined with your original message:
+#   append  — your text first, then the <context> block underneath (the default).
+#   prepend — the <context> block first, then your text.
+composeMode: append
+
+# ── Secrets (NOT stored in this file) ──
+# The `groq` backend needs a Groq API key. It is a SECRET: it lives in CodeTerm's
+# secret store under the name `groqApiKey`, never in this YAML. Set it with:
+#   codeterm plugin config chat-preprocessor --set groqApiKey=gsk_...
+# and the plugin reads it via host.secretGet("groqApiKey"). With no key set, the
+# `groq` backend simply passes messages through.

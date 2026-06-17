@@ -1,0 +1,10 @@
+{
+  "name": "@codeterm/plugin-chat-preprocessor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CodeTerm chat-preprocessor plugin: an outbound message stage that folds relevant context (mem / worker / Groq) into a user turn before the agent sees it.",
+  "devDependencies": {
+    "@codeterm/plugin-sdk": "^1.4.7"
+  }
+}

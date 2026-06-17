@@ -1,0 +1,25 @@
+{
+  "id": "chat-preprocessor",
+  "version": "0.1.0",
+  "minCodeterm": "1.0.0",
+  "hostApi": 2,
+  "displayName": "Chat Preprocessor",
+  "description": "Augments your outbound chat messages before the agent sees them. A chatPreprocessor stage in the outbound pipeline (match: text): it pulls relevant context — from your CodeTerm memory, a one-shot worker agent, or a Groq model — and folds it into the message as a <context> block. Toggle it off for plain passthrough.",
+  "readme": "README.md",
+  "iconHint": "✨",
+  "iconColor": "var(--ct-accent)",
+  "entry": "plugin.js",
+  "capabilities": {
+    "chatPreprocessor": {
+      "match": "text"
+    }
+  },
+  "permissions": {
+    "network": {
+      "allow": [
+        "api.groq.com"
+      ]
+    }
+  },
+  "iconSvg": "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M5 3v4\"/><path d=\"M3 5h4\"/><path d=\"M6 17v4\"/><path d=\"M4 19h4\"/><path d=\"M13 3l2.5 6.5L22 12l-6.5 2.5L13 21l-2.5-6.5L4 12l6.5-2.5z\"/></svg>"
+}
