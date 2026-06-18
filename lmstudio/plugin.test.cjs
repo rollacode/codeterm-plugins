@@ -390,26 +390,102 @@ test("fallback assembled context includes one final assistant entry per turn", (
   assert(!body.input.includes("assistant: Hel\n"), "partial assistant content omitted");
 });
 
-test("codeterm-tool fences execute only when trailing", () => {
+test("only the trailing contiguous codeterm-tool group executes (prose-separated earlier fences are ignored)", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "middle-fence", config: {}, systemPrompt: "sys" });
-  plugin.sendMessage("middle-fence", "explain protocol");
-  const middle =
-    'Example:\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo should-not-run"}}\n```\nThen I explain it.';
-  enqueueStream(0, [{ chunks: [turn(middle, "resp-middle")], done: true, status: 200 }]);
-  plugin.pump("middle-fence");
-  let p = plugin.poll("middle-fence", null);
-  assert(execCalls.length === 0, "middle explanatory fence did not execute");
-  assert(p.done === true, "middle explanatory fence ends turn");
+  // An earlier illustrative fence, separated from a later real fence by prose:
+  // only the trailing fence is a tool call; the prose-separated one is not.
+  plugin.openSession({ paneId: "two-fences", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("two-fences", "explain then run");
+  const twoFences =
+    'For example:\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo example"}}\n```\n' +
+    "Now I will actually run it.\n" +
+    '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo real"}}\n```';
+  enqueueStream(0, [{ chunks: [turn(twoFences, "resp-two")], done: true, status: 200 }]);
+  plugin.pump("two-fences");
+  assert(execCalls.length === 1, "only the trailing fence executed, got " + execCalls.length);
+  assert(
+    execCalls[0].args.some((arg) => String(arg).includes("echo real")),
+    "the trailing fence (echo real) is the one that ran",
+  );
+  // The executed fence starts a continuation stream (job 1); give it a final answer and drain.
+  enqueueStream(1, [{ chunks: [turn("Done.", "resp-two-final")], done: true, status: 200 }]);
+  const p = pumpUntilDone("two-fences");
+  assert(contents(p.messages, "tool_result").length === 1, "trailing fence produced one tool_result");
+});
 
-  plugin.openSession({ paneId: "trailing-fence", config: {}, systemPrompt: "sys" });
-  plugin.sendMessage("trailing-fence", "run trailing");
-  const trailing = 'Running it now.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo trailing"}}\n```';
-  enqueueStream(1, [{ chunks: [turn(trailing, "resp-trailing")], done: true, status: 200 }]);
-  plugin.pump("trailing-fence");
-  p = plugin.poll("trailing-fence", null);
-  assert(execCalls.length === 1, "trailing fence executed once");
-  assert(contents(p.messages, "tool_result").length === 1, "trailing fence produced tool_result");
+test("a native <|tool_call|> exec wrapper is recognized and runs host.exec", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "native", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("native", "list panes");
+  // gemma-style native tool call: <|tool_call>call:NAME{args}<tool_call|> with an
+  // unquoted key and the `command` alias (mapped to exec's `cmd`).
+  const answer = 'Sure, let me check.\n<|tool_call>call:exec{command: "codeterm pane list"}<tool_call|>';
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-native")], done: true, status: 200 }]);
+  plugin.pump("native");
+
+  assert(execCalls.length === 1, "native tool-call ran host.exec, got " + execCalls.length);
+  assert(
+    execCalls[0].args.some((arg) => String(arg).includes("codeterm pane list")),
+    "native exec command mapped to cmd and executed",
+  );
+  let p = plugin.poll("native", null);
+  assert(contents(p.messages, "tool_result").length === 1, "native tool-call produced a tool_result");
+  assert(streamCalls.length === 2, "native tool-call continues the loop");
+  const assistants = contents(p.messages, "assistant");
+  assert(!/tool_call/.test(assistants[0] || ""), "native wrapper stripped from bubble, got " + assistants[0]);
+});
+
+test("a codeterm-tool fence followed by trailing prose still executes", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "fence-prose", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("fence-prose", "go");
+  const answer =
+    'Running it.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo hi"}}\n```\nThat should do it.';
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-fp")], done: true, status: 200 }]);
+  plugin.pump("fence-prose");
+  assert(execCalls.length === 1, "fence-with-trailing-prose executed, got " + execCalls.length);
+  assert(
+    execCalls[0].args.some((arg) => String(arg).includes("echo hi")),
+    "the fenced command ran despite trailing prose",
+  );
+});
+
+test("the system-prompt's documented example echoed back does not execute", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "example", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("example", "show me the protocol");
+  // Exact documented example from config.yaml — echoing it must never run a tool.
+  const answer =
+    'Here is the format:\n```codeterm-tool\n{"tool": "exec", "args": {"cmd": "codeterm pane list"}}\n```';
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-ex")], done: true, status: 200 }]);
+  plugin.pump("example");
+
+  const p = plugin.poll("example", null);
+  assert(execCalls.length === 0, "documented example did not run, got " + execCalls.length);
+  assert(p.done === true, "turn ends without tool execution");
+  const assistants = contents(p.messages, "assistant");
+  assert(
+    assistants.some((c) => c.includes("codeterm pane list")),
+    "the documented example is preserved in the bubble (not stripped)",
+  );
+});
+
+test("an executed tool-call fence is stripped from the displayed assistant content", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "strip", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("strip", "do it");
+  const answer = 'On it.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo strip"}}\n```';
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-strip")], done: true, status: 200 }]);
+  plugin.pump("strip");
+
+  const p = plugin.poll("strip", null);
+  const assistants = contents(p.messages, "assistant");
+  assert(assistants.length >= 1, "assistant message exists");
+  const bubble = assistants[0];
+  assert(!/codeterm-tool/.test(bubble), "raw fence stripped from bubble, got: " + bubble);
+  assert(!/echo strip/.test(bubble), "tool JSON stripped from bubble, got: " + bubble);
+  assert(bubble.includes("On it."), "prose preserved in bubble, got: " + bubble);
+  assert(execCalls.length === 1, "tool still executed");
 });
 
 test("malformed trailing tool fence appends parse-error tool_result", () => {

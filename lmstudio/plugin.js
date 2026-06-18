@@ -26,6 +26,21 @@ module.exports = __toCommonJS(plugin_exports);
 var DEFAULT_BASE_URL = "http://localhost:1234";
 var MAX_TOOL_ROUNDS = 8;
 var TOOL_FENCE_RE = /```codeterm-tool\s*\n([\s\S]*?)\n?```/g;
+var NATIVE_CALL_RE = /call\s*[:=]\s*([A-Za-z_][A-Za-z0-9_]*)\s*(\{[\s\S]*?\})/g;
+var NATIVE_ARG_ALIASES = {
+  exec: { command: "cmd" },
+  codeterm: { command: "args", cmd: "args" }
+};
+function canonicalJson(v) {
+  if (v === null || typeof v !== "object") return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+  const obj = v;
+  return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`).join(",")}}`;
+}
+var DOCUMENTED_EXAMPLE_CANON = canonicalJson({ tool: "exec", args: { cmd: "codeterm pane list" } });
+function isDocumentedExample(call) {
+  return !!call && canonicalJson({ tool: call.tool, args: call.args }) === DOCUMENTED_EXAMPLE_CANON;
+}
 var SYSTEM_PROMPT_MARKER = "-=-codeterm:system_prompt-=-";
 function markSystemPrompt(body) {
   return SYSTEM_PROMPT_MARKER + body;
@@ -155,16 +170,17 @@ function parseToolJson(raw) {
     return { raw, error: `tool JSON parse error: ${String(e)}` };
   }
 }
-function parseTrailingToolEntries(text) {
+function collectFenceMatches(text) {
   const matches = [];
   TOOL_FENCE_RE.lastIndex = 0;
   let match;
   while ((match = TOOL_FENCE_RE.exec(text)) !== null) {
-    matches.push({ start: match.index, end: match.index + match[0].length, body: match[1] });
+    matches.push({ start: match.index, end: match.index + match[0].length, entry: parseToolJson(match[1]) });
   }
+  return matches;
+}
+function trailingFenceGroup(text, matches) {
   if (!matches.length) return [];
-  const last = matches[matches.length - 1];
-  if (text.slice(last.end).trim() !== "") return [];
   let firstTrailing = matches.length - 1;
   while (firstTrailing > 0) {
     const prev = matches[firstTrailing - 1];
@@ -172,7 +188,78 @@ function parseTrailingToolEntries(text) {
     if (text.slice(prev.end, next.start).trim() !== "") break;
     firstTrailing -= 1;
   }
-  return matches.slice(firstTrailing).map((m) => parseToolJson(m.body));
+  return matches.slice(firstTrailing);
+}
+function parseLooseObject(raw) {
+  const attempt = (s) => {
+    try {
+      const v = JSON.parse(s);
+      return v && typeof v === "object" && !Array.isArray(v) ? v : null;
+    } catch {
+      return null;
+    }
+  };
+  const direct = attempt(raw);
+  if (direct) return direct;
+  const coerced = raw.replace(/([{,]\s*)([A-Za-z_$][A-Za-z0-9_$]*)(\s*:)/g, '$1"$2"$3').replace(/'/g, '"');
+  return attempt(coerced);
+}
+function applyArgAliases(tool, args) {
+  const aliases = NATIVE_ARG_ALIASES[tool];
+  if (!aliases) return args;
+  const out = { ...args };
+  for (const from of Object.keys(aliases)) {
+    const to = aliases[from];
+    if (out[to] === void 0 && out[from] !== void 0) out[to] = out[from];
+  }
+  return out;
+}
+function collectNativeMatches(text) {
+  const matches = [];
+  NATIVE_CALL_RE.lastIndex = 0;
+  let match;
+  while ((match = NATIVE_CALL_RE.exec(text)) !== null) {
+    const tool = match[1];
+    let start = match.index;
+    let end = match.index + match[0].length;
+    const wrapBefore = text.slice(0, start).match(/<\s*\|?\s*(?:tool_call|tool▁call)\s*\|?\s*>\s*$/i);
+    if (wrapBefore) start -= wrapBefore[0].length;
+    const wrapAfter = text.slice(end).match(/^\s*<\s*\|?\s*(?:tool_call|tool▁call)\s*\|?\s*>/i);
+    if (wrapAfter) end += wrapAfter[0].length;
+    const parsed = parseLooseObject(match[2]);
+    if (!parsed) {
+      matches.push({ start, end, entry: { raw: match[0], error: "native tool-call args not parseable" } });
+      continue;
+    }
+    matches.push({ start, end, entry: { raw: match[0], call: { tool, args: applyArgAliases(tool, parsed) } } });
+  }
+  return matches;
+}
+function stripSpans(text, spans) {
+  if (!spans.length) return text;
+  const ordered = [...spans].sort((a, b) => a.start - b.start);
+  let out = "";
+  let cursor = 0;
+  for (const s of ordered) {
+    if (s.start < cursor) continue;
+    out += text.slice(cursor, s.start);
+    cursor = s.end;
+  }
+  out += text.slice(cursor);
+  return out.replace(/\n{3,}/g, "\n\n").trim();
+}
+function parseToolEntries(text) {
+  const fenceTools = trailingFenceGroup(text, collectFenceMatches(text)).filter(
+    (m) => !isDocumentedExample(m.entry.call)
+  );
+  if (fenceTools.length) {
+    return { entries: fenceTools.map((m) => m.entry), cleaned: stripSpans(text, fenceTools) };
+  }
+  const nativeTools = collectNativeMatches(text).filter((m) => !isDocumentedExample(m.entry.call));
+  if (nativeTools.length) {
+    return { entries: nativeTools.map((m) => m.entry), cleaned: stripSpans(text, nativeTools) };
+  }
+  return { entries: [], cleaned: text };
 }
 function executeTool(call) {
   switch (call.tool) {
@@ -318,13 +405,14 @@ function startNextIfIdle(s) {
     startLmStudioCall(s, s.pendingInputs.shift() || "");
   }
 }
-function finishAssistantMessage(s, content, responseId) {
+function finishAssistantMessage(s, content, responseId, messageId) {
   if (responseId) s.previousResponseId = responseId;
-  const entries = parseTrailingToolEntries(content);
+  const { entries, cleaned } = parseToolEntries(content);
   if (!entries.length) {
     s.done = true;
     return;
   }
+  if (cleaned !== content) append(s, "assistant", cleaned, messageId);
   for (const entry of entries) {
     if (entry.error || !entry.call) {
       const formatted2 = JSON.stringify(
@@ -385,7 +473,7 @@ function pollStream(s) {
   if (poll.done) {
     host.fetchStreamClose(stream.jobId);
     s.stream = null;
-    finishAssistantMessage(s, stream.content, stream.responseId);
+    finishAssistantMessage(s, stream.content, stream.responseId, stream.messageId);
   }
 }
 function resolveSession(ctx) {
