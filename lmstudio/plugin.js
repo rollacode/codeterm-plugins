@@ -83,6 +83,18 @@ function fetchJson(opts) {
   );
   return parseJson(raw, { error: "fetch returned non-JSON" });
 }
+function resolveModelId() {
+  const res = fetchJson({ url: `${baseUrl()}/api/v1/models`, method: "GET" });
+  if (res.error || res.status && res.status >= 400) return "";
+  const data = parseJson(res.body || "{}", {});
+  const rows = Array.isArray(data.models) ? data.models : [];
+  const loaded = rows.find(
+    (r) => r && typeof r.key === "string" && Array.isArray(r.loaded_instances) && r.loaded_instances.length > 0
+  );
+  if (loaded && typeof loaded.key === "string") return loaded.key;
+  const first = rows.find((r) => r && typeof r.key === "string");
+  return first && typeof first.key === "string" ? first.key : "";
+}
 function startFetchStream(opts) {
   return parseJson(
     host.fetchStream(
@@ -203,14 +215,35 @@ function executeTool(call) {
       return { error: `unknown tool: ${call.tool}` };
   }
 }
-function extractResponseId(poll, content) {
-  const sources = [poll.body, content];
-  for (const source of sources) {
-    if (!source || source.trim()[0] !== "{") continue;
-    const data = parseJson(source, {});
-    if (typeof data.response_id === "string") return data.response_id;
+function consumeSseEvent(stream, segment) {
+  if (!segment) return;
+  let dataStr = "";
+  for (const line of segment.split(/\r?\n/)) {
+    if (line.indexOf("data:") !== 0) continue;
+    let value = line.slice(5);
+    if (value.charAt(0) === " ") value = value.slice(1);
+    dataStr += value;
   }
-  return null;
+  if (!dataStr) return;
+  const data = parseJson(
+    dataStr,
+    null
+  );
+  if (!data || typeof data !== "object") return;
+  const type = typeof data.type === "string" ? data.type : "";
+  if (type.indexOf("message.") === 0 && typeof data.content === "string") {
+    stream.content += data.content;
+  } else if (type.indexOf("reasoning.") === 0 && typeof data.content === "string") {
+    stream.reasoning += data.content;
+  } else if (type === "chat.end") {
+    const rid = data.result && data.result.response_id;
+    if (typeof rid === "string") stream.responseId = rid;
+  }
+}
+function parseSse(stream, flush) {
+  const segments = stream.buffer.split(/\r?\n\r?\n/);
+  stream.buffer = flush ? "" : segments.pop() ?? "";
+  for (const seg of segments) consumeSseEvent(stream, seg);
 }
 function assembledContext(s) {
   const prior = [];
@@ -230,11 +263,21 @@ function assembledContext(s) {
   return prior.map((m) => m.line).join("\n\n");
 }
 function startLmStudioCall(s, input) {
+  if (!s.model) {
+    const resolved = resolveModelId();
+    if (!resolved) {
+      append(s, "system", "LM Studio error: no model configured and none could be auto-resolved from /api/v1/models.");
+      s.done = true;
+      return;
+    }
+    s.model = resolved;
+  }
   const needsFallbackContext = !s.previousResponseId && s.messages.some((m) => m.type === "assistant" || m.type === "tool_result");
   const body = {
     model: s.model,
     system_prompt: s.systemPrompt,
     input: needsFallbackContext ? assembledContext(s) : input,
+    stream: true,
     ...s.params
   };
   if (s.previousResponseId) body.previous_response_id = s.previousResponseId;
@@ -248,7 +291,15 @@ function startLmStudioCall(s, input) {
     s.done = true;
     return;
   }
-  s.stream = { jobId: started.jobId, messageId: nextId(s, "lmstudio-assistant"), content: "" };
+  s.stream = {
+    jobId: started.jobId,
+    messageId: nextId(s, "lmstudio-assistant"),
+    reasoningId: nextId(s, "lmstudio-reasoning"),
+    content: "",
+    reasoning: "",
+    buffer: "",
+    responseId: null
+  };
   s.done = false;
 }
 function startNextIfIdle(s) {
@@ -256,8 +307,7 @@ function startNextIfIdle(s) {
     startLmStudioCall(s, s.pendingInputs.shift() || "");
   }
 }
-function finishAssistantMessage(s, content, poll) {
-  const responseId = extractResponseId(poll, content);
+function finishAssistantMessage(s, content, responseId) {
   if (responseId) s.previousResponseId = responseId;
   const entries = parseTrailingToolEntries(content);
   if (!entries.length) {
@@ -315,16 +365,16 @@ function pollStream(s) {
   }
   const chunks = Array.isArray(poll.chunks) ? poll.chunks : [];
   if (chunks.length) {
-    stream.content += chunks.join("");
-    append(s, "assistant", stream.content, stream.messageId);
+    stream.buffer += chunks.join("");
+    parseSse(stream, false);
   }
+  if (poll.done) parseSse(stream, true);
+  if (stream.reasoning) append(s, "reasoning", stream.reasoning, stream.reasoningId);
+  if (stream.content) append(s, "assistant", stream.content, stream.messageId);
   if (poll.done) {
-    if (!chunks.length && !s.messages.some((m) => m.id === stream.messageId)) {
-      append(s, "assistant", stream.content, stream.messageId);
-    }
     host.fetchStreamClose(stream.jobId);
     s.stream = null;
-    finishAssistantMessage(s, stream.content, poll);
+    finishAssistantMessage(s, stream.content, stream.responseId);
   }
 }
 function resolveSession(ctx) {
@@ -390,10 +440,18 @@ var plugin = {
     const res = fetchJson({ url: `${baseUrl()}/api/v1/models`, method: "GET" });
     if (res.error || res.status && res.status >= 400) return [];
     const data = parseJson(res.body || "{}", {});
-    const rows = data.data || [];
     const models = [];
-    for (const r of rows) {
-      if (r && typeof r.id === "string") models.push({ id: r.id, displayName: r.id });
+    if (Array.isArray(data.models)) {
+      for (const r of data.models) {
+        if (r && typeof r.key === "string") {
+          const displayName = typeof r.display_name === "string" ? r.display_name : r.key;
+          models.push({ id: r.key, displayName });
+        }
+      }
+    } else if (Array.isArray(data.data)) {
+      for (const r of data.data) {
+        if (r && typeof r.id === "string") models.push({ id: r.id, displayName: r.id });
+      }
     }
     return models;
   },

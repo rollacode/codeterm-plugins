@@ -100,6 +100,22 @@ function contents(messages, type) {
   return messages.filter((m) => m.type === type).map((m) => m.content);
 }
 
+// ── SSE builders: native /api/v1/chat emits `event: <name>` + `data: {json}`
+//    blocks separated by blank lines. The answer is the message.* deltas;
+//    reasoning.* is the model's private thinking; chat.end carries response_id.
+function sse(type, extra) {
+  return `event: ${type}\ndata: ${JSON.stringify(Object.assign({ type }, extra || {}))}\n\n`;
+}
+function msg(text) { return sse("message.delta", { content: text }); }
+function reasoning(text) { return sse("reasoning.delta", { content: text }); }
+function chatEnd(responseId) {
+  return `event: chat.end\ndata: ${JSON.stringify({ type: "chat.end", result: { response_id: responseId } })}\n\n`;
+}
+// One self-contained streamed turn: optional reasoning, an answer, terminal chat.end.
+function turn(answer, responseId) {
+  return msg(answer) + chatEnd(responseId);
+}
+
 test("openSession with systemPrompt seeds a system_prompt message", () => {
   reset({ baseUrl: "http://localhost:1234", defaultPreset: "codeterm", presets: [] });
   const r = plugin.openSession({
@@ -116,7 +132,7 @@ test("openSession with systemPrompt seeds a system_prompt message", () => {
   assert(p.messages[0].content === "You answer only in rhymes.", "seed content");
 });
 
-test("sendMessage streams a growing assistant message with one stable id", () => {
+test("sendMessage sends stream:true and streams a growing assistant message with one stable id", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({ paneId: "stream", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("stream", "hello");
@@ -127,25 +143,37 @@ test("sendMessage streams a growing assistant message with one stable id", () =>
   assert(body.model === "llama", "model from settings");
   assert(body.system_prompt === "sys", "system prompt sent");
   assert(body.input === "hello", "input is user text");
+  assert(body.stream === true, "stream:true requested");
 
+  // Multibyte char (🌍 = surrogate pair) AND the data: JSON are split across
+  // chunk boundaries — the parser must buffer and only parse complete events.
   enqueueStream(0, [
-    { chunks: ["Hel"], done: false, status: 200 },
-    { chunks: ["lo 🌍"], done: false, status: 200 },
-    { chunks: [], done: true, status: 200, body: JSON.stringify({ response_id: "resp-1" }) },
+    { chunks: [msg("Hel")], done: false, status: 200 },
+    {
+      chunks: [
+        'event: message.delta\ndata: {"type":"message.delta","content":"lo \uD83C',
+        '\uDF0D"}\n\n' + chatEnd("resp-1"),
+      ],
+      done: false,
+      status: 200,
+    },
+    { chunks: [], done: true, status: 200 },
   ]);
 
   plugin.pump("stream");
   let p = plugin.poll("stream", null);
   const partial = p.messages.find((m) => m.type === "assistant");
-  assert(partial && partial.content === "Hel", "first partial content");
+  assert(partial && partial.content === "Hel", "first partial content, got " + (partial && partial.content));
   const id = partial.id;
   const cursor = p.cursor;
 
   plugin.pump("stream");
   p = plugin.poll("stream", cursor);
-  assert(p.messages.length === 1, "one streaming delta, got " + p.messages.length);
-  assert(p.messages[0].id === id, "assistant id is stable");
-  assert(p.messages[0].content === "Hello 🌍", "grown content includes multibyte char");
+  const grown = p.messages.find((m) => m.type === "assistant");
+  assert(grown && grown.id === id, "assistant id is stable");
+  assert(grown.content === "Hello 🌍", "grown content includes multibyte char, got " + (grown && grown.content));
+  assert(!/event:/.test(grown.content), "no raw SSE event lines in answer");
+  assert(!/"type"/.test(grown.content), "no raw JSON in answer");
 
   plugin.pump("stream");
   p = plugin.poll("stream", null);
@@ -153,22 +181,85 @@ test("sendMessage streams a growing assistant message with one stable id", () =>
   assert(streamJobs[0].closed === true, "stream closed");
 });
 
+test("reasoning deltas are surfaced separately, never mixed into the answer", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "reason", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("reason", "think then answer");
+
+  enqueueStream(0, [
+    {
+      chunks: [
+        sse("reasoning.start", {}) +
+          reasoning("Let me ") +
+          reasoning("think.") +
+          sse("reasoning.end", {}) +
+          sse("message.start", {}) +
+          msg("Final answer.") +
+          sse("message.end", {}) +
+          chatEnd("resp-reason"),
+      ],
+      done: true,
+      status: 200,
+    },
+  ]);
+  plugin.pump("reason");
+  const p = plugin.poll("reason", null);
+
+  const assistants = contents(p.messages, "assistant");
+  assert(assistants.length >= 1, "an assistant message exists");
+  assert(assistants[assistants.length - 1] === "Final answer.", "answer is clean, got " + assistants[assistants.length - 1]);
+  assert(!/Let me think/.test(assistants[assistants.length - 1]), "reasoning not mixed into answer");
+
+  const reasonings = contents(p.messages, "reasoning");
+  assert(reasonings.length >= 1, "reasoning surfaced as its own entry");
+  assert(reasonings[reasonings.length - 1] === "Let me think.", "reasoning text captured, got " + reasonings[reasonings.length - 1]);
+});
+
+test("empty model auto-resolves to first loaded model via /api/v1/models and caches it", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [] }); // no model configured
+  fetchHandler = (opts) => {
+    if (/\/api\/v1\/models$/.test(opts.url)) {
+      assert(opts.method === "GET", "models probed via GET");
+      return JSON.stringify({
+        status: 200,
+        body: JSON.stringify({
+          models: [
+            { key: "publisher/unloaded", loaded_instances: [] },
+            { key: "google/gemma-4-31b-qat", loaded_instances: [{ id: "google/gemma-4-31b-qat" }] },
+          ],
+        }),
+      });
+    }
+    return JSON.stringify({ error: "unexpected url " + opts.url });
+  };
+
+  plugin.openSession({ paneId: "empty-model", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("empty-model", "hi");
+
+  assert(streamCalls.length === 1, "stream started after resolving model");
+  const body = JSON.parse(streamCalls[0].body);
+  assert(body.model === "google/gemma-4-31b-qat", "auto-resolved to first loaded model key, got " + body.model);
+  assert(fetchCalls.length === 1, "models probed exactly once");
+
+  enqueueStream(0, [{ chunks: [turn("Hi.", "resp-x")], done: true, status: 200 }]);
+  pumpUntilDone("empty-model");
+
+  // Second turn must reuse the cached model id without re-probing /models.
+  plugin.sendMessage("empty-model", "again");
+  assert(streamCalls.length === 2, "second stream started");
+  const body2 = JSON.parse(streamCalls[1].body);
+  assert(body2.model === "google/gemma-4-31b-qat", "cached model reused, got " + body2.model);
+  assert(fetchCalls.length === 1, "no second /models probe, fetchCalls=" + fetchCalls.length);
+});
+
 test("codeterm-tool exec block runs host.exec, appends tool_result, then continues to final answer", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({ paneId: "react", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("react", "list panes");
 
-  enqueueStream(0, [
-    {
-      chunks: [
-        "I'll check.\n```codeterm-tool\n",
-        "{\"tool\":\"exec\",\"args\":{\"cmd\":\"codeterm pane list\",\"cwd\":\"/tmp\"}}\n```",
-      ],
-      done: true,
-      status: 200,
-      body: JSON.stringify({ response_id: "resp-tool" }),
-    },
-  ]);
+  const answer =
+    'I\'ll check.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"codeterm pane list","cwd":"/tmp"}}\n```';
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-tool")], done: true, status: 200 }]);
   plugin.pump("react");
 
   assert(execCalls.length === 1, "host.exec called once");
@@ -186,9 +277,7 @@ test("codeterm-tool exec block runs host.exec, appends tool_result, then continu
   assert(continuation.previous_response_id === "resp-tool", "uses LM Studio previous_response_id");
   assert(/tool_result/.test(continuation.input), "tool result passed as continuation input");
 
-  enqueueStream(1, [
-    { chunks: ["You have pane-1 and pane-2."], done: true, status: 200, body: JSON.stringify({ response_id: "resp-final" }) },
-  ]);
+  enqueueStream(1, [{ chunks: [turn("You have pane-1 and pane-2.", "resp-final")], done: true, status: 200 }]);
   pumpUntilDone("react");
   p = plugin.poll("react", null);
   const assistants = contents(p.messages, "assistant");
@@ -200,15 +289,9 @@ test("iteration cap stops after 8 tool rounds", () => {
   plugin.openSession({ paneId: "cap", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("cap", "loop");
 
+  const fence = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo loop"}}\n```';
   for (let i = 0; i < 9; i += 1) {
-    enqueueStream(i, [
-      {
-        chunks: ["```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo loop\"}}\n```"],
-        done: true,
-        status: 200,
-        body: JSON.stringify({ response_id: `resp-${i}` }),
-      },
-    ]);
+    enqueueStream(i, [{ chunks: [turn(fence, `resp-${i}`)], done: true, status: 200 }]);
     plugin.pump("cap");
   }
 
@@ -224,30 +307,16 @@ test("iteration cap clears queued continuations and emits one cap message", () =
   plugin.openSession({ paneId: "cap-clear", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("cap-clear", "loop");
 
+  const fence = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo loop"}}\n```';
   for (let i = 0; i < 7; i += 1) {
-    enqueueStream(i, [
-      {
-        chunks: ["```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo loop\"}}\n```"],
-        done: true,
-        status: 200,
-        body: JSON.stringify({ response_id: `resp-${i}` }),
-      },
-    ]);
+    enqueueStream(i, [{ chunks: [turn(fence, `resp-${i}`)], done: true, status: 200 }]);
     plugin.pump("cap-clear");
   }
 
   assert(streamCalls.length === 8, "stream 8 is waiting for the cap-triggering response");
-  enqueueStream(7, [
-    {
-      chunks: [
-        "```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo eighth\"}}\n```\n",
-        "```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo ninth\"}}\n```",
-      ],
-      done: true,
-      status: 200,
-      body: JSON.stringify({ response_id: "resp-cap" }),
-    },
-  ]);
+  const eighth = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo eighth"}}\n```';
+  const ninth = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo ninth"}}\n```';
+  enqueueStream(7, [{ chunks: [msg(eighth + "\n" + ninth) + chatEnd("resp-cap")], done: true, status: 200 }]);
   plugin.pump("cap-clear");
   plugin.pump("cap-clear");
   plugin.pump("cap-clear");
@@ -266,8 +335,8 @@ test("fallback assembled context includes one final assistant entry per turn", (
   plugin.sendMessage("fallback-context", "first");
 
   enqueueStream(0, [
-    { chunks: ["Hel"], done: false, status: 200 },
-    { chunks: ["lo"], done: true, status: 200 },
+    { chunks: [msg("Hel")], done: false, status: 200 },
+    { chunks: [msg("lo")], done: true, status: 200 },
   ]);
   plugin.pump("fallback-context");
   plugin.pump("fallback-context");
@@ -285,16 +354,9 @@ test("codeterm-tool fences execute only when trailing", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({ paneId: "middle-fence", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("middle-fence", "explain protocol");
-  enqueueStream(0, [
-    {
-      chunks: [
-        "Example:\n```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo should-not-run\"}}\n```\nThen I explain it.",
-      ],
-      done: true,
-      status: 200,
-      body: JSON.stringify({ response_id: "resp-middle" }),
-    },
-  ]);
+  const middle =
+    'Example:\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo should-not-run"}}\n```\nThen I explain it.';
+  enqueueStream(0, [{ chunks: [turn(middle, "resp-middle")], done: true, status: 200 }]);
   plugin.pump("middle-fence");
   let p = plugin.poll("middle-fence", null);
   assert(execCalls.length === 0, "middle explanatory fence did not execute");
@@ -302,16 +364,8 @@ test("codeterm-tool fences execute only when trailing", () => {
 
   plugin.openSession({ paneId: "trailing-fence", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("trailing-fence", "run trailing");
-  enqueueStream(1, [
-    {
-      chunks: [
-        "Running it now.\n```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo trailing\"}}\n```",
-      ],
-      done: true,
-      status: 200,
-      body: JSON.stringify({ response_id: "resp-trailing" }),
-    },
-  ]);
+  const trailing = 'Running it now.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo trailing"}}\n```';
+  enqueueStream(1, [{ chunks: [turn(trailing, "resp-trailing")], done: true, status: 200 }]);
   plugin.pump("trailing-fence");
   p = plugin.poll("trailing-fence", null);
   assert(execCalls.length === 1, "trailing fence executed once");
@@ -322,14 +376,8 @@ test("malformed trailing tool fence appends parse-error tool_result", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({ paneId: "bad-json", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("bad-json", "bad tool");
-  enqueueStream(0, [
-    {
-      chunks: ["```codeterm-tool\n{\"tool\":\"exec\",\"args\":\n```"],
-      done: true,
-      status: 200,
-      body: JSON.stringify({ response_id: "resp-bad-json" }),
-    },
-  ]);
+  const bad = '```codeterm-tool\n{"tool":"exec","args":\n```';
+  enqueueStream(0, [{ chunks: [turn(bad, "resp-bad-json")], done: true, status: 200 }]);
   plugin.pump("bad-json");
 
   const p = plugin.poll("bad-json", null);
@@ -351,16 +399,17 @@ test("listPresets returns configured presets and listModels uses /api/v1/models"
   const presets = plugin.listPresets();
   assert(presets.length === 2 && presets[1].id === "rhymes", "configured presets");
 
+  // Native shape: { models: [{ key, ... }] }.
   fetchHandler = (opts) => {
     assert(opts.method === "GET", "GET");
     assert(opts.url === "http://localhost:1234/api/v1/models", "native models url, got " + opts.url);
     return JSON.stringify({
       status: 200,
-      body: JSON.stringify({ data: [{ id: "llama-3" }, { id: "qwen2.5" }, { bogus: true }] }),
+      body: JSON.stringify({ models: [{ key: "llama-3" }, { key: "qwen2.5" }, { bogus: true }] }),
     });
   };
   const models = plugin.listModels();
-  assert(models.length === 2, "two valid models");
+  assert(models.length === 2, "two valid models, got " + models.length);
   assert(models[0].id === "llama-3" && models[0].displayName === "llama-3", "first model");
 });
 
