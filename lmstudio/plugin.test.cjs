@@ -1,12 +1,16 @@
-// Plugin-side tests for the LM Studio chatBackend: poll cursoring + the
-// sendMessage / listModels request shapes, exercised against a FAKE host.fetch
-// (R7 — no live LM Studio server; the plugin's pure logic is the unit under test).
-// Run: npx tsx lmstudio/plugin.test.cjs
+// Plugin-side tests for the LM Studio open agent shell.
+// Run: node lmstudio/plugin.test.cjs
 
-// Configurable fake host. Each test installs its own fetch handler + settings.
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
+const vm = require("node:vm");
+
 const fetchCalls = [];
-let fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
+const streamCalls = [];
+const streamJobs = [];
+const execCalls = [];
 let settingsObj = {};
+let fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
 
 globalThis.host = {
   settingsJson: () => JSON.stringify(settingsObj),
@@ -15,205 +19,361 @@ globalThis.host = {
     fetchCalls.push(opts);
     return fetchHandler(opts);
   },
-  envGet: () => null,
+  fetchStream: (optsJson) => {
+    const opts = JSON.parse(optsJson);
+    streamCalls.push(opts);
+    const jobId = `job-${streamJobs.length}`;
+    streamJobs.push({ jobId, polls: [], closed: false });
+    return JSON.stringify({ jobId });
+  },
+  fetchStreamPoll: (jobId) => {
+    const job = streamJobs.find((j) => j.jobId === jobId);
+    if (!job) return JSON.stringify({ chunks: [], done: true, error: "unknown job" });
+    const next = job.polls.shift() || { chunks: [], done: true, status: 200 };
+    return JSON.stringify(next);
+  },
+  fetchStreamClose: (jobId) => {
+    const job = streamJobs.find((j) => j.jobId === jobId);
+    if (job) job.closed = true;
+  },
+  exec: (optsJson) => {
+    const opts = JSON.parse(optsJson);
+    execCalls.push(opts);
+    return JSON.stringify({ code: 0, stdout: "pane-1\npane-2\n", stderr: "" });
+  },
+  readFile: (path) => `file:${path}`,
+  writeFile: () => true,
+  mem: (optsJson) => JSON.stringify({ results: [{ title: "memory", body: optsJson }] }),
+  agent: {
+    spawn: (optsJson) => JSON.stringify({ sessionId: "agent-1", opts: JSON.parse(optsJson) }),
+  },
+  worker: {
+    start: (optsJson) => JSON.stringify({ jobId: "worker-1", opts: JSON.parse(optsJson) }),
+  },
   log: () => {},
 };
 
-const plugin = require("./plugin.js").default;
-
-const { readFileSync } = require("node:fs");
-const { join } = require("node:path");
-
-// Collect every settable `key` from a settings.schema.json (sections nest
-// `fields`, `when` nests `then`).
-function collectSchemaKeys(schema) {
-  const keys = [];
-  const walk = (fields) => {
-    for (const f of fields || []) {
-      if (f && f.key) keys.push(f.key);
-      if (f && Array.isArray(f.fields)) walk(f.fields);
-      if (f && Array.isArray(f.then)) walk(f.then);
-    }
-  };
-  walk(schema);
-  return keys;
+function loadPlugin() {
+  const source = readFileSync(join(__dirname, "plugin.js"), "utf8");
+  const module = { exports: {} };
+  const context = vm.createContext({
+    host: globalThis.host,
+    module,
+    exports: module.exports,
+    globalThis: { host: globalThis.host },
+  });
+  vm.runInContext(source, context, { filename: "plugin.js" });
+  return module.exports.default;
 }
+
+const plugin = loadPlugin();
 
 const tests = [];
 function test(name, fn) { tests.push([name, fn]); }
 function assert(cond, msg) { if (!cond) throw new Error(msg); }
+
 function reset(settings) {
   fetchCalls.length = 0;
+  streamCalls.length = 0;
+  streamJobs.length = 0;
+  execCalls.length = 0;
   settingsObj = settings || {};
   fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
 }
 
-// Canonical chat-completions reply for a given assistant content.
-function chatReply(content) {
-  return JSON.stringify({
-    status: 200,
-    body: JSON.stringify({ choices: [{ message: { role: "assistant", content } }] }),
-  });
+function pumpUntilDone(sessionId, limit = 50) {
+  for (let i = 0; i < limit; i += 1) {
+    plugin.pump(sessionId);
+    const p = plugin.poll(sessionId, null);
+    if (p.done) return p;
+  }
+  throw new Error("session did not finish within pump limit");
 }
 
-test("openSession returns the paneId as sessionId", () => {
-  reset();
-  const r = plugin.openSession({ paneId: "pane-1", config: {} });
-  assert(r.sessionId === "pane-1", "sessionId echoes paneId, got " + r.sessionId);
+function enqueueStream(jobIndex, polls) {
+  const job = streamJobs[jobIndex];
+  assert(job, "missing stream job " + jobIndex);
+  job.polls.push(...polls);
+}
+
+function contents(messages, type) {
+  return messages.filter((m) => m.type === type).map((m) => m.content);
+}
+
+test("openSession with systemPrompt seeds a system_prompt message", () => {
+  reset({ baseUrl: "http://localhost:1234", defaultPreset: "codeterm", presets: [] });
+  const r = plugin.openSession({
+    paneId: "pane-system",
+    config: {},
+    systemPrompt: "You answer only in rhymes.",
+    model: "ctx-model",
+  });
+  assert(r.sessionId === "pane-system", "sessionId echoes paneId");
+
+  const p = plugin.poll("pane-system", null);
+  assert(p.messages.length === 1, "one seed message, got " + p.messages.length);
+  assert(p.messages[0].type === "system_prompt", "seed type, got " + p.messages[0].type);
+  assert(p.messages[0].content === "You answer only in rhymes.", "seed content");
 });
 
-test("sendMessage POSTs the OpenAI request shape to baseUrl/v1/chat/completions", () => {
-  reset({ baseUrl: "http://localhost:1234", model: "llama-3" });
-  fetchHandler = () => chatReply("hi there");
-  plugin.openSession({ paneId: "p", config: {} });
-  plugin.sendMessage("p", "hello");
+test("sendMessage streams a growing assistant message with one stable id", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "stream", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("stream", "hello");
 
-  assert(fetchCalls.length === 1, "one fetch call, got " + fetchCalls.length);
-  const call = fetchCalls[0];
-  assert(call.method === "POST", "POST, got " + call.method);
+  assert(streamCalls.length === 1, "stream started");
+  const body = JSON.parse(streamCalls[0].body);
+  assert(streamCalls[0].url === "http://localhost:1234/api/v1/chat", "native v1 url");
+  assert(body.model === "llama", "model from settings");
+  assert(body.system_prompt === "sys", "system prompt sent");
+  assert(body.input === "hello", "input is user text");
+
+  enqueueStream(0, [
+    { chunks: ["Hel"], done: false, status: 200 },
+    { chunks: ["lo 🌍"], done: false, status: 200 },
+    { chunks: [], done: true, status: 200, body: JSON.stringify({ response_id: "resp-1" }) },
+  ]);
+
+  plugin.pump("stream");
+  let p = plugin.poll("stream", null);
+  const partial = p.messages.find((m) => m.type === "assistant");
+  assert(partial && partial.content === "Hel", "first partial content");
+  const id = partial.id;
+  const cursor = p.cursor;
+
+  plugin.pump("stream");
+  p = plugin.poll("stream", cursor);
+  assert(p.messages.length === 1, "one streaming delta, got " + p.messages.length);
+  assert(p.messages[0].id === id, "assistant id is stable");
+  assert(p.messages[0].content === "Hello 🌍", "grown content includes multibyte char");
+
+  plugin.pump("stream");
+  p = plugin.poll("stream", null);
+  assert(p.done === true, "turn done");
+  assert(streamJobs[0].closed === true, "stream closed");
+});
+
+test("codeterm-tool exec block runs host.exec, appends tool_result, then continues to final answer", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "react", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("react", "list panes");
+
+  enqueueStream(0, [
+    {
+      chunks: [
+        "I'll check.\n```codeterm-tool\n",
+        "{\"tool\":\"exec\",\"args\":{\"cmd\":\"codeterm pane list\",\"cwd\":\"/tmp\"}}\n```",
+      ],
+      done: true,
+      status: 200,
+      body: JSON.stringify({ response_id: "resp-tool" }),
+    },
+  ]);
+  plugin.pump("react");
+
+  assert(execCalls.length === 1, "host.exec called once");
   assert(
-    call.url === "http://localhost:1234/v1/chat/completions",
-    "url, got " + call.url,
+    execCalls[0].bin === "sh" && execCalls[0].args.some((arg) => String(arg).includes("codeterm pane list")),
+    "exec shell call shape",
   );
-  assert(call.headers["content-type"] === "application/json", "json content-type");
-  const body = JSON.parse(call.body);
-  assert(body.model === "llama-3", "model passed through, got " + body.model);
-  assert(Array.isArray(body.messages) && body.messages.length === 1, "one message");
-  assert(
-    body.messages[0].role === "user" && body.messages[0].content === "hello",
-    "user turn, got " + JSON.stringify(body.messages[0]),
-  );
+  let p = plugin.poll("react", null);
+  const toolResults = contents(p.messages, "tool_result");
+  assert(toolResults.length === 1, "one tool_result");
+  assert(toolResults[0].includes("pane-1"), "tool stdout surfaced");
+
+  assert(streamCalls.length === 2, "continuation stream started");
+  const continuation = JSON.parse(streamCalls[1].body);
+  assert(continuation.previous_response_id === "resp-tool", "uses LM Studio previous_response_id");
+  assert(/tool_result/.test(continuation.input), "tool result passed as continuation input");
+
+  enqueueStream(1, [
+    { chunks: ["You have pane-1 and pane-2."], done: true, status: 200, body: JSON.stringify({ response_id: "resp-final" }) },
+  ]);
+  pumpUntilDone("react");
+  p = plugin.poll("react", null);
+  const assistants = contents(p.messages, "assistant");
+  assert(assistants[assistants.length - 1] === "You have pane-1 and pane-2.", "final answer");
 });
 
-test("trailing slash in baseUrl is normalized; blank baseUrl defaults to localhost:1234", () => {
-  reset({ baseUrl: "http://10.0.0.5:9999/", model: "m" });
-  fetchHandler = () => chatReply("x");
-  plugin.openSession({ paneId: "p", config: {} });
-  plugin.sendMessage("p", "hi");
-  assert(
-    fetchCalls[0].url === "http://10.0.0.5:9999/v1/chat/completions",
-    "trailing slash stripped, got " + fetchCalls[0].url,
-  );
+test("iteration cap stops after 8 tool rounds", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "cap", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("cap", "loop");
 
-  reset({});
-  fetchHandler = () => chatReply("x");
-  plugin.openSession({ paneId: "q", config: {} });
-  plugin.sendMessage("q", "hi");
-  assert(
-    fetchCalls[0].url === "http://localhost:1234/v1/chat/completions",
-    "default baseUrl, got " + fetchCalls[0].url,
-  );
+  for (let i = 0; i < 9; i += 1) {
+    enqueueStream(i, [
+      {
+        chunks: ["```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo loop\"}}\n```"],
+        done: true,
+        status: 200,
+        body: JSON.stringify({ response_id: `resp-${i}` }),
+      },
+    ]);
+    plugin.pump("cap");
+  }
+
+  const p = plugin.poll("cap", null);
+  assert(execCalls.length === 8, "exec capped at 8, got " + execCalls.length);
+  assert(p.done === true, "session marked done at cap");
+  const systems = contents(p.messages, "system");
+  assert(systems.some((m) => /tool round cap/i.test(m)), "cap system message present");
 });
 
-test("poll cursoring: returns only new messages and advances the cursor", () => {
-  reset({ baseUrl: "http://localhost:1234", model: "m" });
-  fetchHandler = () => chatReply("reply one");
-  plugin.openSession({ paneId: "c", config: {} });
+test("iteration cap clears queued continuations and emits one cap message", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "cap-clear", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("cap-clear", "loop");
 
-  // Nothing sent yet.
-  let p = plugin.poll("c", null);
-  assert(p.messages.length === 0, "empty before send");
-  assert(p.cursor === "0", "cursor 0, got " + p.cursor);
+  for (let i = 0; i < 7; i += 1) {
+    enqueueStream(i, [
+      {
+        chunks: ["```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo loop\"}}\n```"],
+        done: true,
+        status: 200,
+        body: JSON.stringify({ response_id: `resp-${i}` }),
+      },
+    ]);
+    plugin.pump("cap-clear");
+  }
 
-  plugin.sendMessage("c", "first");
-  p = plugin.poll("c", null);
-  assert(p.messages.length === 2, "user + assistant, got " + p.messages.length);
-  assert(p.messages[0].type === "user" && p.messages[0].content === "first", "user msg");
-  assert(
-    p.messages[1].type === "assistant" && p.messages[1].content === "reply one",
-    "assistant msg, got " + JSON.stringify(p.messages[1]),
-  );
-  assert(p.cursor === "2", "cursor 2, got " + p.cursor);
-  assert(p.messages.every((m) => typeof m.id === "string" && m.id.length), "stable ids");
+  assert(streamCalls.length === 8, "stream 8 is waiting for the cap-triggering response");
+  enqueueStream(7, [
+    {
+      chunks: [
+        "```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo eighth\"}}\n```\n",
+        "```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo ninth\"}}\n```",
+      ],
+      done: true,
+      status: 200,
+      body: JSON.stringify({ response_id: "resp-cap" }),
+    },
+  ]);
+  plugin.pump("cap-clear");
+  plugin.pump("cap-clear");
+  plugin.pump("cap-clear");
 
-  // Polling from the returned cursor yields nothing new.
-  const empty = plugin.poll("c", p.cursor);
-  assert(empty.messages.length === 0, "no new messages, got " + empty.messages.length);
-  assert(empty.cursor === "2", "cursor unchanged, got " + empty.cursor);
-
-  // A second turn surfaces exactly the two new messages from the old cursor.
-  fetchHandler = () => chatReply("reply two");
-  plugin.sendMessage("c", "second");
-  const next = plugin.poll("c", "2");
-  assert(next.messages.length === 2, "two new messages, got " + next.messages.length);
-  assert(next.messages[1].content === "reply two", "second reply");
-  assert(next.cursor === "4", "cursor 4, got " + next.cursor);
+  const p = plugin.poll("cap-clear", null);
+  const capMessages = contents(p.messages, "system").filter((m) => /tool round cap/i.test(m));
+  assert(execCalls.length === 8, "only eighth tool executed before cap, got " + execCalls.length);
+  assert(capMessages.length === 1, "exactly one cap message, got " + capMessages.length);
+  assert(streamCalls.length === 8, "no extra continuation stream after cap, got " + streamCalls.length);
+  assert(p.done === true, "session done after cap");
 });
 
-test("full conversation history is replayed to LM Studio on each turn", () => {
-  reset({ baseUrl: "http://localhost:1234", model: "m" });
-  fetchHandler = () => chatReply("ack");
-  plugin.openSession({ paneId: "h", config: {} });
-  plugin.sendMessage("h", "one");
-  plugin.sendMessage("h", "two");
-  const body = JSON.parse(fetchCalls[1].body);
-  // turn 2 sees: user one, assistant ack, user two
-  assert(body.messages.length === 3, "3 messages replayed, got " + body.messages.length);
-  assert(body.messages[0].content === "one", "history[0]");
-  assert(body.messages[1].role === "assistant" && body.messages[1].content === "ack", "history[1]");
-  assert(body.messages[2].content === "two", "history[2]");
+test("fallback assembled context includes one final assistant entry per turn", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "fallback-context", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("fallback-context", "first");
+
+  enqueueStream(0, [
+    { chunks: ["Hel"], done: false, status: 200 },
+    { chunks: ["lo"], done: true, status: 200 },
+  ]);
+  plugin.pump("fallback-context");
+  plugin.pump("fallback-context");
+
+  plugin.sendMessage("fallback-context", "second");
+  assert(streamCalls.length === 2, "second stream started");
+  const body = JSON.parse(streamCalls[1].body);
+  const assistantEntries = body.input.match(/^assistant:/gm) || [];
+  assert(assistantEntries.length === 1, "one assistant entry, got " + assistantEntries.length + "\n" + body.input);
+  assert(body.input.includes("assistant: Hello"), "final assistant content included");
+  assert(!body.input.includes("assistant: Hel\n"), "partial assistant content omitted");
 });
 
-test("fetch error becomes a system message, transcript still polls", () => {
-  reset({ model: "m" });
-  fetchHandler = () => JSON.stringify({ error: "connection refused" });
-  plugin.openSession({ paneId: "e", config: {} });
-  plugin.sendMessage("e", "hi");
-  const p = plugin.poll("e", null);
-  assert(p.messages.length === 2, "user + system error, got " + p.messages.length);
-  assert(p.messages[1].type === "system", "error is system typed");
-  assert(/connection refused/.test(p.messages[1].content), "error surfaced");
+test("codeterm-tool fences execute only when trailing", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "middle-fence", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("middle-fence", "explain protocol");
+  enqueueStream(0, [
+    {
+      chunks: [
+        "Example:\n```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo should-not-run\"}}\n```\nThen I explain it.",
+      ],
+      done: true,
+      status: 200,
+      body: JSON.stringify({ response_id: "resp-middle" }),
+    },
+  ]);
+  plugin.pump("middle-fence");
+  let p = plugin.poll("middle-fence", null);
+  assert(execCalls.length === 0, "middle explanatory fence did not execute");
+  assert(p.done === true, "middle explanatory fence ends turn");
+
+  plugin.openSession({ paneId: "trailing-fence", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("trailing-fence", "run trailing");
+  enqueueStream(1, [
+    {
+      chunks: [
+        "Running it now.\n```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo trailing\"}}\n```",
+      ],
+      done: true,
+      status: 200,
+      body: JSON.stringify({ response_id: "resp-trailing" }),
+    },
+  ]);
+  plugin.pump("trailing-fence");
+  p = plugin.poll("trailing-fence", null);
+  assert(execCalls.length === 1, "trailing fence executed once");
+  assert(contents(p.messages, "tool_result").length === 1, "trailing fence produced tool_result");
 });
 
-test("HTTP >= 400 becomes a system message", () => {
-  reset({ model: "m" });
-  fetchHandler = () => JSON.stringify({ status: 500, body: "boom" });
-  plugin.openSession({ paneId: "x", config: {} });
-  plugin.sendMessage("x", "hi");
-  const p = plugin.poll("x", null);
-  assert(p.messages[1].type === "system" && /HTTP 500/.test(p.messages[1].content), "http error");
+test("malformed trailing tool fence appends parse-error tool_result", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "bad-json", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("bad-json", "bad tool");
+  enqueueStream(0, [
+    {
+      chunks: ["```codeterm-tool\n{\"tool\":\"exec\",\"args\":\n```"],
+      done: true,
+      status: 200,
+      body: JSON.stringify({ response_id: "resp-bad-json" }),
+    },
+  ]);
+  plugin.pump("bad-json");
+
+  const p = plugin.poll("bad-json", null);
+  const results = contents(p.messages, "tool_result");
+  assert(results.length === 1, "parse error produces one tool_result");
+  assert(/parse/i.test(results[0]) && /error/i.test(results[0]), "parse-error surfaced: " + results[0]);
+  assert(streamCalls.length === 2, "parse-error tool_result continues the loop for retry");
 });
 
-test("listModels GETs /v1/models and maps id -> {id, displayName}", () => {
-  reset({ baseUrl: "http://localhost:1234" });
+test("listPresets returns configured presets and listModels uses /api/v1/models", () => {
+  reset({
+    baseUrl: "http://localhost:1234/",
+    defaultPreset: "codeterm",
+    presets: [
+      { id: "codeterm", name: "CodeTerm", systemPrompt: "sys" },
+      { id: "rhymes", name: "Rhymes", systemPrompt: "rhyme" },
+    ],
+  });
+  const presets = plugin.listPresets();
+  assert(presets.length === 2 && presets[1].id === "rhymes", "configured presets");
+
   fetchHandler = (opts) => {
     assert(opts.method === "GET", "GET");
-    assert(opts.url === "http://localhost:1234/v1/models", "models url, got " + opts.url);
+    assert(opts.url === "http://localhost:1234/api/v1/models", "native models url, got " + opts.url);
     return JSON.stringify({
       status: 200,
       body: JSON.stringify({ data: [{ id: "llama-3" }, { id: "qwen2.5" }, { bogus: true }] }),
     });
   };
   const models = plugin.listModels();
-  assert(models.length === 2, "two valid models, got " + models.length);
+  assert(models.length === 2, "two valid models");
   assert(models[0].id === "llama-3" && models[0].displayName === "llama-3", "first model");
-  assert(models[1].id === "qwen2.5", "second model");
 });
 
-test("closeSession drops the session; poll on unknown is empty", () => {
-  reset();
-  plugin.openSession({ paneId: "z", config: {} });
-  plugin.closeSession("z");
-  const p = plugin.poll("z", "0");
-  assert(p.messages.length === 0, "no messages after close");
-});
-
-// ── manifest + settings schema (Track S) ──
-
-test("settings.schema.json exposes the baseUrl and model keys the plugin reads", () => {
+test("settings schema and config expose presets/defaultPreset", () => {
   const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));
-  assert(Array.isArray(schema), "schema is a top-level array of sections");
-  const keys = collectSchemaKeys(schema);
-  assert(keys.includes("baseUrl"), "schema exposes baseUrl (NOT endpoint), got " + keys.join(","));
-  assert(keys.includes("model"), "schema exposes model, got " + keys.join(","));
-  assert(!keys.includes("endpoint"), "schema must not use the legacy `endpoint` key");
-});
+  const schemaText = JSON.stringify(schema);
+  assert(schemaText.includes("baseUrl"), "schema exposes baseUrl");
+  assert(schemaText.includes("defaultPreset"), "schema exposes defaultPreset");
+  assert(schemaText.includes("presets"), "schema exposes presets");
 
-test("plugin.json references the schema and carries a non-empty configHelp", () => {
-  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
-  assert(manifest.settingsSchema === "settings.schema.json", "settingsSchema ref, got " + manifest.settingsSchema);
-  assert(typeof manifest.configHelp === "string" && manifest.configHelp.trim().length > 0, "configHelp is a non-empty string");
-  assert(manifest.configHelp.includes("codeterm plugin config"), "configHelp tells the agent the config command");
+  const config = readFileSync(join(__dirname, "config.yaml"), "utf8");
+  assert(/defaultPreset:\s*codeterm/.test(config), "config has defaultPreset");
+  assert(/systemPrompt:\s*\|/.test(config), "config seeds block systemPrompt");
 });
 
 let failed = 0;

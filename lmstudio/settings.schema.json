@@ -2,21 +2,41 @@
   {
     "kind": "section",
     "title": "LM Studio server",
-    "description": "Connect to a local LM Studio OpenAI-compatible server.",
+    "description": "Connect to a local LM Studio native v1 server.",
     "fields": [
       {
         "kind": "text",
         "key": "baseUrl",
         "label": "Endpoint URL",
         "placeholder": "http://localhost:1234",
-        "description": "Base URL of LM Studio's server (Developer tab → Start Server). The plugin appends /v1/chat/completions and /v1/models; a trailing slash is normalized. If you point this at a different host:port, add it to permissions.network.allow too or the request is denied."
+        "description": "Base URL of LM Studio's server. The plugin appends /api/v1/chat and /api/v1/models; a trailing slash is normalized. Non-default hosts must also be added to permissions.network.allow."
       },
       {
         "kind": "text",
         "key": "model",
-        "label": "Model",
+        "label": "Model fallback",
         "placeholder": "leave blank to use the loaded model",
-        "description": "Model id LM Studio routes to (e.g. qwen2.5-7b-instruct). Run listModels to discover ids. Leave blank to use whatever model is currently loaded."
+        "description": "Fallback model id. A preset model or spawn-time model overrides this."
+      }
+    ]
+  },
+  {
+    "kind": "section",
+    "title": "Presets",
+    "description": "Open-shell presets select the system prompt, model, and native LM Studio parameters for new sessions.",
+    "fields": [
+      {
+        "kind": "text",
+        "key": "defaultPreset",
+        "label": "Default preset",
+        "placeholder": "codeterm",
+        "description": "Preset id to use when a session does not specify ctx.preset."
+      },
+      {
+        "kind": "info",
+        "level": "info",
+        "title": "Preset objects",
+        "body": "Edit config.yaml for the presets array. Shape: presets: [{ id, name, systemPrompt, model?, params? }]. The default config seeds the codeterm preset from prompts/codeterm-default.md."
       }
     ]
   }
