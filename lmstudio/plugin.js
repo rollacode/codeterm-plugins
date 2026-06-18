@@ -26,6 +26,10 @@ module.exports = __toCommonJS(plugin_exports);
 var DEFAULT_BASE_URL = "http://localhost:1234";
 var MAX_TOOL_ROUNDS = 8;
 var TOOL_FENCE_RE = /```codeterm-tool\s*\n([\s\S]*?)\n?```/g;
+var SYSTEM_PROMPT_MARKER = "-=-codeterm:system_prompt-=-";
+function markSystemPrompt(body) {
+  return SYSTEM_PROMPT_MARKER + body;
+}
 var sessions = /* @__PURE__ */ new Map();
 function readSettings() {
   try {
@@ -60,7 +64,13 @@ function nextId(s, prefix = "lmstudio") {
   return id;
 }
 function append(s, type, content, id) {
-  const msg = { id: id || nextId(s), type, content };
+  const msgId = id || nextId(s);
+  const existing = s.messages.find((m) => m.id === msgId);
+  if (existing) {
+    existing.content = content;
+    return existing;
+  }
+  const msg = { id: msgId, type, content };
   s.messages.push(msg);
   return msg;
 }
@@ -257,6 +267,7 @@ function assembledContext(s) {
         prior[assistantIndex[m.id]].line = `assistant: ${m.content}`;
       }
     } else if (m.type === "user" || m.type === "tool_result") {
+      if (m.type === "user" && m.content.indexOf(SYSTEM_PROMPT_MARKER) === 0) continue;
       prior.push({ id: m.id, line: `${m.type}: ${m.content}` });
     }
   }
@@ -369,7 +380,7 @@ function pollStream(s) {
     parseSse(stream, false);
   }
   if (poll.done) parseSse(stream, true);
-  if (stream.reasoning) append(s, "reasoning", stream.reasoning, stream.reasoningId);
+  if (stream.reasoning) append(s, "thinking", stream.reasoning, stream.reasoningId);
   if (stream.content) append(s, "assistant", stream.content, stream.messageId);
   if (poll.done) {
     host.fetchStreamClose(stream.jobId);
@@ -401,7 +412,7 @@ var plugin = {
   openSession(ctx) {
     const sid = ctx.paneId;
     const s = resolveSession(ctx);
-    if (s.systemPrompt) append(s, "system_prompt", s.systemPrompt, "system-prompt");
+    if (s.systemPrompt) append(s, "user", markSystemPrompt(s.systemPrompt), "system-prompt");
     sessions.set(sid, s);
     return { sessionId: sid };
   },
@@ -425,9 +436,19 @@ var plugin = {
     const s = sessions.get(sid);
     if (!s) return { messages: [], cursor: cursor ?? "0", done: true };
     const from = Number(cursor ?? 0) || 0;
+    let liveFrom = -1;
+    if (s.stream) {
+      for (let i = 0; i < s.messages.length; i += 1) {
+        if (s.messages[i].id === s.stream.messageId || s.messages[i].id === s.stream.reasoningId) {
+          liveFrom = i;
+          break;
+        }
+      }
+    }
+    const nextCursor = liveFrom >= 0 ? liveFrom : s.messages.length;
     return {
       messages: s.messages.slice(from),
-      cursor: String(s.messages.length),
+      cursor: String(nextCursor),
       done: s.done && !s.stream && s.pendingInputs.length === 0
     };
   },
