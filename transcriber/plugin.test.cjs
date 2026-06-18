@@ -5,6 +5,7 @@
 
 const HOME = "/home/test";
 const MODEL = HOME + "/.codeterm/transcriber/ggml-small.bin";
+const BASE_MODEL = HOME + "/.codeterm/transcriber/ggml-base.bin";
 
 // ── Configurable fake host ─────────────────────────────────────────────
 const execCalls = [];
@@ -88,6 +89,35 @@ function happyHandler(segments) {
 
 const indexOfCall = (pred) => execCalls.findIndex(pred);
 const progressLabels = () => progressCalls.map((c) => c.label);
+const buttonLabels = (view) => view.nodes.filter((n) => n.kind === "button").map((n) => n.label);
+const badgeLabels = (view) => view.nodes.filter((n) => n.kind === "badge").map((n) => n.label);
+
+function installHandler() {
+  let ffmpegInstalled = false;
+  let whisperInstalled = false;
+  return (opts) => {
+    if (opts.bin === "ffmpeg" && (opts.args || [])[0] === "-version") {
+      return JSON.stringify(ffmpegInstalled ? { code: 0 } : { error: "not found" });
+    }
+    if (opts.bin === "whisper-cli" && (opts.args || [])[0] === "--help") {
+      return JSON.stringify(whisperInstalled ? { code: 0 } : { error: "not found" });
+    }
+    if (opts.bin === "brew" && (opts.args || [])[1] === "ffmpeg") {
+      ffmpegInstalled = true;
+      return JSON.stringify({ code: 0 });
+    }
+    if (opts.bin === "brew" && (opts.args || [])[1] === "whisper-cpp") {
+      whisperInstalled = true;
+      return JSON.stringify({ code: 0 });
+    }
+    if (opts.bin === "curl") {
+      const i = (opts.args || []).indexOf("-o");
+      if (i >= 0) files[opts.args[i + 1]] = "downloaded";
+      return JSON.stringify({ code: 0 });
+    }
+    return JSON.stringify({ code: 0, stdout: "", stderr: "" });
+  };
+}
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
@@ -273,6 +303,61 @@ test("transcribeStatus: ready when deps+model present, unloaded otherwise", () =
   execHandler = () => JSON.stringify({ error: "not found" });
   s = plugin.transcribeStatus();
   assert(s.state === "unloaded", "unloaded when deps missing, got " + JSON.stringify(s));
+});
+
+test("glance: inactive model shows install and reinstall with not-installed status", () => {
+  reset({ model: "base", language: "ru" }, "macos");
+  execHandler = () => JSON.stringify({ code: 0 });
+
+  const view = plugin.renderGlance();
+  assert(JSON.stringify(badgeLabels(view)) === JSON.stringify(["Not installed"]),
+    "not-installed badge shown, got " + JSON.stringify(view.nodes));
+  assert(view.nodes.some((n) => n.kind === "keyVal" && n.key === "Model" && n.value === "ggml-base"),
+    "active settings model shown, got " + JSON.stringify(view.nodes));
+  assert(view.nodes.some((n) => n.kind === "keyVal" && n.key === "Model file" && /missing/i.test(n.value)),
+    "missing model file status shown, got " + JSON.stringify(view.nodes));
+  assert(JSON.stringify(buttonLabels(view)) === JSON.stringify(["Install", "Reinstall", "Settings"]),
+    "install, reinstall, settings buttons shown, got " + JSON.stringify(view.nodes));
+});
+
+test("glanceAction install downloads the active settings model and emits progress", () => {
+  reset({ model: "base" }, "macos");
+  execHandler = installHandler();
+
+  const view = plugin.glanceAction("install");
+  assert(files[BASE_MODEL] === "downloaded", "active base model downloaded");
+  assert(files[BASE_MODEL + ".done"] !== undefined, "done sentinel written for active model");
+  assert(JSON.stringify(progressLabels()) === JSON.stringify([
+    "Installing ffmpeg…",
+    "Installing whisper.cpp…",
+    "Downloading model ggml-base (~142MB)…",
+  ]), "unexpected install progress labels: " + JSON.stringify(progressCalls));
+  assert(JSON.stringify(badgeLabels(view)) === JSON.stringify(["Ready"]),
+    "glance rerendered ready status, got " + JSON.stringify(view.nodes));
+  assert(JSON.stringify(buttonLabels(view)) === JSON.stringify(["Reinstall", "Settings"]),
+    "install hidden after model exists, got " + JSON.stringify(view.nodes));
+});
+
+test("glanceAction reinstall after settings model change prunes old and keeps only active", () => {
+  reset({ model: "base" }, "macos");
+  files[MODEL] = "old-small"; files[MODEL + ".done"] = "ok";
+  execHandler = installHandler();
+
+  const view = plugin.glanceAction("reinstall");
+  assert(files[BASE_MODEL] === "downloaded", "new active base model downloaded");
+  assert(files[BASE_MODEL + ".done"] !== undefined, "new active sentinel written");
+  assert(files[MODEL] === undefined, "old small model pruned");
+  assert(files[MODEL + ".done"] === undefined, "old small sentinel pruned");
+  const remainingModels = Object.keys(files).filter((p) => /\/ggml-.*\.bin$/.test(p)).sort();
+  assert(JSON.stringify(remainingModels) === JSON.stringify([BASE_MODEL]),
+    "only active model remains, got " + JSON.stringify(remainingModels));
+  assert(JSON.stringify(progressLabels()) === JSON.stringify([
+    "Installing ffmpeg…",
+    "Installing whisper.cpp…",
+    "Downloading model ggml-base (~142MB)…",
+  ]), "unexpected reinstall progress labels: " + JSON.stringify(progressCalls));
+  assert(JSON.stringify(badgeLabels(view)) === JSON.stringify(["Ready"]),
+    "glance rerendered ready status, got " + JSON.stringify(view.nodes));
 });
 
 // ── Run ────────────────────────────────────────────────────────────────
