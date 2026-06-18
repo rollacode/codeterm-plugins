@@ -1,26 +1,53 @@
 # Transcriber
 
-Speech-to-text for CodeTerm — dictate into the focused pane instead of typing.
+Offline speech-to-text for CodeTerm — voice notes in, text out. Nothing leaves your machine.
 
 ## What it does
 
-- Provides the **transcriber** capability: audio in, text out.
-- Backs onto a local [Whisper](https://github.com/ggerganov/whisper.cpp) server, or a mesh peer running one, so audio never leaves your machines.
-- A glance view shows engine status (running / reachable).
+- Provides the **transcriber** capability. CodeTerm hands it a recorded audio file
+  (`.oga`/`.webm`/`.opus`/`.mp3`/…); it returns the transcript.
+- It is a **one-shot** engine — no daemon, no HTTP server. Per clip it runs:
+  1. `ffmpeg -i <input> -ar 16000 -ac 1 -f wav <tmp>.wav` — decode to 16 kHz mono WAV.
+  2. `whisper-cli -m <model> -f <tmp>.wav -l <lang|auto> -nt -oj -of <tmp>` — transcribe to a JSON sidecar.
+  3. Read the JSON, join the segments, delete the temp files.
+- A glance view shows whether the engine is set up and lets you pre-warm it.
 
-## Requirements
+## Self-bootstrap (first use)
 
-- A `whisper-server` reachable at the configured address (defaults to `127.0.0.1:7891`), **or** a mesh peer exposing one.
-- On macOS, `brew` is allowed so the plugin can offer to install/start a local engine; `curl` and `pkill` manage the server process.
+Dependencies are detected first and only installed if missing — into
+`~/.codeterm/transcriber/` (model) and `~/.codeterm/transcriber/bin/` (downloaded binaries).
+
+| OS | whisper-cli | ffmpeg |
+|----|-------------|--------|
+| **macOS** | `brew install whisper-cpp` | `brew install ffmpeg` |
+| **Windows** | `curl` the `whisper-bin-x64.zip` GitHub release → `tar` extract | `curl` a static ffmpeg zip → `tar` extract |
+| **Linux** | `curl` the whisper.cpp release zip → `tar` extract | `curl` a static ffmpeg build → `tar` extract |
+
+The model (`ggml-<model>.bin`, default `small`, ~466 MB, multilingual) is fetched from
+HuggingFace with `curl`. `host.fetch` is text-only and cannot move binaries, so all
+downloads go through `curl` via `host.exec`. If any step can't run automatically, the
+plugin returns a clear message telling you exactly what to install by hand.
+
+## Settings
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `model` | `small` | whisper.cpp model id. `base` is faster/lighter; `medium`/`large-v3` are more accurate. |
+| `language` | `auto` | BCP-47 hint (e.g. `en`, `ru`). `auto` detects per clip. |
+
+Set them with `codeterm plugin config transcriber --set model=base --set language=ru`.
 
 ## Permissions
 
 | Permission | Why |
 |------------|-----|
-| `network: 127.0.0.1:7891` | Talks to the local Whisper server (or the mesh-forwarded peer engine). |
-| `subprocess: whisper-server, brew, curl, pkill` | Start/stop and health-check the local engine; `brew` only for optional install. |
-| `secrets` | Stores engine/peer connection details. |
+| `subprocess: brew, curl, tar, whisper-cli, ffmpeg` | Install deps (brew / curl + tar), then convert (ffmpeg) and transcribe (whisper-cli). |
+
+No network or secrets permissions are needed — downloads run through `curl`, and there
+are no credentials to store.
 
 ## Use
 
-Install the plugin, make sure a Whisper engine is reachable (the glance view tells you), then use the dictation control to transcribe into the active pane. Engine address and peer selection live in the plugin's settings.
+Just record a voice note. On the first one the plugin installs whatever is missing
+(this can take a while for the model download) and transcribes; subsequent notes are
+fast. The glance view's "Set up engine + model" button pre-warms everything ahead of time.

@@ -2,15 +2,24 @@
 // Authored in TypeScript against @codeterm/plugin-sdk and compiled to a
 // QuickJS-compatible plugin.js by scripts/build-plugin.mjs.
 //
-// CodeTerm records the voice note and inserts the returned text; this plugin owns
-// the engine end to end. For the `local` engine it installs whisper.cpp's
-// `whisper-server`, downloads a GGML model, and runs the daemon itself (via
-// host.exec — blocking for one-shot installs, `detach` for the long-lived server).
-// For `mesh` it just talks to a peer's daemon over the same wire contract.
+// One-shot engine: there is no daemon and no HTTP. CodeTerm hands us an audio file
+// path; we convert it to a 16 kHz mono WAV with ffmpeg, run whisper.cpp's
+// `whisper-cli` once (`-oj` → JSON sidecar), read the JSON, join the segments, and
+// clean up. host.fetch is text-only (can neither download a model nor upload audio),
+// so every dependency is bootstrapped lazily through host.exec + curl instead:
+//
+//   • macOS   — `brew install whisper-cpp` (gives `whisper-cli`) and `brew install ffmpeg`.
+//   • Windows — `curl` the whisper-bin-x64.zip GitHub release + a static ffmpeg zip,
+//               extract with `tar` into ~/.codeterm/transcriber/bin.
+//   • Linux   — `curl` the whisper-bin-ubuntu tarball + a static ffmpeg build, extract
+//               with `tar`; clear manual-install message if that path is unavailable.
+//
+// Everything is detect-first: a dependency that is already on PATH (or already in our
+// bin dir) is never reinstalled. Failures return an agent-readable error telling the
+// user exactly what to install by hand.
 import type {
   ExecOpts,
   ExecResult,
-  FetchResult,
   GlanceView,
   PluginModule,
   TranscribeResult,
@@ -18,18 +27,28 @@ import type {
 } from "@codeterm/plugin-sdk";
 
 interface TranscriberSettings {
-  engine?: string;
-  daemonUrl?: string;
   language?: string;
   model?: string;
 }
 
-type LifecycleResult = { ok: true; pid?: number; path?: string } | { error: string };
+type Resolved = { bin: string } | { error: string };
+type Ensured = { ok: true } | { error: string };
 
 interface StatusResult {
-  state: "ready" | "unavailable";
+  state: "ready" | "unloaded" | "unavailable";
   reason?: string;
 }
+
+// whisper.cpp release tag the prebuilt binaries are pulled from (Win/Linux only).
+const WHISPER_RELEASE = "v1.7.4";
+const WHISPER_BASE =
+  "https://github.com/ggerganov/whisper.cpp/releases/download/" + WHISPER_RELEASE;
+const FFMPEG_WIN_ZIP =
+  "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+const FFMPEG_LINUX_TAR =
+  "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz";
+
+// ── settings / paths ─────────────────────────────────────────────────
 
 function settings(): TranscriberSettings {
   try {
@@ -39,43 +58,45 @@ function settings(): TranscriberSettings {
   }
 }
 
-function isMesh(): boolean {
-  return (settings().engine || "local") === "mesh";
-}
-
-function daemonUrl(): string {
+function modelId(): string {
   const s = settings();
-  const url =
-    (s.daemonUrl && s.daemonUrl.length && s.daemonUrl) ||
-    host.envGet("CODETERM_TRANSCRIBE_URL") ||
-    "http://127.0.0.1:7891";
-  return url.replace(/\/+$/, "");
-}
-
-function port(): string {
-  const m = daemonUrl().match(/:(\d+)(?:\/|$)/);
-  return m ? m[1] : "7891";
+  return s.model && s.model.length ? s.model : "small";
 }
 
 function language(): string {
   const s = settings();
   if (s.language && s.language.length) return s.language;
-  const lang = host.envGet("CODETERM_TRANSCRIBE_LANG");
-  return lang && lang.length ? lang : "";
+  const env = host.envGet("CODETERM_TRANSCRIBE_LANG");
+  return env && env.length ? env : "auto";
 }
 
-function modelId(): string {
-  const s = settings();
-  return s.model && s.model.length ? s.model : "base.en";
-}
-
-function modelDir(): string {
+function baseDir(): string {
   const home = host.homeDir() || ".";
   return home + "/.codeterm/transcriber";
 }
 
+function binDir(): string {
+  return baseDir() + "/bin";
+}
+
+function tmpDir(): string {
+  return baseDir() + "/tmp";
+}
+
 function modelPath(): string {
-  return modelDir() + "/ggml-" + modelId() + ".bin";
+  return baseDir() + "/ggml-" + modelId() + ".bin";
+}
+
+function osKind(): "macos" | "windows" | "linux" {
+  const p = String(host.platform() || "").toLowerCase();
+  if (p.indexOf("win") !== -1) return "windows";
+  if (p.indexOf("mac") !== -1 || p.indexOf("darwin") !== -1 || p.indexOf("osx") !== -1)
+    return "macos";
+  return "linux";
+}
+
+function exeSuffix(): string {
+  return osKind() === "windows" ? ".exe" : "";
 }
 
 function exec(opts: ExecOpts): ExecResult {
@@ -87,171 +108,257 @@ function exec(opts: ExecOpts): ExecResult {
   }
 }
 
-// ── Lifecycle (local engine) ─────────────────────────────────────────
+function ranOk(r: ExecResult): boolean {
+  // "ran at all" — a missing binary surfaces as a spawn `error`; --help/--version
+  // may exit non-zero, but the absence of `error` means the binary exists.
+  return !r.error;
+}
 
-function ensureEngine(): LifecycleResult {
-  const check = exec({ bin: "whisper-server", args: ["--help"] });
-  // present if it ran at all (help may exit 0 or 1, but no spawn error)
-  if (!check.error) return { ok: true };
-  const plat = host.platform();
-  if (plat === "macos") {
-    const r = exec({ bin: "brew", args: ["install", "whisper-cpp"] });
-    if (r.error) return { error: "brew install failed: " + r.error };
-    if (r.code !== 0) return { error: "brew install whisper-cpp exited " + r.code + ": " + (r.stderr || "") };
-    return { ok: true };
+function exitedOk(r: ExecResult): boolean {
+  return !r.error && (r.code === undefined || r.code === 0);
+}
+
+// ── dependency bootstrap (detect-then-install) ───────────────────────
+
+// A binary is "present" if it runs from PATH, or if we already dropped it in binDir.
+function localBin(name: string): string {
+  return binDir() + "/" + name + exeSuffix();
+}
+
+function download(url: string, dest: string): Ensured {
+  host.makeDirs(dirOf(dest));
+  const r = exec({ bin: "curl", args: ["-fsSL", "-o", dest, url], timeoutMs: 1800000 });
+  if (!exitedOk(r)) {
+    return { error: "download failed (" + url + "): " + (r.stderr || r.error || "curl exit " + r.code) };
   }
+  return { ok: true };
+}
+
+function untar(archive: string, dest: string): Ensured {
+  host.makeDirs(dest);
+  // bsdtar (`tar`) ships on macOS, modern Windows, and Linux; it reads .zip, .tar.gz, .tar.xz.
+  const r = exec({ bin: "tar", args: ["-xf", archive, "-C", dest], timeoutMs: 600000 });
+  if (!exitedOk(r)) {
+    return { error: "extract failed (" + archive + "): " + (r.stderr || r.error || "tar exit " + r.code) };
+  }
+  return { ok: true };
+}
+
+function dirOf(p: string): string {
+  const i = p.lastIndexOf("/");
+  return i > 0 ? p.substring(0, i) : ".";
+}
+
+function ensureFfmpeg(): Resolved {
+  if (ranOk(exec({ bin: "ffmpeg", args: ["-version"] }))) return { bin: "ffmpeg" };
+  const local = localBin("ffmpeg");
+  if (host.fileExists(local)) return { bin: local };
+
+  const os = osKind();
+  if (os === "macos") {
+    const r = exec({ bin: "brew", args: ["install", "ffmpeg"], timeoutMs: 1800000 });
+    if (exitedOk(r) && ranOk(exec({ bin: "ffmpeg", args: ["-version"] }))) return { bin: "ffmpeg" };
+    return { error: "ffmpeg is required. Install it with `brew install ffmpeg`." };
+  }
+  if (os === "windows") {
+    const zip = baseDir() + "/ffmpeg.zip";
+    const dl = download(FFMPEG_WIN_ZIP, zip);
+    if ("error" in dl) return ffmpegManual(dl.error);
+    const ex = untar(zip, binDir());
+    if ("error" in ex) return ffmpegManual(ex.error);
+    host.removeFile(zip);
+    if (host.fileExists(local)) return { bin: local };
+    return ffmpegManual("ffmpeg binary not found after extraction");
+  }
+  // linux
+  const tar = baseDir() + "/ffmpeg.tar.xz";
+  const dl = download(FFMPEG_LINUX_TAR, tar);
+  if ("error" in dl) return ffmpegManual(dl.error);
+  const ex = untar(tar, binDir());
+  if ("error" in ex) return ffmpegManual(ex.error);
+  host.removeFile(tar);
+  if (host.fileExists(local)) return { bin: local };
+  return ffmpegManual("ffmpeg binary not found after extraction");
+}
+
+function ffmpegManual(why: string): Resolved {
   return {
     error:
-      "Auto-install runs on macOS (brew install whisper-cpp). On " +
-      plat +
-      ", install whisper.cpp's whisper-server yourself, then set the daemon URL.",
+      "ffmpeg is required to decode the audio but could not be installed automatically (" +
+      why +
+      "). Install ffmpeg from your package manager (e.g. `apt install ffmpeg`) or https://ffmpeg.org/download.html.",
   };
 }
 
-function ensureModel(): LifecycleResult {
+function ensureEngine(): Resolved {
+  if (ranOk(exec({ bin: "whisper-cli", args: ["--help"] }))) return { bin: "whisper-cli" };
+  const local = localBin("whisper-cli");
+  if (host.fileExists(local)) return { bin: local };
+
+  const os = osKind();
+  if (os === "macos") {
+    const r = exec({ bin: "brew", args: ["install", "whisper-cpp"], timeoutMs: 1800000 });
+    if (exitedOk(r) && ranOk(exec({ bin: "whisper-cli", args: ["--help"] }))) return { bin: "whisper-cli" };
+    return { error: "whisper-cli is required. Install it with `brew install whisper-cpp`." };
+  }
+  // Windows + Linux: prebuilt archives from the whisper.cpp GitHub release.
+  const asset = os === "windows" ? "whisper-bin-x64.zip" : "whisper-bin-Linux.zip";
+  const archive = baseDir() + "/whisper.zip";
+  const dl = download(WHISPER_BASE + "/" + asset, archive);
+  if ("error" in dl) return engineManual(os, dl.error);
+  const ex = untar(archive, binDir());
+  if ("error" in ex) return engineManual(os, ex.error);
+  host.removeFile(archive);
+  if (host.fileExists(local)) return { bin: local };
+  // Some archives nest the binary under Release/; fall back to a discovered path.
+  const nested = binDir() + "/Release/whisper-cli" + exeSuffix();
+  if (host.fileExists(nested)) return { bin: nested };
+  return engineManual(os, "whisper-cli not found after extraction");
+}
+
+function engineManual(os: string, why: string): Resolved {
+  return {
+    error:
+      "whisper-cli (whisper.cpp) is required but could not be installed automatically on " +
+      os +
+      " (" +
+      why +
+      "). Build/download whisper.cpp from https://github.com/ggerganov/whisper.cpp/releases and place `whisper-cli" +
+      exeSuffix() +
+      "` in " +
+      binDir() +
+      ".",
+  };
+}
+
+function ensureModel(): Ensured {
   const mp = modelPath();
-  if (host.fileExists(mp)) return { ok: true, path: mp };
-  host.makeDirs(modelDir());
+  if (host.fileExists(mp)) return { ok: true };
+  host.makeDirs(baseDir());
   const url =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-" + modelId() + ".bin";
-  const r = exec({ bin: "curl", args: ["-fsSL", "-o", mp, url] });
-  if (r.error || r.code !== 0) {
-    return { error: "model download failed: " + (r.stderr || r.error || "curl exit " + r.code) };
+  const dl = download(url, mp);
+  if ("error" in dl) {
+    return {
+      error:
+        "could not download the whisper model `ggml-" +
+        modelId() +
+        ".bin`: " +
+        dl.error +
+        ". Download it manually to " +
+        mp +
+        ".",
+    };
   }
-  return { ok: true, path: mp };
-}
-
-function install(): LifecycleResult {
-  if (isMesh()) return { ok: true };
-  const e = ensureEngine();
-  if ("error" in e) return e;
-  const m = ensureModel();
-  if ("error" in m) return m;
   return { ok: true };
 }
 
-function start(): LifecycleResult {
-  if (isMesh()) return { ok: true };
-  if (transcribeStatus().state === "ready") return { ok: true };
-  const mp = modelPath();
-  if (!host.fileExists(mp)) return { error: "model not installed — run Install first" };
-  const r = exec({
-    bin: "whisper-server",
-    args: ["-m", mp, "--host", "127.0.0.1", "--port", port()],
-    detach: true,
-    logFile: modelDir() + "/server.log",
-  });
-  if (r.error) return { error: "could not start whisper-server: " + r.error };
-  return { ok: true, pid: r.pid };
+// ── transcription (one-shot) ─────────────────────────────────────────
+
+function joinSegments(raw: string): string {
+  try {
+    const data = JSON.parse(raw) as { transcription?: { text?: unknown }[]; text?: unknown };
+    if (Array.isArray(data.transcription)) {
+      return data.transcription
+        .map((s) => (typeof s.text === "string" ? s.text : ""))
+        .join("")
+        .trim();
+    }
+    if (typeof data.text === "string") return data.text.trim();
+    return "";
+  } catch (e) {
+    return "";
+  }
 }
 
-function stop(): LifecycleResult {
-  if (isMesh()) return { ok: true };
-  exec({ bin: "pkill", args: ["-f", "whisper-server"] });
-  return { ok: true };
-}
-
-function ensureRunning(): void {
-  if (!isMesh() && transcribeStatus().state !== "ready") start();
-}
-
-// ── Transcription wire (called by JsTranscriber) ─────────────────────
-
-// path: absolute audio file path. lang: BCP-47 hint ("" = auto / plugin default).
+// path: absolute audio file. lang: BCP-47 hint ("" / undefined → settings / auto).
 function transcribe(path: string, lang?: string): TranscribeResult {
-  ensureRunning();
-  const body: { path: string; language?: string } = { path: path };
+  const ffmpeg = ensureFfmpeg();
+  if ("error" in ffmpeg) return { error: ffmpeg.error };
+  const engine = ensureEngine();
+  if ("error" in engine) return { error: engine.error };
+  const model = ensureModel();
+  if ("error" in model) return { error: model.error };
+
+  host.makeDirs(tmpDir());
+  const base = tmpDir() + "/job-" + host.unixNowMs();
+  const wav = base + ".wav";
+  const json = base + ".json";
+
+  const conv = exec({
+    bin: ffmpeg.bin,
+    args: ["-y", "-i", path, "-ar", "16000", "-ac", "1", "-f", "wav", wav],
+    timeoutMs: 120000,
+  });
+  if (!exitedOk(conv)) {
+    host.removeFile(wav);
+    return { error: "ffmpeg could not decode the audio: " + (conv.stderr || conv.error || "exit " + conv.code) };
+  }
+
   const l = lang && lang.length ? lang : language();
-  if (l) body.language = l;
-
-  const raw = host.fetch(JSON.stringify({
-    url: daemonUrl() + "/transcribe",
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-    timeoutMs: 60000,
-  }));
-
-  let res: FetchResult;
-  try {
-    res = JSON.parse(raw) as FetchResult;
-  } catch (e) {
-    return { error: "fetch returned non-JSON: " + e };
+  const tr = exec({
+    bin: engine.bin,
+    args: ["-m", modelPath(), "-f", wav, "-l", l, "-nt", "-oj", "-of", base],
+    timeoutMs: 600000,
+  });
+  if (!exitedOk(tr)) {
+    host.removeFile(wav);
+    host.removeFile(json);
+    return { error: "whisper-cli failed: " + (tr.stderr || tr.error || "exit " + tr.code) };
   }
-  if (res.error) return { error: res.error };
-  if (res.status && res.status >= 400) return { error: "transcribe HTTP " + res.status };
 
-  try {
-    const data = JSON.parse(res.body || "{}") as { text?: unknown };
-    return { text: typeof data.text === "string" ? data.text : "" };
-  } catch (e) {
-    return { error: "could not parse transcribe response: " + e };
-  }
+  const raw = host.readFile(json);
+  host.removeFile(wav);
+  host.removeFile(json);
+  if (!raw) return { error: "whisper-cli produced no transcript output" };
+  return { text: joinSegments(raw) };
+}
+
+function present(name: string): boolean {
+  if (ranOk(exec({ bin: name, args: name === "ffmpeg" ? ["-version"] : ["--help"] }))) return true;
+  return host.fileExists(localBin(name));
 }
 
 function transcribeStatus(): StatusResult {
-  const raw = host.fetch(JSON.stringify({
-    url: daemonUrl() + "/healthz",
-    method: "GET",
-    timeoutMs: 5000,
-  }));
-  try {
-    const res = JSON.parse(raw) as FetchResult;
-    if (res.error) return { state: "unavailable", reason: res.error };
-    if (res.status && res.status >= 400) return { state: "unavailable", reason: "HTTP " + res.status };
-    return { state: "ready" };
-  } catch (e) {
-    return { state: "unavailable", reason: String(e) };
-  }
+  if (!host.homeDir()) return { state: "unavailable", reason: "no home directory" };
+  const hasFfmpeg = present("ffmpeg");
+  const hasEngine = present("whisper-cli");
+  const hasModel = host.fileExists(modelPath());
+  if (hasFfmpeg && hasEngine && hasModel) return { state: "ready" };
+
+  const missing: string[] = [];
+  if (!hasEngine) missing.push("whisper-cli");
+  if (!hasFfmpeg) missing.push("ffmpeg");
+  if (!hasModel) missing.push("model ggml-" + modelId() + ".bin");
+  return { state: "unloaded", reason: "needs: " + missing.join(", ") + " (installed on first use)" };
 }
 
-// ── Glance (peek + lifecycle actions) ────────────────────────────────
+// ── glance (status + a manual pre-warm button) ───────────────────────
 
 function renderGlance(): GlanceView {
-  const up = transcribeStatus().state === "ready";
-  const installed = host.fileExists(modelPath());
+  const st = transcribeStatus();
+  const ready = st.state === "ready";
   const nodes: ViewNode[] = [];
-
-  if (isMesh()) {
-    nodes.push({ kind: "badge", label: up ? "Peer up" : "Peer down", tone: up ? "ok" : "danger" });
-    nodes.push({ kind: "keyVal", key: "Engine", value: "Mesh peer" });
-    nodes.push({ kind: "keyVal", key: "Daemon", value: daemonUrl() });
-    nodes.push({ kind: "divider" });
-    nodes.push({ kind: "button", label: "Settings", action: "settings" });
-    return { title: "Transcriber", nodes: nodes };
-  }
-
   nodes.push({
     kind: "badge",
-    label: up ? "Engine up" : installed ? "Stopped" : "Not installed",
-    tone: up ? "ok" : installed ? "warn" : "danger",
+    label: ready ? "Ready" : st.state === "unavailable" ? "Unavailable" : "Not set up",
+    tone: ready ? "ok" : st.state === "unavailable" ? "danger" : "warn",
   });
-  nodes.push({ kind: "keyVal", key: "Model", value: modelId() });
-  nodes.push({ kind: "keyVal", key: "Daemon", value: daemonUrl() });
+  nodes.push({ kind: "keyVal", key: "Model", value: "ggml-" + modelId() });
+  nodes.push({ kind: "keyVal", key: "Language", value: language() });
+  if (st.reason) nodes.push({ kind: "note", body: st.reason });
   nodes.push({ kind: "divider" });
-  if (!installed) {
-    nodes.push({ kind: "button", label: "Install engine + model", action: "install" });
-  } else if (!up) {
-    nodes.push({ kind: "button", label: "Start engine", action: "start" });
-  } else {
-    nodes.push({
-      kind: "row",
-      style: { spacing: "sm" },
-      children: [
-        { kind: "button", label: "Restart", action: "restart" },
-        { kind: "button", label: "Stop", action: "stop", style: { tone: "danger" } },
-      ],
-    });
-  }
+  if (!ready) nodes.push({ kind: "button", label: "Set up engine + model", action: "install" });
   nodes.push({ kind: "button", label: "Settings", action: "settings" });
-  return { title: "Transcriber", nodes: nodes };
+  return { title: "Transcriber", nodes };
 }
 
 function glanceAction(action: string): GlanceView {
-  if (action === "install") install();
-  else if (action === "start") start();
-  else if (action === "stop") stop();
-  else if (action === "restart") { stop(); start(); }
+  if (action === "install") {
+    ensureFfmpeg();
+    ensureEngine();
+    ensureModel();
+  }
   return renderGlance();
 }
 
