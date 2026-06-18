@@ -75,6 +75,15 @@ const DEFAULT_BASE_URL = "http://localhost:1234";
 const MAX_TOOL_ROUNDS = 8;
 const TOOL_FENCE_RE = /```codeterm-tool\s*\n([\s\S]*?)\n?```/g;
 
+// System prompts are not a valid ChatMessageKind — they ride on a type:'user'
+// message wrapped in this CodeTerm marker (twin of chat-core's markSystemPrompt
+// / buildMarker("system_prompt", [], body)). chatPrefixes detects the marker and
+// renders the collapsible 'System prompt' card.
+const SYSTEM_PROMPT_MARKER = "-=-codeterm:system_prompt-=-";
+function markSystemPrompt(body: string): string {
+  return SYSTEM_PROMPT_MARKER + body;
+}
+
 const sessions = new Map<string, Session>();
 
 function readSettings(): LmStudioSettings {
@@ -118,8 +127,18 @@ function nextId(s: Session, prefix = "lmstudio"): string {
   return id;
 }
 
+// UPSERT by id: a streaming assistant/reasoning message keeps a single stable
+// id and grows across chunks. If an entry with that id already exists, replace
+// its content in place; otherwise push. This makes per-chunk duplicates
+// structurally impossible while keeping poll(sid, cursor) returning clean deltas.
 function append(s: Session, type: string, content: string, id?: string): NormalizedChatMessage {
-  const msg = { id: id || nextId(s), type, content };
+  const msgId = id || nextId(s);
+  const existing = s.messages.find((m) => m.id === msgId);
+  if (existing) {
+    existing.content = content;
+    return existing;
+  }
+  const msg = { id: msgId, type, content };
   s.messages.push(msg);
   return msg;
 }
@@ -358,6 +377,9 @@ function assembledContext(s: Session): string {
         prior[assistantIndex[m.id]].line = `assistant: ${m.content}`;
       }
     } else if (m.type === "user" || m.type === "tool_result") {
+      // The seeded system-prompt marker rides on a user message but is already
+      // conveyed via body.system_prompt — don't duplicate it into the context.
+      if (m.type === "user" && m.content.indexOf(SYSTEM_PROMPT_MARKER) === 0) continue;
       prior.push({ id: m.id, line: `${m.type}: ${m.content}` });
     }
   }
@@ -479,8 +501,10 @@ function pollStream(s: Session): void {
   }
   if (poll.done) parseSse(stream, true);
 
-  // Surface reasoning as its own growing entry; never fold it into the answer.
-  if (stream.reasoning) append(s, "reasoning", stream.reasoning, stream.reasoningId);
+  // Surface reasoning as its own growing 'thinking' entry (a valid
+  // ChatMessageKind rendered as a collapsed thinking block); never fold it into
+  // the answer. The answer rides on type:'assistant'.
+  if (stream.reasoning) append(s, "thinking", stream.reasoning, stream.reasoningId);
   if (stream.content) append(s, "assistant", stream.content, stream.messageId);
 
   if (poll.done) {
@@ -515,7 +539,7 @@ const plugin: ChatBackend = {
   openSession(ctx) {
     const sid = ctx.paneId;
     const s = resolveSession(ctx);
-    if (s.systemPrompt) append(s, "system_prompt", s.systemPrompt, "system-prompt");
+    if (s.systemPrompt) append(s, "user", markSystemPrompt(s.systemPrompt), "system-prompt");
     sessions.set(sid, s);
     return { sessionId: sid };
   },
@@ -542,9 +566,22 @@ const plugin: ChatBackend = {
     const s = sessions.get(sid);
     if (!s) return { messages: [], cursor: cursor ?? "0", done: true };
     const from = Number(cursor ?? 0) || 0;
+    // While a stream is live, its assistant/thinking entries grow in place (see
+    // append upsert). Pin the cursor at the lowest live entry's index so the
+    // next poll re-reads the grown content instead of slicing past it.
+    let liveFrom = -1;
+    if (s.stream) {
+      for (let i = 0; i < s.messages.length; i += 1) {
+        if (s.messages[i].id === s.stream.messageId || s.messages[i].id === s.stream.reasoningId) {
+          liveFrom = i;
+          break;
+        }
+      }
+    }
+    const nextCursor = liveFrom >= 0 ? liveFrom : s.messages.length;
     return {
       messages: s.messages.slice(from),
-      cursor: String(s.messages.length),
+      cursor: String(nextCursor),
       done: s.done && !s.stream && s.pendingInputs.length === 0,
     };
   },

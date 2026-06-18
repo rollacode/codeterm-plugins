@@ -116,7 +116,7 @@ function turn(answer, responseId) {
   return msg(answer) + chatEnd(responseId);
 }
 
-test("openSession with systemPrompt seeds a system_prompt message", () => {
+test("openSession seeds the system prompt as a user message carrying the system_prompt marker", () => {
   reset({ baseUrl: "http://localhost:1234", defaultPreset: "codeterm", presets: [] });
   const r = plugin.openSession({
     paneId: "pane-system",
@@ -128,8 +128,18 @@ test("openSession with systemPrompt seeds a system_prompt message", () => {
 
   const p = plugin.poll("pane-system", null);
   assert(p.messages.length === 1, "one seed message, got " + p.messages.length);
-  assert(p.messages[0].type === "system_prompt", "seed type, got " + p.messages[0].type);
-  assert(p.messages[0].content === "You answer only in rhymes.", "seed content");
+  // H1: system_prompt is not a valid ChatMessageKind — it must ride on a
+  // type:'user' message via the -=-codeterm:system_prompt-=- marker so the
+  // chatPrefixes detector renders the collapsible 'System prompt' card.
+  assert(p.messages[0].type === "user", "seed type is user, got " + p.messages[0].type);
+  assert(
+    p.messages[0].content.startsWith("-=-codeterm:system_prompt-=-"),
+    "seed carries the system_prompt marker, got " + p.messages[0].content,
+  );
+  assert(
+    p.messages[0].content.includes("You answer only in rhymes."),
+    "seed payload is the system prompt body",
+  );
 });
 
 test("sendMessage sends stream:true and streams a growing assistant message with one stable id", () => {
@@ -181,7 +191,7 @@ test("sendMessage sends stream:true and streams a growing assistant message with
   assert(streamJobs[0].closed === true, "stream closed");
 });
 
-test("reasoning deltas are surfaced separately, never mixed into the answer", () => {
+test("reasoning is surfaced as a type:'thinking' message, never mixed into the answer", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({ paneId: "reason", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("reason", "think then answer");
@@ -210,9 +220,39 @@ test("reasoning deltas are surfaced separately, never mixed into the answer", ()
   assert(assistants[assistants.length - 1] === "Final answer.", "answer is clean, got " + assistants[assistants.length - 1]);
   assert(!/Let me think/.test(assistants[assistants.length - 1]), "reasoning not mixed into answer");
 
-  const reasonings = contents(p.messages, "reasoning");
-  assert(reasonings.length >= 1, "reasoning surfaced as its own entry");
-  assert(reasonings[reasonings.length - 1] === "Let me think.", "reasoning text captured, got " + reasonings[reasonings.length - 1]);
+  // H1: 'reasoning' is not a valid ChatMessageKind; 'thinking' is rendered by
+  // MessageBubble as a collapsed thinking block.
+  assert(contents(p.messages, "reasoning").length === 0, "no invalid 'reasoning' kind emitted");
+  const thinking = contents(p.messages, "thinking");
+  assert(thinking.length >= 1, "reasoning surfaced as a thinking entry");
+  assert(thinking[thinking.length - 1] === "Let me think.", "thinking text captured, got " + thinking[thinking.length - 1]);
+});
+
+test("append upserts by id: streaming reasoning+answer collapse to exactly one entry each", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "upsert", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("upsert", "go");
+
+  // Reasoning and answer each arrive across multiple poll cycles. The buggy
+  // append() pushed a fresh entry per chunk (measured 31x); upsert-by-id must
+  // keep exactly one growing entry whose content is replaced in place.
+  enqueueStream(0, [
+    { chunks: [reasoning("a")], done: false, status: 200 },
+    { chunks: [reasoning("b")], done: false, status: 200 },
+    { chunks: [reasoning("c") + msg("X")], done: false, status: 200 },
+    { chunks: [msg("Y")], done: false, status: 200 },
+    { chunks: [msg("Z") + chatEnd("resp-upsert")], done: true, status: 200 },
+  ]);
+  for (let i = 0; i < 7; i += 1) plugin.pump("upsert");
+
+  const p = plugin.poll("upsert", null);
+  const thinking = p.messages.filter((m) => m.type === "thinking");
+  const assistant = p.messages.filter((m) => m.type === "assistant");
+  assert(thinking.length === 1, "exactly one thinking entry across chunks, got " + thinking.length);
+  assert(thinking[0].content === "abc", "thinking content replaced in place, got " + thinking[0].content);
+  assert(assistant.length === 1, "exactly one assistant entry across chunks, got " + assistant.length);
+  assert(assistant[0].content === "XYZ", "assistant content replaced in place, got " + assistant[0].content);
+  assert(p.done === true, "turn done");
 });
 
 test("empty model auto-resolves to first loaded model via /api/v1/models and caches it", () => {
