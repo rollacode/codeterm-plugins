@@ -77,7 +77,7 @@ const indexOfCall = (pred) => execCalls.findIndex(pred);
 
 test("deps present + model present: transcribe installs nothing (no brew/curl)", () => {
   reset({}, "macos");
-  files[MODEL] = "x"; // model already downloaded
+  files[MODEL] = "x"; files[MODEL + ".done"] = "x"; // model already downloaded
   execHandler = happyHandler(["hello world"]);
 
   const r = plugin.transcribe("/tmp/note.oga");
@@ -89,9 +89,23 @@ test("deps present + model present: transcribe installs nothing (no brew/curl)",
     JSON.stringify(execCalls.map((c) => c.bin)));
 });
 
+test("poison partial: model file present but no .done sentinel → re-downloads (not trusted)", () => {
+  reset({}, "macos");
+  files[MODEL] = "partial-30mb"; // an interrupted download left a truncated file, no .done
+  execHandler = happyHandler(["recovered"]);
+
+  const r = plugin.transcribe("/tmp/note.oga");
+  assert(!r.error, "should recover, got " + JSON.stringify(r));
+  // It must re-download (curl) rather than feed whisper-cli the truncated model.
+  const reDownloaded = execCalls.some((c) => c.bin === "curl");
+  assert(reDownloaded, "must re-download when .done sentinel is missing; calls=" +
+    JSON.stringify(execCalls.map((c) => c.bin)));
+  assert(files[MODEL + ".done"] !== undefined, "writes .done sentinel after a successful download");
+});
+
 test("transcribe pipeline: ffmpeg converts to 16k wav BEFORE whisper-cli, json joined", () => {
   reset({}, "macos");
-  files[MODEL] = "x";
+  files[MODEL] = "x"; files[MODEL + ".done"] = "x";
   execHandler = happyHandler(["one ", "two"]);
 
   const r = plugin.transcribe("/tmp/note.webm");
@@ -111,7 +125,7 @@ test("transcribe pipeline: ffmpeg converts to 16k wav BEFORE whisper-cli, json j
 
 test("language: explicit arg wins, else settings.language, else auto", () => {
   reset({ language: "ru" }, "macos");
-  files[MODEL] = "x";
+  files[MODEL] = "x"; files[MODEL + ".done"] = "x";
   execHandler = happyHandler(["x"]);
   plugin.transcribe("/tmp/a.oga");
   let w = execCalls.find((c) => /whisper-cli/.test(c.bin) && (c.args || []).indexOf("-l") >= 0);
@@ -119,7 +133,7 @@ test("language: explicit arg wins, else settings.language, else auto", () => {
   assert(w.args[li + 1] === "ru", "settings language used, got " + w.args[li + 1]);
 
   reset({ language: "ru" }, "macos");
-  files[MODEL] = "x";
+  files[MODEL] = "x"; files[MODEL + ".done"] = "x";
   execHandler = happyHandler(["x"]);
   plugin.transcribe("/tmp/a.oga", "de");
   w = execCalls.find((c) => /whisper-cli/.test(c.bin) && (c.args || []).indexOf("-l") >= 0);
@@ -127,7 +141,7 @@ test("language: explicit arg wins, else settings.language, else auto", () => {
   assert(w.args[li + 1] === "de", "explicit arg wins, got " + w.args[li + 1]);
 
   reset({}, "macos");
-  files[MODEL] = "x";
+  files[MODEL] = "x"; files[MODEL + ".done"] = "x";
   execHandler = happyHandler(["x"]);
   plugin.transcribe("/tmp/a.oga");
   w = execCalls.find((c) => /whisper-cli/.test(c.bin) && (c.args || []).indexOf("-l") >= 0);
@@ -148,7 +162,7 @@ test("missing deps that cannot be installed: clear actionable error", () => {
 
 test("transcribeStatus: ready when deps+model present, unloaded otherwise", () => {
   reset({}, "macos");
-  files[MODEL] = "x";
+  files[MODEL] = "x"; files[MODEL + ".done"] = "x";
   execHandler = () => JSON.stringify({ code: 0 }); // probes succeed
   let s = plugin.transcribeStatus();
   assert(s.state === "ready", "ready when all present, got " + JSON.stringify(s));

@@ -233,12 +233,21 @@ function engineManual(os: string, why: string): Resolved {
 
 function ensureModel(): Ensured {
   const mp = modelPath();
-  if (host.fileExists(mp)) return { ok: true };
+  const done = mp + ".done";
+  // Only trust a model whose download fully completed. The .done sentinel is
+  // written after curl exits 0; a killed/interrupted download leaves a partial
+  // mp WITHOUT the sentinel, which we detect, discard, and re-download. Without
+  // this, an interrupted download poisons mp permanently — every later transcribe
+  // feeds whisper-cli a truncated model and hangs.
+  if (host.fileExists(mp) && host.fileExists(done)) return { ok: true };
+  host.removeFile(mp);
+  host.removeFile(done);
   host.makeDirs(baseDir());
   const url =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-" + modelId() + ".bin";
   const dl = download(url, mp);
   if ("error" in dl) {
+    host.removeFile(mp);
     return {
       error:
         "could not download the whisper model `ggml-" +
@@ -250,6 +259,7 @@ function ensureModel(): Ensured {
         ".",
     };
   }
+  host.writeFile(done, "");
   return { ok: true };
 }
 

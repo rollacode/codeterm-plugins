@@ -167,15 +167,20 @@ function engineManual(os, why) {
 }
 function ensureModel() {
   const mp = modelPath();
-  if (host.fileExists(mp)) return { ok: true };
+  const done = mp + ".done";
+  if (host.fileExists(mp) && host.fileExists(done)) return { ok: true };
+  host.removeFile(mp);
+  host.removeFile(done);
   host.makeDirs(baseDir());
   const url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-" + modelId() + ".bin";
   const dl = download(url, mp);
   if ("error" in dl) {
+    host.removeFile(mp);
     return {
       error: "could not download the whisper model `ggml-" + modelId() + ".bin`: " + dl.error + ". Download it manually to " + mp + "."
     };
   }
+  host.writeFile(done, "");
   return { ok: true };
 }
 function joinSegments(raw) {
