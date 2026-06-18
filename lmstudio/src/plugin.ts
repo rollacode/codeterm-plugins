@@ -74,6 +74,36 @@ interface StreamPoll {
 const DEFAULT_BASE_URL = "http://localhost:1234";
 const MAX_TOOL_ROUNDS = 8;
 const TOOL_FENCE_RE = /```codeterm-tool\s*\n([\s\S]*?)\n?```/g;
+// The 6 curated tools — the only names we will ever execute. A native or fenced
+// call to anything else is rejected (executeTool's default surfaces an error).
+const CURATED_TOOLS = ["exec", "read_file", "write_file", "codeterm", "mem_search", "spawn_agent"];
+// gemma-style native tool calls: a wrapper token (<|tool_call>, <tool_call|>,
+// <|tool_call|>) plus a `call:NAME{args}` payload. We strip the wrapper tokens
+// for display and parse the call:NAME{...} shape (args may be loose JS-object
+// syntax: unquoted keys, single quotes).
+const NATIVE_WRAPPER_RE = /<\s*\|?\s*(?:tool_call|tool▁call)\s*\|?\s*>/gi;
+const NATIVE_CALL_RE = /call\s*[:=]\s*([A-Za-z_][A-Za-z0-9_]*)\s*(\{[\s\S]*?\})/g;
+// Native arg aliases mapped to our curated arg names (gemma emits `command`).
+const NATIVE_ARG_ALIASES: Record<string, Record<string, string>> = {
+  exec: { command: "cmd" },
+  codeterm: { command: "args", cmd: "args" },
+};
+
+// Canonical JSON (sorted keys) so the documented system-prompt example can be
+// recognized regardless of whitespace/key order and never executed.
+function canonicalJson(v: unknown): string {
+  if (v === null || typeof v !== "object") return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+  const obj = v as Record<string, unknown>;
+  return `{${Object.keys(obj)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`)
+    .join(",")}}`;
+}
+const DOCUMENTED_EXAMPLE_CANON = canonicalJson({ tool: "exec", args: { cmd: "codeterm pane list" } });
+function isDocumentedExample(call?: ToolCall): boolean {
+  return !!call && canonicalJson({ tool: call.tool, args: call.args }) === DOCUMENTED_EXAMPLE_CANON;
+}
 
 // System prompts are not a valid ChatMessageKind — they ride on a type:'user'
 // message wrapped in this CodeTerm marker (twin of chat-core's markSystemPrompt
@@ -244,18 +274,35 @@ function parseToolJson(raw: string): ToolParseEntry {
   }
 }
 
-function parseTrailingToolEntries(text: string): ToolParseEntry[] {
-  const matches: { start: number; end: number; body: string }[] = [];
+interface ToolMatch {
+  start: number;
+  end: number;
+  entry: ToolParseEntry;
+}
+
+interface ParsedTools {
+  entries: ToolParseEntry[];
+  cleaned: string;
+}
+
+function collectFenceMatches(text: string): ToolMatch[] {
+  const matches: ToolMatch[] = [];
   TOOL_FENCE_RE.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = TOOL_FENCE_RE.exec(text)) !== null) {
-    matches.push({ start: match.index, end: match.index + match[0].length, body: match[1] });
+    matches.push({ start: match.index, end: match.index + match[0].length, entry: parseToolJson(match[1]) });
   }
+  return matches;
+}
+
+// The trailing contiguous fence group: starting from the last fence, include any
+// immediately preceding fences separated from it only by whitespace. Trailing
+// prose AFTER the last fence is now allowed (relaxed from the old strictly-
+// trailing guard) — gemma frequently appends a sentence after a real tool call.
+// A fence separated from the trailing group by prose is treated as illustrative
+// and not executed.
+function trailingFenceGroup(text: string, matches: ToolMatch[]): ToolMatch[] {
   if (!matches.length) return [];
-
-  const last = matches[matches.length - 1];
-  if (text.slice(last.end).trim() !== "") return [];
-
   let firstTrailing = matches.length - 1;
   while (firstTrailing > 0) {
     const prev = matches[firstTrailing - 1];
@@ -263,8 +310,96 @@ function parseTrailingToolEntries(text: string): ToolParseEntry[] {
     if (text.slice(prev.end, next.start).trim() !== "") break;
     firstTrailing -= 1;
   }
+  return matches.slice(firstTrailing);
+}
 
-  return matches.slice(firstTrailing).map((m) => parseToolJson(m.body));
+// Parse a brace-delimited args object, tolerating loose JS-object syntax that
+// native models emit (bare keys, single quotes) by coercing to JSON.
+function parseLooseObject(raw: string): Record<string, unknown> | null {
+  const attempt = (s: string): Record<string, unknown> | null => {
+    try {
+      const v = JSON.parse(s) as unknown;
+      return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  };
+  const direct = attempt(raw);
+  if (direct) return direct;
+  const coerced = raw
+    .replace(/([{,]\s*)([A-Za-z_$][A-Za-z0-9_$]*)(\s*:)/g, '$1"$2"$3')
+    .replace(/'/g, '"');
+  return attempt(coerced);
+}
+
+function applyArgAliases(tool: string, args: Record<string, unknown>): Record<string, unknown> {
+  const aliases = NATIVE_ARG_ALIASES[tool];
+  if (!aliases) return args;
+  const out: Record<string, unknown> = { ...args };
+  for (const from of Object.keys(aliases)) {
+    const to = aliases[from];
+    if (out[to] === undefined && out[from] !== undefined) out[to] = out[from];
+  }
+  return out;
+}
+
+// Recognize native model tool-call wrappers — at minimum gemma's
+// `<|tool_call>call:NAME{args}<tool_call|>`. We only ever map to the curated
+// tool set; unknown native names surface a clear error via executeTool.
+function collectNativeMatches(text: string): ToolMatch[] {
+  const matches: ToolMatch[] = [];
+  NATIVE_CALL_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = NATIVE_CALL_RE.exec(text)) !== null) {
+    const tool = match[1];
+    let start = match.index;
+    let end = match.index + match[0].length;
+    // Swallow adjacent wrapper tokens so stripping leaves no `<|tool_call>` residue.
+    const wrapBefore = text.slice(0, start).match(/<\s*\|?\s*(?:tool_call|tool▁call)\s*\|?\s*>\s*$/i);
+    if (wrapBefore) start -= wrapBefore[0].length;
+    const wrapAfter = text.slice(end).match(/^\s*<\s*\|?\s*(?:tool_call|tool▁call)\s*\|?\s*>/i);
+    if (wrapAfter) end += wrapAfter[0].length;
+    const parsed = parseLooseObject(match[2]);
+    if (!parsed) {
+      matches.push({ start, end, entry: { raw: match[0], error: "native tool-call args not parseable" } });
+      continue;
+    }
+    matches.push({ start, end, entry: { raw: match[0], call: { tool, args: applyArgAliases(tool, parsed) } } });
+  }
+  return matches;
+}
+
+// Remove the given (executed) spans from the displayed text and tidy whitespace,
+// so the user sees clean prose + the tool card instead of the raw call syntax.
+function stripSpans(text: string, spans: { start: number; end: number }[]): string {
+  if (!spans.length) return text;
+  const ordered = [...spans].sort((a, b) => a.start - b.start);
+  let out = "";
+  let cursor = 0;
+  for (const s of ordered) {
+    if (s.start < cursor) continue;
+    out += text.slice(cursor, s.start);
+    cursor = s.end;
+  }
+  out += text.slice(cursor);
+  return out.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// Unified tool-call extraction. Prefer our fenced format (trailing contiguous
+// group, with the documented example never executed and never stripped). If no
+// fenced call is present, fall back to native model wrappers.
+function parseToolEntries(text: string): ParsedTools {
+  const fenceTools = trailingFenceGroup(text, collectFenceMatches(text)).filter(
+    (m) => !isDocumentedExample(m.entry.call),
+  );
+  if (fenceTools.length) {
+    return { entries: fenceTools.map((m) => m.entry), cleaned: stripSpans(text, fenceTools) };
+  }
+  const nativeTools = collectNativeMatches(text).filter((m) => !isDocumentedExample(m.entry.call));
+  if (nativeTools.length) {
+    return { entries: nativeTools.map((m) => m.entry), cleaned: stripSpans(text, nativeTools) };
+  }
+  return { entries: [], cleaned: text };
 }
 
 function executeTool(call: ToolCall): unknown {
@@ -436,14 +571,22 @@ function startNextIfIdle(s: Session): void {
   }
 }
 
-function finishAssistantMessage(s: Session, content: string, responseId: string | null): void {
+function finishAssistantMessage(
+  s: Session,
+  content: string,
+  responseId: string | null,
+  messageId: string,
+): void {
   if (responseId) s.previousResponseId = responseId;
 
-  const entries = parseTrailingToolEntries(content);
+  const { entries, cleaned } = parseToolEntries(content);
   if (!entries.length) {
     s.done = true;
     return;
   }
+  // Strip the executed tool-call syntax from the displayed assistant bubble so
+  // the user sees clean prose + the tool card, not the raw fence/native wrapper.
+  if (cleaned !== content) append(s, "assistant", cleaned, messageId);
 
   for (const entry of entries) {
     if (entry.error || !entry.call) {
@@ -510,7 +653,7 @@ function pollStream(s: Session): void {
   if (poll.done) {
     host.fetchStreamClose(stream.jobId);
     s.stream = null;
-    finishAssistantMessage(s, stream.content, stream.responseId);
+    finishAssistantMessage(s, stream.content, stream.responseId, stream.messageId);
   }
 }
 

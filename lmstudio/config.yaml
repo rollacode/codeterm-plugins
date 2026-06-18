@@ -56,6 +56,8 @@ presets:
       ```
       ````
 
+      **This fenced ` ```codeterm-tool ` block is the ONLY format the host parses.** Do NOT use your model's built-in / native tool-call syntax — e.g. `<|tool_call|>`, `call:NAME{...}`, `<tool_call>`, JSON `tool_calls` arrays, or any function-calling wrapper. Those are ignored unless they can be recovered, and the raw text will leak into your answer. Always emit the exact fenced block above with strict JSON (double-quoted keys and strings). Put it at the very end of your message.
+
       No fence = your message is the final answer; the loop stops.
 
       ### Curated tool set
