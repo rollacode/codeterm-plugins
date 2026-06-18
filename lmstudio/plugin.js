@@ -117,19 +117,40 @@ function execShell(cmd, cwd) {
 function formatToolResult(call, result) {
   return JSON.stringify({ tool: call.tool, args: call.args, result }, null, 2);
 }
-function parseToolCalls(text) {
-  const calls = [];
+function parseToolJson(raw) {
+  try {
+    const parsed = JSON.parse(raw.trim());
+    if (!parsed || typeof parsed !== "object") {
+      return { raw, error: "tool JSON must be an object" };
+    }
+    const obj = parsed;
+    if (typeof obj.tool !== "string") {
+      return { raw, error: "tool JSON requires string field `tool`" };
+    }
+    const args = obj.args && typeof obj.args === "object" ? obj.args : {};
+    return { raw, call: { tool: obj.tool, args } };
+  } catch (e) {
+    return { raw, error: `tool JSON parse error: ${String(e)}` };
+  }
+}
+function parseTrailingToolEntries(text) {
+  const matches = [];
   TOOL_FENCE_RE.lastIndex = 0;
   let match;
   while ((match = TOOL_FENCE_RE.exec(text)) !== null) {
-    const parsed = parseJson(match[1].trim(), null);
-    if (!parsed || typeof parsed !== "object") continue;
-    const obj = parsed;
-    if (typeof obj.tool !== "string") continue;
-    const args = obj.args && typeof obj.args === "object" ? obj.args : {};
-    calls.push({ tool: obj.tool, args });
+    matches.push({ start: match.index, end: match.index + match[0].length, body: match[1] });
   }
-  return calls;
+  if (!matches.length) return [];
+  const last = matches[matches.length - 1];
+  if (text.slice(last.end).trim() !== "") return [];
+  let firstTrailing = matches.length - 1;
+  while (firstTrailing > 0) {
+    const prev = matches[firstTrailing - 1];
+    const next = matches[firstTrailing];
+    if (text.slice(prev.end, next.start).trim() !== "") break;
+    firstTrailing -= 1;
+  }
+  return matches.slice(firstTrailing).map((m) => parseToolJson(m.body));
 }
 function executeTool(call) {
   switch (call.tool) {
@@ -193,12 +214,20 @@ function extractResponseId(poll, content) {
 }
 function assembledContext(s) {
   const prior = [];
+  const assistantIndex = {};
   for (const m of s.messages) {
-    if (m.type === "user" || m.type === "assistant" || m.type === "tool_result") {
-      prior.push(`${m.type}: ${m.content}`);
+    if (m.type === "assistant") {
+      if (assistantIndex[m.id] === void 0) {
+        assistantIndex[m.id] = prior.length;
+        prior.push({ id: m.id, line: `assistant: ${m.content}` });
+      } else {
+        prior[assistantIndex[m.id]].line = `assistant: ${m.content}`;
+      }
+    } else if (m.type === "user" || m.type === "tool_result") {
+      prior.push({ id: m.id, line: `${m.type}: ${m.content}` });
     }
   }
-  return prior.join("\n\n");
+  return prior.map((m) => m.line).join("\n\n");
 }
 function startLmStudioCall(s, input) {
   const needsFallbackContext = !s.previousResponseId && s.messages.some((m) => m.type === "assistant" || m.type === "tool_result");
@@ -230,14 +259,30 @@ function startNextIfIdle(s) {
 function finishAssistantMessage(s, content, poll) {
   const responseId = extractResponseId(poll, content);
   if (responseId) s.previousResponseId = responseId;
-  const calls = parseToolCalls(content);
-  if (!calls.length) {
+  const entries = parseTrailingToolEntries(content);
+  if (!entries.length) {
     s.done = true;
     return;
   }
-  for (const call of calls) {
+  for (const entry of entries) {
+    if (entry.error || !entry.call) {
+      const formatted2 = JSON.stringify(
+        { tool: "parse_error", error: entry.error || "invalid tool call", raw: entry.raw },
+        null,
+        2
+      );
+      append(s, "tool_result", formatted2);
+      s.pendingInputs.push(`tool_result:
+${formatted2}`);
+      continue;
+    }
+    const call = entry.call;
     if (s.toolRounds >= MAX_TOOL_ROUNDS) {
-      append(s, "system", `Tool round cap (${MAX_TOOL_ROUNDS}) reached; stopping this turn.`);
+      s.pendingInputs = [];
+      if (!s.capReached) {
+        append(s, "system", `Tool round cap (${MAX_TOOL_ROUNDS}) reached; stopping this turn.`);
+        s.capReached = true;
+      }
       s.done = true;
       return;
     }
@@ -298,7 +343,8 @@ function resolveSession(ctx) {
     pendingInputs: [],
     stream: null,
     done: true,
-    toolRounds: 0
+    toolRounds: 0,
+    capReached: false
   };
 }
 var plugin = {
@@ -314,6 +360,7 @@ var plugin = {
     if (!s) return;
     append(s, "user", text);
     s.toolRounds = 0;
+    s.capReached = false;
     s.done = false;
     s.pendingInputs.push(text);
     startNextIfIdle(s);

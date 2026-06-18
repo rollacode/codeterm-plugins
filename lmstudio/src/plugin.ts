@@ -45,11 +45,18 @@ interface Session {
   stream: StreamState | null;
   done: boolean;
   toolRounds: number;
+  capReached: boolean;
 }
 
 interface ToolCall {
   tool: string;
   args: Record<string, unknown>;
+}
+
+interface ToolParseEntry {
+  call?: ToolCall;
+  error?: string;
+  raw: string;
 }
 
 interface StreamPoll {
@@ -181,19 +188,44 @@ function formatToolResult(call: ToolCall, result: unknown): string {
   return JSON.stringify({ tool: call.tool, args: call.args, result }, null, 2);
 }
 
-function parseToolCalls(text: string): ToolCall[] {
-  const calls: ToolCall[] = [];
+function parseToolJson(raw: string): ToolParseEntry {
+  try {
+    const parsed = JSON.parse(raw.trim()) as unknown;
+    if (!parsed || typeof parsed !== "object") {
+      return { raw, error: "tool JSON must be an object" };
+    }
+    const obj = parsed as { tool?: unknown; args?: unknown };
+    if (typeof obj.tool !== "string") {
+      return { raw, error: "tool JSON requires string field `tool`" };
+    }
+    const args = obj.args && typeof obj.args === "object" ? (obj.args as Record<string, unknown>) : {};
+    return { raw, call: { tool: obj.tool, args } };
+  } catch (e) {
+    return { raw, error: `tool JSON parse error: ${String(e)}` };
+  }
+}
+
+function parseTrailingToolEntries(text: string): ToolParseEntry[] {
+  const matches: { start: number; end: number; body: string }[] = [];
   TOOL_FENCE_RE.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = TOOL_FENCE_RE.exec(text)) !== null) {
-    const parsed = parseJson<unknown>(match[1].trim(), null);
-    if (!parsed || typeof parsed !== "object") continue;
-    const obj = parsed as { tool?: unknown; args?: unknown };
-    if (typeof obj.tool !== "string") continue;
-    const args = obj.args && typeof obj.args === "object" ? (obj.args as Record<string, unknown>) : {};
-    calls.push({ tool: obj.tool, args });
+    matches.push({ start: match.index, end: match.index + match[0].length, body: match[1] });
   }
-  return calls;
+  if (!matches.length) return [];
+
+  const last = matches[matches.length - 1];
+  if (text.slice(last.end).trim() !== "") return [];
+
+  let firstTrailing = matches.length - 1;
+  while (firstTrailing > 0) {
+    const prev = matches[firstTrailing - 1];
+    const next = matches[firstTrailing];
+    if (text.slice(prev.end, next.start).trim() !== "") break;
+    firstTrailing -= 1;
+  }
+
+  return matches.slice(firstTrailing).map((m) => parseToolJson(m.body));
 }
 
 function executeTool(call: ToolCall): unknown {
@@ -264,13 +296,21 @@ function extractResponseId(poll: StreamPoll, content: string): string | null {
 }
 
 function assembledContext(s: Session): string {
-  const prior: string[] = [];
+  const prior: { id: string; line: string }[] = [];
+  const assistantIndex: Record<string, number> = {};
   for (const m of s.messages) {
-    if (m.type === "user" || m.type === "assistant" || m.type === "tool_result") {
-      prior.push(`${m.type}: ${m.content}`);
+    if (m.type === "assistant") {
+      if (assistantIndex[m.id] === undefined) {
+        assistantIndex[m.id] = prior.length;
+        prior.push({ id: m.id, line: `assistant: ${m.content}` });
+      } else {
+        prior[assistantIndex[m.id]].line = `assistant: ${m.content}`;
+      }
+    } else if (m.type === "user" || m.type === "tool_result") {
+      prior.push({ id: m.id, line: `${m.type}: ${m.content}` });
     }
   }
-  return prior.join("\n\n");
+  return prior.map((m) => m.line).join("\n\n");
 }
 
 function startLmStudioCall(s: Session, input: string): void {
@@ -308,15 +348,30 @@ function finishAssistantMessage(s: Session, content: string, poll: StreamPoll): 
   const responseId = extractResponseId(poll, content);
   if (responseId) s.previousResponseId = responseId;
 
-  const calls = parseToolCalls(content);
-  if (!calls.length) {
+  const entries = parseTrailingToolEntries(content);
+  if (!entries.length) {
     s.done = true;
     return;
   }
 
-  for (const call of calls) {
+  for (const entry of entries) {
+    if (entry.error || !entry.call) {
+      const formatted = JSON.stringify(
+        { tool: "parse_error", error: entry.error || "invalid tool call", raw: entry.raw },
+        null,
+        2,
+      );
+      append(s, "tool_result", formatted);
+      s.pendingInputs.push(`tool_result:\n${formatted}`);
+      continue;
+    }
+    const call = entry.call;
     if (s.toolRounds >= MAX_TOOL_ROUNDS) {
-      append(s, "system", `Tool round cap (${MAX_TOOL_ROUNDS}) reached; stopping this turn.`);
+      s.pendingInputs = [];
+      if (!s.capReached) {
+        append(s, "system", `Tool round cap (${MAX_TOOL_ROUNDS}) reached; stopping this turn.`);
+        s.capReached = true;
+      }
       s.done = true;
       return;
     }
@@ -381,6 +436,7 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
     stream: null,
     done: true,
     toolRounds: 0,
+    capReached: false,
   };
 }
 
@@ -398,6 +454,7 @@ const plugin: ChatBackend = {
     if (!s) return;
     append(s, "user", text);
     s.toolRounds = 0;
+    s.capReached = false;
     s.done = false;
     s.pendingInputs.push(text);
     startNextIfIdle(s);

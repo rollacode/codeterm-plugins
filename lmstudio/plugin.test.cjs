@@ -219,6 +219,126 @@ test("iteration cap stops after 8 tool rounds", () => {
   assert(systems.some((m) => /tool round cap/i.test(m)), "cap system message present");
 });
 
+test("iteration cap clears queued continuations and emits one cap message", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "cap-clear", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("cap-clear", "loop");
+
+  for (let i = 0; i < 7; i += 1) {
+    enqueueStream(i, [
+      {
+        chunks: ["```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo loop\"}}\n```"],
+        done: true,
+        status: 200,
+        body: JSON.stringify({ response_id: `resp-${i}` }),
+      },
+    ]);
+    plugin.pump("cap-clear");
+  }
+
+  assert(streamCalls.length === 8, "stream 8 is waiting for the cap-triggering response");
+  enqueueStream(7, [
+    {
+      chunks: [
+        "```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo eighth\"}}\n```\n",
+        "```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo ninth\"}}\n```",
+      ],
+      done: true,
+      status: 200,
+      body: JSON.stringify({ response_id: "resp-cap" }),
+    },
+  ]);
+  plugin.pump("cap-clear");
+  plugin.pump("cap-clear");
+  plugin.pump("cap-clear");
+
+  const p = plugin.poll("cap-clear", null);
+  const capMessages = contents(p.messages, "system").filter((m) => /tool round cap/i.test(m));
+  assert(execCalls.length === 8, "only eighth tool executed before cap, got " + execCalls.length);
+  assert(capMessages.length === 1, "exactly one cap message, got " + capMessages.length);
+  assert(streamCalls.length === 8, "no extra continuation stream after cap, got " + streamCalls.length);
+  assert(p.done === true, "session done after cap");
+});
+
+test("fallback assembled context includes one final assistant entry per turn", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "fallback-context", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("fallback-context", "first");
+
+  enqueueStream(0, [
+    { chunks: ["Hel"], done: false, status: 200 },
+    { chunks: ["lo"], done: true, status: 200 },
+  ]);
+  plugin.pump("fallback-context");
+  plugin.pump("fallback-context");
+
+  plugin.sendMessage("fallback-context", "second");
+  assert(streamCalls.length === 2, "second stream started");
+  const body = JSON.parse(streamCalls[1].body);
+  const assistantEntries = body.input.match(/^assistant:/gm) || [];
+  assert(assistantEntries.length === 1, "one assistant entry, got " + assistantEntries.length + "\n" + body.input);
+  assert(body.input.includes("assistant: Hello"), "final assistant content included");
+  assert(!body.input.includes("assistant: Hel\n"), "partial assistant content omitted");
+});
+
+test("codeterm-tool fences execute only when trailing", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "middle-fence", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("middle-fence", "explain protocol");
+  enqueueStream(0, [
+    {
+      chunks: [
+        "Example:\n```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo should-not-run\"}}\n```\nThen I explain it.",
+      ],
+      done: true,
+      status: 200,
+      body: JSON.stringify({ response_id: "resp-middle" }),
+    },
+  ]);
+  plugin.pump("middle-fence");
+  let p = plugin.poll("middle-fence", null);
+  assert(execCalls.length === 0, "middle explanatory fence did not execute");
+  assert(p.done === true, "middle explanatory fence ends turn");
+
+  plugin.openSession({ paneId: "trailing-fence", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("trailing-fence", "run trailing");
+  enqueueStream(1, [
+    {
+      chunks: [
+        "Running it now.\n```codeterm-tool\n{\"tool\":\"exec\",\"args\":{\"cmd\":\"echo trailing\"}}\n```",
+      ],
+      done: true,
+      status: 200,
+      body: JSON.stringify({ response_id: "resp-trailing" }),
+    },
+  ]);
+  plugin.pump("trailing-fence");
+  p = plugin.poll("trailing-fence", null);
+  assert(execCalls.length === 1, "trailing fence executed once");
+  assert(contents(p.messages, "tool_result").length === 1, "trailing fence produced tool_result");
+});
+
+test("malformed trailing tool fence appends parse-error tool_result", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "bad-json", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("bad-json", "bad tool");
+  enqueueStream(0, [
+    {
+      chunks: ["```codeterm-tool\n{\"tool\":\"exec\",\"args\":\n```"],
+      done: true,
+      status: 200,
+      body: JSON.stringify({ response_id: "resp-bad-json" }),
+    },
+  ]);
+  plugin.pump("bad-json");
+
+  const p = plugin.poll("bad-json", null);
+  const results = contents(p.messages, "tool_result");
+  assert(results.length === 1, "parse error produces one tool_result");
+  assert(/parse/i.test(results[0]) && /error/i.test(results[0]), "parse-error surfaced: " + results[0]);
+  assert(streamCalls.length === 2, "parse-error tool_result continues the loop for retry");
+});
+
 test("listPresets returns configured presets and listModels uses /api/v1/models", () => {
   reset({
     baseUrl: "http://localhost:1234/",

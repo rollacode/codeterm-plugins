@@ -51,6 +51,12 @@ that `host:port` to the allowlist.
 
 Tool rounds are capped at 8 per user turn.
 
+The curated `exec` and `codeterm` tools run commands through `sh -lc`; the host
+still gates that subprocess path through this plugin's manifest grant. The
+manifest also lists `codeterm` in `subprocess.allow` for readability, but the
+current implementation invokes it through `sh`, so that direct `codeterm` grant
+is redundant.
+
 ## Develop
 
 ```sh
