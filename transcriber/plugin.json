@@ -1,12 +1,12 @@
 {
   "id": "transcriber",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minCodeterm": "1.0.0",
   "hostApi": 2,
   "displayName": "Transcriber",
-  "description": "Speech-to-text for voice notes, backed by a local Whisper server or a mesh peer. Press-to-talk dictation into the focused pane.",
+  "description": "Offline speech-to-text for voice notes. A one-shot whisper.cpp engine that bootstraps its own ffmpeg + whisper-cli + model on first use; audio never leaves your machine.",
   "readme": "README.md",
-  "iconHint": "\ud83c\udf99",
+  "iconHint": "🎙",
   "iconColor": "var(--ct-accent)",
   "entry": "plugin.js",
   "capabilities": {
@@ -14,21 +14,17 @@
     "glanceView": true
   },
   "permissions": {
-    "network": {
-      "allow": [
-        "127.0.0.1:7891"
-      ]
-    },
     "subprocess": {
       "allow": [
-        "whisper-server",
         "brew",
         "curl",
-        "pkill"
+        "tar",
+        "whisper-cli",
+        "ffmpeg"
       ]
-    },
-    "secrets": true
+    }
   },
   "settingsSchema": "settings.schema.json",
+  "configHelp": "Transcriber turns voice notes into text, fully offline. It runs whisper.cpp's `whisper-cli` once per clip: ffmpeg decodes the audio to a 16 kHz WAV, whisper-cli transcribes it, and the text is inserted for you. On first use it installs everything it needs automatically — on macOS via `brew install whisper-cpp ffmpeg`, on Windows/Linux by downloading prebuilt whisper.cpp and ffmpeg binaries plus the model into ~/.codeterm/transcriber. No server, no setup. Two knobs (codeterm plugin config transcriber --set key=value): `model` — the whisper model to use, default `small` (multilingual, ~466 MB, good accuracy/speed; try `base` for faster/lighter or `medium`/`large-v3` for higher accuracy); `language` — a BCP-47 hint like `en` or `ru`, default `auto` to detect per clip. Ask the user which language they mostly speak and whether they want a faster or more accurate model, then set those two keys.",
   "iconSvg": "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z\"/><path d=\"M19 10v2a7 7 0 0 1-14 0v-2\"/><line x1=\"12\" y1=\"19\" x2=\"12\" y2=\"23\"/><line x1=\"8\" y1=\"23\" x2=\"16\" y2=\"23\"/></svg>"
 }
