@@ -33,6 +33,7 @@ interface TranscriberSettings {
 
 type Resolved = { bin: string } | { error: string };
 type Ensured = { ok: true } | { error: string };
+type ProgressOptions = { label: string; percent?: number; done?: boolean; error?: string };
 
 interface StatusResult {
   state: "ready" | "unloaded" | "unavailable";
@@ -118,6 +119,16 @@ function exitedOk(r: ExecResult): boolean {
   return !r.error && (r.code === undefined || r.code === 0);
 }
 
+function progress(opts: ProgressOptions): void {
+  const h = host as typeof host & { progress?: (opts: ProgressOptions) => void };
+  if (typeof h.progress === "function") h.progress(opts);
+}
+
+function errorResult(message: string): TranscribeResult {
+  progress({ label: "Error", error: message });
+  return { error: message };
+}
+
 // ── dependency bootstrap (detect-then-install) ───────────────────────
 
 // A binary is "present" if it runs from PATH, or if we already dropped it in binDir.
@@ -156,11 +167,13 @@ function ensureFfmpeg(): Resolved {
 
   const os = osKind();
   if (os === "macos") {
+    progress({ label: "Installing ffmpeg…" });
     const r = exec({ bin: "brew", args: ["install", "ffmpeg"], timeoutMs: 1800000 });
     if (exitedOk(r) && ranOk(exec({ bin: "ffmpeg", args: ["-version"] }))) return { bin: "ffmpeg" };
     return { error: "ffmpeg is required. Install it with `brew install ffmpeg`." };
   }
   if (os === "windows") {
+    progress({ label: "Installing ffmpeg…" });
     const zip = baseDir() + "/ffmpeg.zip";
     const dl = download(FFMPEG_WIN_ZIP, zip);
     if ("error" in dl) return ffmpegManual(dl.error);
@@ -171,6 +184,7 @@ function ensureFfmpeg(): Resolved {
     return ffmpegManual("ffmpeg binary not found after extraction");
   }
   // linux
+  progress({ label: "Installing ffmpeg…" });
   const tar = baseDir() + "/ffmpeg.tar.xz";
   const dl = download(FFMPEG_LINUX_TAR, tar);
   if ("error" in dl) return ffmpegManual(dl.error);
@@ -197,11 +211,13 @@ function ensureEngine(): Resolved {
 
   const os = osKind();
   if (os === "macos") {
+    progress({ label: "Installing whisper.cpp…" });
     const r = exec({ bin: "brew", args: ["install", "whisper-cpp"], timeoutMs: 1800000 });
     if (exitedOk(r) && ranOk(exec({ bin: "whisper-cli", args: ["--help"] }))) return { bin: "whisper-cli" };
     return { error: "whisper-cli is required. Install it with `brew install whisper-cpp`." };
   }
   // Windows + Linux: prebuilt archives from the whisper.cpp GitHub release.
+  progress({ label: "Installing whisper.cpp…" });
   const asset = os === "windows" ? "whisper-bin-x64.zip" : "whisper-bin-Linux.zip";
   const archive = baseDir() + "/whisper.zip";
   const dl = download(WHISPER_BASE + "/" + asset, archive);
@@ -245,6 +261,7 @@ function ensureModel(): Ensured {
   host.makeDirs(baseDir());
   const url =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-" + modelId() + ".bin";
+  progress({ label: "Downloading model ggml-" + modelId() + " (~" + modelSizeMb(modelId()) + "MB)…" });
   const dl = download(url, mp);
   if ("error" in dl) {
     host.removeFile(mp);
@@ -261,6 +278,25 @@ function ensureModel(): Ensured {
   }
   host.writeFile(done, "");
   return { ok: true };
+}
+
+function modelSizeMb(id: string): number {
+  const sizes: Record<string, number> = {
+    tiny: 75,
+    "tiny.en": 75,
+    base: 142,
+    "base.en": 142,
+    small: 466,
+    "small.en": 466,
+    medium: 1500,
+    "medium.en": 1500,
+    large: 2900,
+    "large-v1": 2900,
+    "large-v2": 2900,
+    "large-v3": 3100,
+    "large-v3-turbo": 1600,
+  };
+  return sizes[id] || 466;
 }
 
 // ── transcription (one-shot) ─────────────────────────────────────────
@@ -284,11 +320,11 @@ function joinSegments(raw: string): string {
 // path: absolute audio file. lang: BCP-47 hint ("" / undefined → settings / auto).
 function transcribe(path: string, lang?: string): TranscribeResult {
   const ffmpeg = ensureFfmpeg();
-  if ("error" in ffmpeg) return { error: ffmpeg.error };
+  if ("error" in ffmpeg) return errorResult(ffmpeg.error);
   const engine = ensureEngine();
-  if ("error" in engine) return { error: engine.error };
+  if ("error" in engine) return errorResult(engine.error);
   const model = ensureModel();
-  if ("error" in model) return { error: model.error };
+  if ("error" in model) return errorResult(model.error);
 
   host.makeDirs(tmpDir());
   const base = tmpDir() + "/job-" + host.unixNowMs();
@@ -302,10 +338,11 @@ function transcribe(path: string, lang?: string): TranscribeResult {
   });
   if (!exitedOk(conv)) {
     host.removeFile(wav);
-    return { error: "ffmpeg could not decode the audio: " + (conv.stderr || conv.error || "exit " + conv.code) };
+    return errorResult("ffmpeg could not decode the audio: " + (conv.stderr || conv.error || "exit " + conv.code));
   }
 
   const l = lang && lang.length ? lang : language();
+  progress({ label: "Transcribing…" });
   const tr = exec({
     bin: engine.bin,
     args: ["-m", modelPath(), "-f", wav, "-l", l, "-nt", "-oj", "-of", base],
@@ -314,13 +351,14 @@ function transcribe(path: string, lang?: string): TranscribeResult {
   if (!exitedOk(tr)) {
     host.removeFile(wav);
     host.removeFile(json);
-    return { error: "whisper-cli failed: " + (tr.stderr || tr.error || "exit " + tr.code) };
+    return errorResult("whisper-cli failed: " + (tr.stderr || tr.error || "exit " + tr.code));
   }
 
   const raw = host.readFile(json);
   host.removeFile(wav);
   host.removeFile(json);
-  if (!raw) return { error: "whisper-cli produced no transcript output" };
+  if (!raw) return errorResult("whisper-cli produced no transcript output");
+  progress({ label: "Done", done: true });
   return { text: joinSegments(raw) };
 }
 

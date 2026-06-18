@@ -8,6 +8,7 @@ const MODEL = HOME + "/.codeterm/transcriber/ggml-small.bin";
 
 // ── Configurable fake host ─────────────────────────────────────────────
 const execCalls = [];
+const progressCalls = [];
 let execHandler = () => JSON.stringify({ code: 0, stdout: "", stderr: "" });
 let settingsObj = {};
 let platformStr = "macos";
@@ -28,6 +29,7 @@ globalThis.host = {
   removeFile: (p) => { delete files[p]; return true; },
   makeDirs: () => true,
   writeTempFile: (c, suffix) => { const p = "/tmp/ct" + (suffix || ""); files[p] = c; return p; },
+  progress: (opts) => { progressCalls.push(opts); },
   exec: (json) => {
     const opts = JSON.parse(json);
     execCalls.push(opts);
@@ -43,6 +45,7 @@ function test(name, fn) { tests.push([name, fn]); }
 function assert(cond, msg) { if (!cond) throw new Error(msg); }
 function reset(settings, platform) {
   execCalls.length = 0;
+  progressCalls.length = 0;
   settingsObj = settings || {};
   platformStr = platform || "macos";
   files = {};
@@ -72,8 +75,61 @@ function happyHandler(segments) {
 }
 
 const indexOfCall = (pred) => execCalls.findIndex(pred);
+const progressLabels = () => progressCalls.map((c) => c.label);
 
 // ── Tests ──────────────────────────────────────────────────────────────
+
+test("progress: cold transcribe reports install, model download, transcribe, done phases", () => {
+  reset({}, "macos");
+  let ffmpegInstalled = false;
+  let whisperInstalled = false;
+  execHandler = (opts) => {
+    if (opts.bin === "ffmpeg" && (opts.args || [])[0] === "-version") {
+      return JSON.stringify(ffmpegInstalled ? { code: 0 } : { error: "not found" });
+    }
+    if (opts.bin === "whisper-cli" && (opts.args || [])[0] === "--help") {
+      return JSON.stringify(whisperInstalled ? { code: 0 } : { error: "not found" });
+    }
+    if (opts.bin === "brew" && (opts.args || [])[1] === "ffmpeg") {
+      ffmpegInstalled = true;
+      return JSON.stringify({ code: 0 });
+    }
+    if (opts.bin === "brew" && (opts.args || [])[1] === "whisper-cpp") {
+      whisperInstalled = true;
+      return JSON.stringify({ code: 0 });
+    }
+    if (/whisper-cli/.test(opts.bin)) {
+      const i = (opts.args || []).indexOf("-of");
+      if (i >= 0) files[opts.args[i + 1] + ".json"] = whisperJson(["cold path"]);
+    }
+    return JSON.stringify({ code: 0, stdout: "", stderr: "" });
+  };
+
+  const r = plugin.transcribe("/tmp/note.oga");
+  assert(r.text === "cold path", "transcribes after bootstrap, got " + JSON.stringify(r));
+  assert(JSON.stringify(progressLabels()) === JSON.stringify([
+    "Installing ffmpeg…",
+    "Installing whisper.cpp…",
+    "Downloading model ggml-small (~466MB)…",
+    "Transcribing…",
+    "Done",
+  ]), "unexpected progress labels: " + JSON.stringify(progressCalls));
+  assert(progressCalls[progressCalls.length - 1].done === true, "final progress call marks done");
+});
+
+test("progress: warm transcribe reports only transcribing and done phases", () => {
+  reset({}, "macos");
+  files[MODEL] = "x"; files[MODEL + ".done"] = "x";
+  execHandler = happyHandler(["warm path"]);
+
+  const r = plugin.transcribe("/tmp/note.oga");
+  assert(r.text === "warm path", "transcribes warm path, got " + JSON.stringify(r));
+  assert(JSON.stringify(progressLabels()) === JSON.stringify([
+    "Transcribing…",
+    "Done",
+  ]), "unexpected warm progress labels: " + JSON.stringify(progressCalls));
+  assert(progressCalls[progressCalls.length - 1].done === true, "final progress call marks done");
+});
 
 test("deps present + model present: transcribe installs nothing (no brew/curl)", () => {
   reset({}, "macos");
