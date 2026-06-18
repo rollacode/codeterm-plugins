@@ -39,6 +39,24 @@ globalThis.host = {
 
 const plugin = require("./plugin.js").default;
 
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
+
+// Collect every settable `key` from a settings.schema.json (sections nest
+// `fields`, `when` nests `then`).
+function collectSchemaKeys(schema) {
+  const keys = [];
+  const walk = (fields) => {
+    for (const f of fields || []) {
+      if (f && f.key) keys.push(f.key);
+      if (f && Array.isArray(f.fields)) walk(f.fields);
+      if (f && Array.isArray(f.then)) walk(f.then);
+    }
+  };
+  walk(schema);
+  return keys;
+}
+
 const tests = [];
 function test(name, fn) { tests.push([name, fn]); }
 function assert(cond, msg) { if (!cond) throw new Error(msg); }
@@ -228,6 +246,41 @@ test("worker backend, never finishes → passthrough (null), bounded poll loop",
   workerPollHandler = () => { polls += 1; return { done: false }; };
   assert(plugin.chatPreprocess(ctx("hi")) === null, "null when the job never completes");
   assert(polls > 0 && polls <= 60, "poll loop is bounded, polls=" + polls);
+});
+
+// ── manifest + settings schema (Track S) ──
+
+test("settings.schema.json exposes the strategy + backend keys the plugin reads", () => {
+  const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));
+  assert(Array.isArray(schema), "schema is a top-level array of sections");
+  const keys = collectSchemaKeys(schema);
+  // "strategy" in the design maps to composeMode (the compose strategy).
+  assert(keys.includes("backend"), "schema exposes backend, got " + keys.join(","));
+  assert(keys.includes("composeMode"), "schema exposes composeMode (compose strategy), got " + keys.join(","));
+  assert(keys.includes("enabled"), "schema exposes the enabled toggle, got " + keys.join(","));
+});
+
+test("the backend select offers exactly the backends the plugin implements", () => {
+  const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));
+  let backendField = null;
+  const walk = (fields) => {
+    for (const f of fields || []) {
+      if (f && f.key === "backend") backendField = f;
+      if (f && Array.isArray(f.fields)) walk(f.fields);
+      if (f && Array.isArray(f.then)) walk(f.then);
+    }
+  };
+  walk(schema);
+  assert(backendField && backendField.kind === "select", "backend is a select");
+  const ids = backendField.options.map((o) => o[0]).sort();
+  assert(JSON.stringify(ids) === JSON.stringify(["groq", "mem", "worker"]), "backend options, got " + ids.join(","));
+});
+
+test("plugin.json references the schema and carries a non-empty configHelp", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  assert(manifest.settingsSchema === "settings.schema.json", "settingsSchema ref, got " + manifest.settingsSchema);
+  assert(typeof manifest.configHelp === "string" && manifest.configHelp.trim().length > 0, "configHelp is a non-empty string");
+  assert(manifest.configHelp.includes("codeterm plugin config"), "configHelp tells the agent the config command");
 });
 
 let failed = 0;

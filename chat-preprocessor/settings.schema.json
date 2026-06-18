@@ -1,0 +1,44 @@
+[
+  {
+    "kind": "section",
+    "title": "Context augmentation",
+    "description": "Fold relevant context into outbound messages before the agent sees them.",
+    "fields": [
+      {
+        "kind": "toggle",
+        "key": "enabled",
+        "label": "Enabled",
+        "default": false,
+        "description": "When off, every message passes through untouched. Turn on once a backend is configured."
+      },
+      {
+        "kind": "select",
+        "key": "backend",
+        "label": "Backend",
+        "default": "mem",
+        "options": [
+          ["mem", "Memory — search CodeTerm memory (no network)"],
+          ["groq", "Groq — ask a Groq model (needs groqApiKey secret)"],
+          ["worker", "Worker — run a one-shot worker agent"]
+        ]
+      },
+      {
+        "kind": "select",
+        "key": "composeMode",
+        "label": "Compose strategy",
+        "default": "append",
+        "options": [
+          ["append", "Append context after the message"],
+          ["prepend", "Prepend context before the message"]
+        ]
+      },
+      {
+        "kind": "text",
+        "key": "model",
+        "label": "Model",
+        "placeholder": "llama-3.1-8b-instant",
+        "description": "Used by the groq and worker backends to pick which model answers. Ignored by the mem backend."
+      }
+    ]
+  }
+]

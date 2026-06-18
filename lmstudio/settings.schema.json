@@ -1,0 +1,23 @@
+[
+  {
+    "kind": "section",
+    "title": "LM Studio server",
+    "description": "Connect to a local LM Studio OpenAI-compatible server.",
+    "fields": [
+      {
+        "kind": "text",
+        "key": "baseUrl",
+        "label": "Endpoint URL",
+        "placeholder": "http://localhost:1234",
+        "description": "Base URL of LM Studio's server (Developer tab → Start Server). The plugin appends /v1/chat/completions and /v1/models; a trailing slash is normalized. If you point this at a different host:port, add it to permissions.network.allow too or the request is denied."
+      },
+      {
+        "kind": "text",
+        "key": "model",
+        "label": "Model",
+        "placeholder": "leave blank to use the loaded model",
+        "description": "Model id LM Studio routes to (e.g. qwen2.5-7b-instruct). Run listModels to discover ids. Leave blank to use whatever model is currently loaded."
+      }
+    ]
+  }
+]

@@ -12,6 +12,8 @@
   "capabilities": {
     "chatBackend": true
   },
+  "settingsSchema": "settings.schema.json",
+  "configHelp": "LM Studio turns a CodeTerm pane into a chat with a local model: open a chatBackend pane and `codeterm send` your message to get the reply, routed to LM Studio's OpenAI-compatible server over the local network. To use it: in LM Studio load a model and Developer tab → Start Server (defaults to http://localhost:1234). Knobs (set with `codeterm plugin config lmstudio --set key=value`): `baseUrl` — the server's base URL (default http://localhost:1234; a non-default host:port must also be added to permissions.network.allow); `model` — the model id to request (leave blank to use whichever model is currently loaded; run listModels to discover ids).",
   "permissions": {
     "network": {
       "allow": [
