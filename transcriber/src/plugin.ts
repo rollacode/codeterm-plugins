@@ -18,6 +18,7 @@
 // bin dir) is never reinstalled. Failures return an agent-readable error telling the
 // user exactly what to install by hand.
 import type {
+  DirEntry,
   ExecOpts,
   ExecResult,
   GlanceView,
@@ -86,6 +87,33 @@ function tmpDir(): string {
 
 function modelPath(): string {
   return baseDir() + "/ggml-" + modelId() + ".bin";
+}
+
+function entryName(entry: DirEntry | string): string {
+  return typeof entry === "string" ? entry : entry.name;
+}
+
+function cleanupOrphanModels(activeModel: string): void {
+  const dir = baseDir();
+  const h = host as typeof host & { readDir?: (path: string) => DirEntry[] };
+  let entries: (DirEntry | string)[] = [];
+  try {
+    entries = h.readDir ? h.readDir(dir) : host.fs.readDir(dir);
+  } catch (e) {
+    return;
+  }
+
+  const activeName = activeModel.substring(activeModel.lastIndexOf("/") + 1);
+  for (const entry of entries) {
+    const name = entryName(entry);
+    if (!/^ggml-.*\.bin$/.test(name)) continue;
+    if (name === activeName) continue;
+
+    const path = typeof entry === "string" ? dir + "/" + name : entry.path || dir + "/" + name;
+    if (path === activeModel || path.endsWith(".part")) continue;
+    host.removeFile(path);
+    host.removeFile(path + ".done");
+  }
 }
 
 function osKind(): "macos" | "windows" | "linux" {
@@ -255,7 +283,10 @@ function ensureModel(): Ensured {
   // mp WITHOUT the sentinel, which we detect, discard, and re-download. Without
   // this, an interrupted download poisons mp permanently — every later transcribe
   // feeds whisper-cli a truncated model and hangs.
-  if (host.fileExists(mp) && host.fileExists(done)) return { ok: true };
+  if (host.fileExists(mp) && host.fileExists(done)) {
+    cleanupOrphanModels(mp);
+    return { ok: true };
+  }
   host.removeFile(mp);
   host.removeFile(done);
   host.makeDirs(baseDir());
@@ -277,6 +308,7 @@ function ensureModel(): Ensured {
     };
   }
   host.writeFile(done, "");
+  cleanupOrphanModels(mp);
   return { ok: true };
 }
 
