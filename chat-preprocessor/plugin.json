@@ -14,6 +14,8 @@
       "match": "text"
     }
   },
+  "settingsSchema": "settings.schema.json",
+  "configHelp": "Chat Preprocessor augments your outbound text messages before the agent sees them: it pulls relevant context and folds it into the turn as a <context> block. It is off by default and never drops a message (no context → plain passthrough). Knobs (set with `codeterm plugin config chat-preprocessor --set key=value`): `enabled` — true/false master switch; `backend` — where context comes from: `mem` (search CodeTerm memory, no network — the default), `groq` (ask a Groq model; requires the `groqApiKey` secret, set via `codeterm plugin config chat-preprocessor --set groqApiKey=gsk_...`), or `worker` (run a one-shot worker agent); `composeMode` — the compose strategy: `append` (default, context after the message) or `prepend` (context first); `model` — model id for the groq/worker backends (ignored by mem).",
   "permissions": {
     "network": {
       "allow": [

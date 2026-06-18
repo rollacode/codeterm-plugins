@@ -51,6 +51,15 @@ test("login-cipher shape (type=1, password in login)", () => {
   assert(cipher.login.password === "p", "password in login");
 });
 
+// ── manifest (Track S) ──
+
+test("plugin.json carries a non-empty configHelp", () => {
+  const { readFileSync } = require("node:fs");
+  const { join } = require("node:path");
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  assert(typeof manifest.configHelp === "string" && manifest.configHelp.trim().length > 0, "configHelp is a non-empty string");
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try {

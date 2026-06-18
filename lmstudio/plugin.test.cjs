@@ -21,6 +21,24 @@ globalThis.host = {
 
 const plugin = require("./plugin.js").default;
 
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
+
+// Collect every settable `key` from a settings.schema.json (sections nest
+// `fields`, `when` nests `then`).
+function collectSchemaKeys(schema) {
+  const keys = [];
+  const walk = (fields) => {
+    for (const f of fields || []) {
+      if (f && f.key) keys.push(f.key);
+      if (f && Array.isArray(f.fields)) walk(f.fields);
+      if (f && Array.isArray(f.then)) walk(f.then);
+    }
+  };
+  walk(schema);
+  return keys;
+}
+
 const tests = [];
 function test(name, fn) { tests.push([name, fn]); }
 function assert(cond, msg) { if (!cond) throw new Error(msg); }
@@ -178,6 +196,24 @@ test("closeSession drops the session; poll on unknown is empty", () => {
   plugin.closeSession("z");
   const p = plugin.poll("z", "0");
   assert(p.messages.length === 0, "no messages after close");
+});
+
+// ── manifest + settings schema (Track S) ──
+
+test("settings.schema.json exposes the baseUrl and model keys the plugin reads", () => {
+  const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));
+  assert(Array.isArray(schema), "schema is a top-level array of sections");
+  const keys = collectSchemaKeys(schema);
+  assert(keys.includes("baseUrl"), "schema exposes baseUrl (NOT endpoint), got " + keys.join(","));
+  assert(keys.includes("model"), "schema exposes model, got " + keys.join(","));
+  assert(!keys.includes("endpoint"), "schema must not use the legacy `endpoint` key");
+});
+
+test("plugin.json references the schema and carries a non-empty configHelp", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  assert(manifest.settingsSchema === "settings.schema.json", "settingsSchema ref, got " + manifest.settingsSchema);
+  assert(typeof manifest.configHelp === "string" && manifest.configHelp.trim().length > 0, "configHelp is a non-empty string");
+  assert(manifest.configHelp.includes("codeterm plugin config"), "configHelp tells the agent the config command");
 });
 
 let failed = 0;

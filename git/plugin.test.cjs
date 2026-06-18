@@ -83,6 +83,15 @@ test("mergeWorkdirFiles joins numstat counts, untracked has no counts", () => {
   assert(merged[1].added === null && merged[1].deleted === null, "untracked null counts");
 });
 
+// ── manifest (Track S) ──
+
+test("plugin.json carries a non-empty configHelp", () => {
+  const { readFileSync } = require("node:fs");
+  const { join } = require("node:path");
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  assert(typeof manifest.configHelp === "string" && manifest.configHelp.trim().length > 0, "configHelp is a non-empty string");
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try { fn(); console.log(`✓ ${name}`); }
