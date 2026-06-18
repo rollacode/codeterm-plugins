@@ -57,6 +57,9 @@ function tmpDir() {
 function modelPath() {
   return baseDir() + "/ggml-" + modelId() + ".bin";
 }
+function modelDonePath() {
+  return modelPath() + ".done";
+}
 function entryName(entry) {
   return typeof entry === "string" ? entry : entry.name;
 }
@@ -201,10 +204,10 @@ function engineManual(os, why) {
     error: "whisper-cli (whisper.cpp) is required but could not be installed automatically on " + os + " (" + why + "). Build/download whisper.cpp from https://github.com/ggerganov/whisper.cpp/releases and place `whisper-cli" + exeSuffix() + "` in " + binDir() + "."
   };
 }
-function ensureModel() {
+function ensureModel(force = false) {
   const mp = modelPath();
-  const done = mp + ".done";
-  if (host.fileExists(mp) && host.fileExists(done)) {
+  const done = modelDonePath();
+  if (!force && host.fileExists(mp) && host.fileExists(done)) {
     cleanupOrphanModels(mp);
     return { ok: true };
   }
@@ -241,6 +244,31 @@ function modelSizeMb(id) {
     "large-v3-turbo": 1600
   };
   return sizes[id] || 466;
+}
+function modelFileBytes(path) {
+  const dir = baseDir();
+  const activeName = path.substring(path.lastIndexOf("/") + 1);
+  const h = host;
+  let entries = [];
+  try {
+    entries = h.readDir ? h.readDir(dir) : host.fs.readDir(dir);
+  } catch (e) {
+    return null;
+  }
+  for (const entry of entries) {
+    if (typeof entry === "string") continue;
+    if (entry.name === activeName && typeof entry.size === "number") return entry.size;
+  }
+  return null;
+}
+function modelFileLabel() {
+  const mp = modelPath();
+  const done = modelDonePath();
+  if (!host.fileExists(mp)) return "missing (~" + modelSizeMb(modelId()) + "MB)";
+  if (!host.fileExists(done)) return "partial (~" + modelSizeMb(modelId()) + "MB)";
+  const bytes = modelFileBytes(mp);
+  if (bytes !== null) return "present (" + bytes + " bytes, expected ~" + modelSizeMb(modelId()) + "MB)";
+  return "present (~" + modelSizeMb(modelId()) + "MB)";
 }
 function joinSegments(raw) {
   try {
@@ -301,7 +329,7 @@ function transcribeStatus() {
   if (!host.homeDir()) return { state: "unavailable", reason: "no home directory" };
   const hasFfmpeg = present("ffmpeg");
   const hasEngine = present("whisper-cli");
-  const hasModel = host.fileExists(modelPath());
+  const hasModel = host.fileExists(modelPath()) && host.fileExists(modelDonePath());
   if (hasFfmpeg && hasEngine && hasModel) return { state: "ready" };
   const missing = [];
   if (!hasEngine) missing.push("whisper-cli");
@@ -312,25 +340,31 @@ function transcribeStatus() {
 function renderGlance() {
   const st = transcribeStatus();
   const ready = st.state === "ready";
+  const hasModel = host.fileExists(modelPath()) && host.fileExists(modelDonePath());
+  const badge = st.state === "unavailable" ? "Unavailable" : ready ? "Ready" : hasModel ? "Idle" : "Not installed";
   const nodes = [];
   nodes.push({
     kind: "badge",
-    label: ready ? "Ready" : st.state === "unavailable" ? "Unavailable" : "Not set up",
+    label: badge,
     tone: ready ? "ok" : st.state === "unavailable" ? "danger" : "warn"
   });
   nodes.push({ kind: "keyVal", key: "Model", value: "ggml-" + modelId() });
+  nodes.push({ kind: "keyVal", key: "Model file", value: modelFileLabel() });
   nodes.push({ kind: "keyVal", key: "Language", value: language() });
   if (st.reason) nodes.push({ kind: "note", body: st.reason });
   nodes.push({ kind: "divider" });
-  if (!ready) nodes.push({ kind: "button", label: "Set up engine + model", action: "install" });
+  if (!hasModel) nodes.push({ kind: "button", label: "Install", action: "install" });
+  nodes.push({ kind: "button", label: "Reinstall", action: "reinstall" });
   nodes.push({ kind: "button", label: "Settings", action: "settings" });
   return { title: "Transcriber", nodes };
 }
 function glanceAction(action) {
-  if (action === "install") {
-    ensureFfmpeg();
-    ensureEngine();
-    ensureModel();
+  if (action === "install" || action === "reinstall") {
+    const ffmpeg = ensureFfmpeg();
+    if (!("error" in ffmpeg)) {
+      const engine = ensureEngine();
+      if (!("error" in engine)) ensureModel(action === "reinstall");
+    }
   }
   return renderGlance();
 }

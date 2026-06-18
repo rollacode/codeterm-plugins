@@ -89,6 +89,10 @@ function modelPath(): string {
   return baseDir() + "/ggml-" + modelId() + ".bin";
 }
 
+function modelDonePath(): string {
+  return modelPath() + ".done";
+}
+
 function entryName(entry: DirEntry | string): string {
   return typeof entry === "string" ? entry : entry.name;
 }
@@ -275,15 +279,15 @@ function engineManual(os: string, why: string): Resolved {
   };
 }
 
-function ensureModel(): Ensured {
+function ensureModel(force = false): Ensured {
   const mp = modelPath();
-  const done = mp + ".done";
+  const done = modelDonePath();
   // Only trust a model whose download fully completed. The .done sentinel is
   // written after curl exits 0; a killed/interrupted download leaves a partial
   // mp WITHOUT the sentinel, which we detect, discard, and re-download. Without
   // this, an interrupted download poisons mp permanently — every later transcribe
   // feeds whisper-cli a truncated model and hangs.
-  if (host.fileExists(mp) && host.fileExists(done)) {
+  if (!force && host.fileExists(mp) && host.fileExists(done)) {
     cleanupOrphanModels(mp);
     return { ok: true };
   }
@@ -329,6 +333,33 @@ function modelSizeMb(id: string): number {
     "large-v3-turbo": 1600,
   };
   return sizes[id] || 466;
+}
+
+function modelFileBytes(path: string): number | null {
+  const dir = baseDir();
+  const activeName = path.substring(path.lastIndexOf("/") + 1);
+  const h = host as typeof host & { readDir?: (path: string) => DirEntry[] };
+  let entries: (DirEntry | string)[] = [];
+  try {
+    entries = h.readDir ? h.readDir(dir) : host.fs.readDir(dir);
+  } catch (e) {
+    return null;
+  }
+  for (const entry of entries) {
+    if (typeof entry === "string") continue;
+    if (entry.name === activeName && typeof entry.size === "number") return entry.size;
+  }
+  return null;
+}
+
+function modelFileLabel(): string {
+  const mp = modelPath();
+  const done = modelDonePath();
+  if (!host.fileExists(mp)) return "missing (~" + modelSizeMb(modelId()) + "MB)";
+  if (!host.fileExists(done)) return "partial (~" + modelSizeMb(modelId()) + "MB)";
+  const bytes = modelFileBytes(mp);
+  if (bytes !== null) return "present (" + bytes + " bytes, expected ~" + modelSizeMb(modelId()) + "MB)";
+  return "present (~" + modelSizeMb(modelId()) + "MB)";
 }
 
 // ── transcription (one-shot) ─────────────────────────────────────────
@@ -403,7 +434,7 @@ function transcribeStatus(): StatusResult {
   if (!host.homeDir()) return { state: "unavailable", reason: "no home directory" };
   const hasFfmpeg = present("ffmpeg");
   const hasEngine = present("whisper-cli");
-  const hasModel = host.fileExists(modelPath());
+  const hasModel = host.fileExists(modelPath()) && host.fileExists(modelDonePath());
   if (hasFfmpeg && hasEngine && hasModel) return { state: "ready" };
 
   const missing: string[] = [];
@@ -418,26 +449,33 @@ function transcribeStatus(): StatusResult {
 function renderGlance(): GlanceView {
   const st = transcribeStatus();
   const ready = st.state === "ready";
+  const hasModel = host.fileExists(modelPath()) && host.fileExists(modelDonePath());
+  const badge =
+    st.state === "unavailable" ? "Unavailable" : ready ? "Ready" : hasModel ? "Idle" : "Not installed";
   const nodes: ViewNode[] = [];
   nodes.push({
     kind: "badge",
-    label: ready ? "Ready" : st.state === "unavailable" ? "Unavailable" : "Not set up",
+    label: badge,
     tone: ready ? "ok" : st.state === "unavailable" ? "danger" : "warn",
   });
   nodes.push({ kind: "keyVal", key: "Model", value: "ggml-" + modelId() });
+  nodes.push({ kind: "keyVal", key: "Model file", value: modelFileLabel() });
   nodes.push({ kind: "keyVal", key: "Language", value: language() });
   if (st.reason) nodes.push({ kind: "note", body: st.reason });
   nodes.push({ kind: "divider" });
-  if (!ready) nodes.push({ kind: "button", label: "Set up engine + model", action: "install" });
+  if (!hasModel) nodes.push({ kind: "button", label: "Install", action: "install" });
+  nodes.push({ kind: "button", label: "Reinstall", action: "reinstall" });
   nodes.push({ kind: "button", label: "Settings", action: "settings" });
   return { title: "Transcriber", nodes };
 }
 
 function glanceAction(action: string): GlanceView {
-  if (action === "install") {
-    ensureFfmpeg();
-    ensureEngine();
-    ensureModel();
+  if (action === "install" || action === "reinstall") {
+    const ffmpeg = ensureFfmpeg();
+    if (!("error" in ffmpeg)) {
+      const engine = ensureEngine();
+      if (!("error" in engine)) ensureModel(action === "reinstall");
+    }
   }
   return renderGlance();
 }
