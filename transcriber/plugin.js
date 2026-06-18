@@ -57,6 +57,29 @@ function tmpDir() {
 function modelPath() {
   return baseDir() + "/ggml-" + modelId() + ".bin";
 }
+function entryName(entry) {
+  return typeof entry === "string" ? entry : entry.name;
+}
+function cleanupOrphanModels(activeModel) {
+  const dir = baseDir();
+  const h = host;
+  let entries = [];
+  try {
+    entries = h.readDir ? h.readDir(dir) : host.fs.readDir(dir);
+  } catch (e) {
+    return;
+  }
+  const activeName = activeModel.substring(activeModel.lastIndexOf("/") + 1);
+  for (const entry of entries) {
+    const name = entryName(entry);
+    if (!/^ggml-.*\.bin$/.test(name)) continue;
+    if (name === activeName) continue;
+    const path = typeof entry === "string" ? dir + "/" + name : entry.path || dir + "/" + name;
+    if (path === activeModel || path.endsWith(".part")) continue;
+    host.removeFile(path);
+    host.removeFile(path + ".done");
+  }
+}
 function osKind() {
   const p = String(host.platform() || "").toLowerCase();
   if (p.indexOf("win") !== -1) return "windows";
@@ -181,7 +204,10 @@ function engineManual(os, why) {
 function ensureModel() {
   const mp = modelPath();
   const done = mp + ".done";
-  if (host.fileExists(mp) && host.fileExists(done)) return { ok: true };
+  if (host.fileExists(mp) && host.fileExists(done)) {
+    cleanupOrphanModels(mp);
+    return { ok: true };
+  }
   host.removeFile(mp);
   host.removeFile(done);
   host.makeDirs(baseDir());
@@ -195,6 +221,7 @@ function ensureModel() {
     };
   }
   host.writeFile(done, "");
+  cleanupOrphanModels(mp);
   return { ok: true };
 }
 function modelSizeMb(id) {

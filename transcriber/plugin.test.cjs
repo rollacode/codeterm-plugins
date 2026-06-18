@@ -13,6 +13,7 @@ let execHandler = () => JSON.stringify({ code: 0, stdout: "", stderr: "" });
 let settingsObj = {};
 let platformStr = "macos";
 let files = {}; // path -> contents (in-memory fs)
+const removedFiles = [];
 
 globalThis.host = {
   settingsJson: () => JSON.stringify(settingsObj),
@@ -26,7 +27,17 @@ globalThis.host = {
   fileExists: (p) => Object.prototype.hasOwnProperty.call(files, p),
   readFile: (p) => (Object.prototype.hasOwnProperty.call(files, p) ? files[p] : null),
   writeFile: (p, c) => { files[p] = c; return true; },
-  removeFile: (p) => { delete files[p]; return true; },
+  removeFile: (p) => { removedFiles.push(p); delete files[p]; return true; },
+  readDir: (p) => {
+    const prefix = p.endsWith("/") ? p : p + "/";
+    const names = new Set();
+    for (const f of Object.keys(files)) {
+      if (!f.startsWith(prefix)) continue;
+      const rest = f.substring(prefix.length);
+      if (rest.length && rest.indexOf("/") === -1) names.add(rest);
+    }
+    return Array.from(names);
+  },
   makeDirs: () => true,
   writeTempFile: (c, suffix) => { const p = "/tmp/ct" + (suffix || ""); files[p] = c; return p; },
   progress: (opts) => { progressCalls.push(opts); },
@@ -46,6 +57,7 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
 function reset(settings, platform) {
   execCalls.length = 0;
   progressCalls.length = 0;
+  removedFiles.length = 0;
   settingsObj = settings || {};
   platformStr = platform || "macos";
   files = {};
@@ -157,6 +169,40 @@ test("poison partial: model file present but no .done sentinel → re-downloads 
   assert(reDownloaded, "must re-download when .done sentinel is missing; calls=" +
     JSON.stringify(execCalls.map((c) => c.bin)));
   assert(files[MODEL + ".done"] !== undefined, "writes .done sentinel after a successful download");
+});
+
+test("model switch cleanup: removes orphan ggml bins and matching done sentinels, keeps active and part", () => {
+  reset({ model: "base" }, "macos");
+  const dir = HOME + "/.codeterm/transcriber";
+  const active = dir + "/ggml-base.bin";
+  files[active] = "active"; files[active + ".done"] = "ok";
+  files[dir + "/ggml-small.bin"] = "old"; files[dir + "/ggml-small.bin.done"] = "ok";
+  files[dir + "/ggml-medium.bin"] = "old2"; files[dir + "/ggml-medium.bin.done"] = "ok";
+  files[dir + "/ggml-large-v3.bin.part"] = "in-progress";
+  execHandler = happyHandler(["switched"]);
+
+  const r = plugin.transcribe("/tmp/note.oga");
+  assert(r.text === "switched", "transcribes with active model, got " + JSON.stringify(r));
+  assert(files[active] === "active", "active model kept");
+  assert(files[active + ".done"] === "ok", "active sentinel kept");
+  assert(files[dir + "/ggml-small.bin"] === undefined, "old small model removed");
+  assert(files[dir + "/ggml-small.bin.done"] === undefined, "old small sentinel removed");
+  assert(files[dir + "/ggml-medium.bin"] === undefined, "old medium model removed");
+  assert(files[dir + "/ggml-medium.bin.done"] === undefined, "old medium sentinel removed");
+  assert(files[dir + "/ggml-large-v3.bin.part"] === "in-progress", "in-progress part kept");
+});
+
+test("model switch cleanup: active-only model deletes nothing", () => {
+  reset({ model: "base" }, "macos");
+  const dir = HOME + "/.codeterm/transcriber";
+  const active = dir + "/ggml-base.bin";
+  files[active] = "active"; files[active + ".done"] = "ok";
+  execHandler = happyHandler(["active only"]);
+
+  const r = plugin.transcribe("/tmp/note.oga");
+  assert(r.text === "active only", "transcribes with active model, got " + JSON.stringify(r));
+  const modelDeletes = removedFiles.filter((p) => p.indexOf(dir + "/ggml-") === 0);
+  assert(modelDeletes.length === 0, "must not delete any model files; removed=" + JSON.stringify(removedFiles));
 });
 
 test("transcribe pipeline: ffmpeg converts to 16k wav BEFORE whisper-cli, json joined", () => {
