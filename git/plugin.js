@@ -59,9 +59,10 @@ function branchOf(cwd) {
   if (r.error || r.code !== 0) return null;
   return (r.stdout || "").trim() || null;
 }
-function statusBubble(ctx) {
-  const cwd = ctx && ctx.cwd;
-  if (!cwd) return null;
+var BUBBLE_TTL_MS = 4e3;
+var BUBBLE_CACHE_MAX = 64;
+var bubbleCache = {};
+function computeBubble(cwd) {
   const branch = branchOf(cwd);
   if (!branch) return null;
   const d = parsePorcelain(git(cwd, ["status", "--porcelain"]).stdout);
@@ -73,6 +74,19 @@ function statusBubble(ctx) {
     // Click opens the plugin's own Git view (its sandboxed iframe UI).
     action: "openPanel:view:git"
   };
+}
+function statusBubble(ctx) {
+  const cwd = ctx && ctx.cwd;
+  if (!cwd) return null;
+  const now = host.unixNowMs();
+  const hit = bubbleCache[cwd];
+  if (hit && now - hit.ts < BUBBLE_TTL_MS) return hit.bubble;
+  const bubble = computeBubble(cwd);
+  if (Object.keys(bubbleCache).length >= BUBBLE_CACHE_MAX) {
+    for (const k of Object.keys(bubbleCache)) delete bubbleCache[k];
+  }
+  bubbleCache[cwd] = { bubble, ts: now };
+  return bubble;
 }
 function renderGlance(ctx) {
   const cwd = ctx && ctx.cwd;
@@ -395,10 +409,50 @@ function gitRepos(cwd) {
   }
   return out;
 }
+var MUTATING = {
+  gitStage: true,
+  gitUnstage: true,
+  gitCommit: true,
+  gitPush: true,
+  gitRevert: true
+};
+function repoRoot(cwd) {
+  const r = git(cwd, ["rev-parse", "--show-toplevel"]);
+  if (!ok(r)) return null;
+  return (r.stdout || "").trim() || null;
+}
+function pathWithinRepo(p) {
+  if (!p) return false;
+  if (p.charAt(0) === "/" || /^[A-Za-z]:[\\/]/.test(p) || p.charAt(0) === "\\") return false;
+  const segs = p.replace(/\\/g, "/").split("/");
+  let depth = 0;
+  for (const s of segs) {
+    if (s === "" || s === ".") continue;
+    if (s === "..") {
+      depth -= 1;
+      if (depth < 0) return false;
+    } else {
+      depth += 1;
+    }
+  }
+  return true;
+}
 function viewCall(method, args) {
   args = args || {};
   const cwd = args.cwd;
   if (!cwd) return { error: "no cwd" };
+  let opCwd = cwd;
+  if (MUTATING[method]) {
+    const root = repoRoot(cwd);
+    if (!root) return { error: `${method}: not a git repository` };
+    opCwd = root;
+    const paths = args.paths || (args.path ? [args.path] : []);
+    for (let i = 0; i < paths.length; i++) {
+      if (!pathWithinRepo(paths[i])) {
+        return { error: `${method}: refusing path outside repository: ${baseName(String(paths[i]))}` };
+      }
+    }
+  }
   try {
     switch (method) {
       case "gitGraph":
@@ -412,22 +466,22 @@ function viewCall(method, args) {
       case "gitWorkdirDiff":
         return gitWorkdirDiff(cwd, args.path);
       case "gitStage":
-        return gitStage(cwd, args.paths || (args.path ? [args.path] : []));
+        return gitStage(opCwd, args.paths || (args.path ? [args.path] : []));
       case "gitUnstage":
-        return gitUnstage(cwd, args.paths || (args.path ? [args.path] : []));
+        return gitUnstage(opCwd, args.paths || (args.path ? [args.path] : []));
       case "gitCommit":
-        return gitCommit(cwd, args.message);
+        return gitCommit(opCwd, args.message);
       case "gitPush":
-        return gitPush(cwd);
+        return gitPush(opCwd);
       case "gitRevert":
-        return gitRevert(cwd, args.path);
+        return gitRevert(opCwd, args.path);
       case "gitRepos":
         return gitRepos(cwd);
       default:
         return { error: `unknown method: ${method}` };
     }
   } catch (e) {
-    return { error: String(e) };
+    return { error: `${method}: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 var plugin = {
@@ -444,6 +498,7 @@ var plugin = {
   __test_parseStatusPorcelain: parseStatusPorcelain,
   __test_parseNumstatCounts: parseNumstatCounts,
   __test_mergeWorkdirFiles: mergeWorkdirFiles,
-  __test_classifyPorcelain: classifyPorcelain
+  __test_classifyPorcelain: classifyPorcelain,
+  __test_pathWithinRepo: pathWithinRepo
 };
 var plugin_default = plugin;

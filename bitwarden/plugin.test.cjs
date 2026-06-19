@@ -51,6 +51,27 @@ test("login-cipher shape (type=1, password in login)", () => {
   assert(cipher.login.password === "p", "password in login");
 });
 
+// ── network-scope (server URL host allow-list) ──
+
+test("hostOf extracts lowercased host, strips port/path", () => {
+  const h = plugin.__test_hostOf;
+  assert(h("https://vault.bitwarden.com") === "vault.bitwarden.com", "plain host");
+  assert(h("https://Vault.Bitwarden.com:8443/path?x") === "vault.bitwarden.com", "port/path stripped + lowercased");
+  assert(h("not a url") === "", "no scheme → empty");
+});
+
+test("serverHostAllowed honours allow-list incl. subdomains, rejects others", () => {
+  const allowed = plugin.__test_serverHostAllowed;
+  const allow = ["vault.bitwarden.com"];
+  assert(allowed("https://vault.bitwarden.com", allow) === true, "exact host allowed");
+  assert(allowed("https://vault.bitwarden.com/path", allow) === true, "path ignored");
+  assert(allowed("https://eu.vault.bitwarden.com", ["bitwarden.com"]) === true, "subdomain of allowed base");
+  assert(allowed("https://evil.com", allow) === false, "unlisted host rejected");
+  assert(allowed("https://notbitwarden.com", ["bitwarden.com"]) === false, "non-suffix lookalike rejected");
+  assert(allowed("ftp://vault.bitwarden.com", allow) === false, "non-http scheme rejected");
+  assert(allowed("https://vault.bitwarden.com", []) === false, "empty allow-list rejects all");
+});
+
 // ── manifest (Track S) ──
 
 test("plugin.json carries a non-empty configHelp", () => {

@@ -118,9 +118,46 @@ function buildLoginCipher(req: SecretSaveRequest, existingId: string | null, fol
 function isValidHttpUrl(s: string): boolean {
   const t = (s || "").trim().toLowerCase();
   if (!(t.indexOf("http://") === 0 || t.indexOf("https://") === 0)) return false;
+  return hostOf(s).length > 0;
+}
+
+// Host portion of a URL (lowercased, port stripped). "" when none.
+function hostOf(s: string): string {
   const afterScheme = (s || "").split("://")[1] || "";
-  const h = afterScheme.replace(/^\/+/, "").split(/[\/?#]/)[0];
-  return h.length > 0;
+  const hostPort = afterScheme.replace(/^\/+/, "").split(/[\/?#]/)[0];
+  return (hostPort.split(":")[0] || "").toLowerCase();
+}
+
+// Network-scope guard: a server URL is only honoured if its host is within the
+// plugin's declared network allow-list (manifest permissions.network.allow).
+// `bw config server <url>` would otherwise let the iframe point the CLI — and so
+// the vault traffic — at an arbitrary origin beyond what the manifest grants.
+function serverHostAllowed(url: string, allow: string[]): boolean {
+  if (!isValidHttpUrl(url)) return false;
+  const h = hostOf(url);
+  if (!h) return false;
+  return (allow || []).some((a) => {
+    const e = hostOf("https://" + (a || "")) || (a || "").toLowerCase().split(":")[0];
+    return !!e && (h === e || h.lastIndexOf("." + e) === h.length - e.length - 1);
+  });
+}
+
+// Allowed hosts = manifest network grants, always including the default cloud
+// host so the out-of-the-box server keeps working even if the manifest read
+// fails. To use a self-hosted server, add its host to the plugin's network
+// permissions (the explicit host-permission step for a new origin).
+function effectiveAllow(): string[] {
+  let allow: string[] = [];
+  try {
+    const m = host.manifest() as { permissions?: { network?: { allow?: unknown } } } | null;
+    const a = m && m.permissions && m.permissions.network && m.permissions.network.allow;
+    if (Array.isArray(a)) allow = a.filter((x) => typeof x === "string") as string[];
+  } catch (e) {
+    allow = [];
+  }
+  const def = hostOf(DEFAULT_SERVER);
+  if (def && allow.indexOf(def) < 0) allow.push(def);
+  return allow;
 }
 
 // --- bw exec layer ---
@@ -132,31 +169,40 @@ interface BwOpts {
   timeoutMs?: number;
 }
 
-function bw(args: string[], opts?: BwOpts): BwResponse {
-  opts = opts || {};
-  const full = args.concat(["--nointeraction", "--response"]);
-  const env = opts.env || {};
-  if (opts.session) env.BW_SESSION = opts.session;
-  const raw = host.exec(JSON.stringify({ bin: "bw", args: full, env: env, stdin: opts.stdin || null, timeoutMs: opts.timeoutMs || BW_TIMEOUT_MS }));
-  let ex: { error?: string; stdout?: string; stderr?: string; code?: number };
-  try { ex = JSON.parse(raw); } catch (e) { return { success: false, message: "exec parse: " + e }; }
+interface BwExec { error?: string; stdout?: string; stderr?: string; code?: number }
+
+// Shape a raw exec/poll result into bw's { success, data, message } envelope.
+function parseBwOutput(ex: BwExec): BwResponse {
   if (ex.error) return { success: false, message: ex.error };
-  let resp: BwResponse;
-  try { resp = JSON.parse((ex.stdout || "").trim()); } catch (e) {
+  try {
+    return JSON.parse((ex.stdout || "").trim()); // { success, data, message, errorCode }
+  } catch (e) {
     const combined = (ex.stderr && ex.stderr.length) ? ex.stderr : (ex.stdout || ("bw exited " + ex.code));
     return { success: false, message: combined };
   }
-  return resp; // { success, data, message, errorCode }
 }
 
-// Run a session-scoped bw command, JIT-unlocking from the stored master pw if locked.
+function bwExecOpts(args: string[], opts: BwOpts): string {
+  const full = args.concat(["--nointeraction", "--response"]);
+  const env = opts.env || {};
+  if (opts.session) env.BW_SESSION = opts.session;
+  return JSON.stringify({ bin: "bw", args: full, env: env, stdin: opts.stdin || null, timeoutMs: opts.timeoutMs || BW_TIMEOUT_MS });
+}
+
+function bw(args: string[], opts?: BwOpts): BwResponse {
+  opts = opts || {};
+  const raw = host.exec(bwExecOpts(args, opts));
+  let ex: BwExec;
+  try { ex = JSON.parse(raw); } catch (e) { return { success: false, message: "exec parse: " + e }; }
+  return parseBwOutput(ex);
+}
+
+// Run a session-scoped bw command. We persist ONLY the short-lived BW_SESSION
+// token, never the master password, so there is no silent JIT re-unlock: when the
+// session is gone the vault is locked and the user re-unlocks via the view.
 function runWithSession(args: string[], stdin?: string): Envelope {
-  let session = host.secretGet(K_SESSION);
-  if (!session) {
-    tryUnlockFromStore();
-    session = host.secretGet(K_SESSION);
-    if (!session) return { error: { kind: "locked" } };
-  }
+  const session = host.secretGet(K_SESSION);
+  if (!session) return { error: { kind: "locked" } };
   const r = bw(args, { session: session, stdin: stdin });
   if (!r.success) return { error: mapBwError(r.message) };
   return { ok: unwrapData(r.data) };
@@ -194,17 +240,12 @@ function bwStatus(): BwStatus | null {
   return unwrapData(r.data) as BwStatus;
 }
 
-function tryUnlockFromStore(): void {
-  const master = host.secretGet(K_MASTER);
-  if (!master) return;
-  secretUnlock({ masterPassword: master, email: host.secretGet(K_EMAIL) || undefined });
-}
-
 // --- SecretStore trait surface (called by JsSecretBackend) ---
 
-function secretStatus(): SecretStatus {
+// Map a raw bw status into the host's StoreStatus shape. Shared by the sync
+// secretStatus and the async statusStart/statusPoll path.
+function statusFromBw(s: BwStatus | null): SecretStatus {
   const endpoint = serverUrl();
-  const s = bwStatus();
   if (!s) return { status: "unavailable", reason: "bw not available" };
   if (s.status === "unlocked") {
     if (s.userEmail) host.secretSet(K_EMAIL, s.userEmail);
@@ -212,6 +253,10 @@ function secretStatus(): SecretStatus {
   }
   if (s.status === "locked") return { status: "locked", endpoint: endpoint };
   return { status: "logged_out", endpoint: endpoint };
+}
+
+function secretStatus(): SecretStatus {
+  return statusFromBw(bwStatus());
 }
 
 function secretUnlock(creds: SecretCreds): Envelope<true> {
@@ -223,6 +268,9 @@ function secretUnlock(creds: SecretCreds): Envelope<true> {
   const server = serverUrl();
   if (!isValidHttpUrl(server)) {
     return { error: { kind: "bad_request", message: "invalid bitwarden server URL: " + server } };
+  }
+  if (!serverHostAllowed(server, effectiveAllow())) {
+    return { error: { kind: "bad_request", message: "server host not permitted by plugin network permissions: " + hostOf(server) } };
   }
 
   let st = bwStatus();
@@ -267,11 +315,12 @@ function secretUnlock(creds: SecretCreds): Envelope<true> {
   token = (token || "").trim();
   if (!token) return { error: { kind: "backend", message: "bw unlock returned empty session" } };
 
+  // Persist ONLY the short-lived session token. The master password is never
+  // stored: a long-lived copy on disk is the secret most worth protecting, and
+  // keeping it enabled silent background re-unlock. Email (non-secret) is kept
+  // for unlock-form prefill convenience.
   host.secretSet(K_SESSION, token);
-  if (!creds.apiKeyClientId) {
-    host.secretSet(K_MASTER, creds.masterPassword as string);
-    if (creds.email) host.secretSet(K_EMAIL, creds.email);
-  }
+  if (!creds.apiKeyClientId && creds.email) host.secretSet(K_EMAIL, creds.email);
   return { ok: true };
 }
 
@@ -284,7 +333,7 @@ function secretLock(): Envelope<true> {
 function secretLogout(): Envelope<true> {
   bw(["logout"]);
   host.secretDelete(K_SESSION);
-  host.secretDelete(K_MASTER);
+  host.secretDelete(K_MASTER); // purge any master password left by an older build
   host.secretDelete(K_EMAIL);
   host.secretDelete(K_CLIENT_ID);
   host.secretDelete(K_CLIENT_SECRET);
@@ -427,11 +476,36 @@ function secretSync(): Envelope<true> {
   return { ok: true };
 }
 
+// Cheap, non-mutating, non-blocking: secretInit runs on every load and must not
+// shell `bw status` (up to 30s) or auto-unlock. Status probing and unlocking are
+// explicit, async, user-driven actions (see statusStart/statusPoll, secretUnlock).
 function secretInit(): Envelope<true> {
-  const s = bwStatus();
-  if (!s || s.status === "unlocked") return { ok: true };
-  tryUnlockFromStore();
   return { ok: true };
+}
+
+// --- async status (non-blocking; for the iframe load path) ---
+// `bw status` can take up to 30s (self-hosted). The synchronous secretStatus
+// holds the plugin VM for that whole time, which blocks the iframe on mount.
+// statusStart/statusPoll move it onto the host's exec job queue: each call is
+// sub-millisecond, the iframe polls, and the panel stays responsive.
+
+function statusStart(): { jobId?: string; error?: string } {
+  const session = host.secretGet(K_SESSION);
+  const optsJson = bwExecOpts(["status"], { session: session || undefined });
+  let res: { jobId?: string; error?: string };
+  try { res = JSON.parse(host.execStart(optsJson)); } catch (e) { return { error: "exec start: " + e }; }
+  if (res.error) return { error: res.error };
+  return { jobId: res.jobId };
+}
+
+function statusPoll(jobId: string): { done: boolean; status?: SecretStatus; error?: string } {
+  if (!jobId) return { done: true, error: "no jobId" };
+  let p: BwExec & { done?: boolean };
+  try { p = JSON.parse(host.execPoll(jobId)); } catch (e) { return { done: true, error: "exec poll: " + e }; }
+  if (!p.done) return { done: false };
+  const resp = parseBwOutput(p);
+  const s = resp.success ? (unwrapData(resp.data) as BwStatus) : null;
+  return { done: true, status: statusFromBw(s) };
 }
 
 // Glance: a quick peek at the vault connection — not the unlock form.
@@ -465,6 +539,7 @@ interface ViewArgs {
   apiKeyClientId?: string;
   apiKeyClientSecret?: string;
   organization?: string;
+  jobId?: string;
 }
 
 // Bridge entry for the plugin's iframe UI (capability: view). The iframe owns the
@@ -473,9 +548,19 @@ interface ViewArgs {
 function viewCall(method: string, args: ViewArgs): unknown {
   args = args || {};
   if (method === "status") return secretStatus();
+  // Async, non-blocking status for the iframe load path.
+  if (method === "statusStart") return statusStart();
+  if (method === "statusPoll") return statusPoll(args.jobId || "");
   if (method === "serverUrl") return { url: serverUrl() };
   if (method === "setServerUrl") {
-    host.secretSet("server_url", args.url || "");
+    const url = (args.url || "").trim();
+    if (url) {
+      if (!isValidHttpUrl(url)) return { error: "invalid server URL" };
+      if (!serverHostAllowed(url, effectiveAllow())) {
+        return { error: "server host not permitted by plugin network permissions: " + hostOf(url) };
+      }
+    }
+    host.secretSet("server_url", url);
     return { ok: true };
   }
   if (method === "unlock") {
@@ -520,6 +605,8 @@ const plugin: PluginModule = {
   __test_mapError: mapBwError,
   __test_unwrap: unwrapData,
   __test_buildCipher: buildLoginCipher,
+  __test_hostOf: hostOf,
+  __test_serverHostAllowed: serverHostAllowed,
 };
 
 export default plugin;

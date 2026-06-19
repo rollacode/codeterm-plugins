@@ -69,9 +69,16 @@ function branchOf(cwd: string): string | null {
 
 // --- capabilities ---
 
-function statusBubble(ctx: PaneContext): StatusBubble | null {
-  const cwd = ctx && ctx.cwd;
-  if (!cwd) return null;
+// statusBubble is a hot path: the host re-renders the footer pill often (every
+// pane redraw / focus change), and each computation shells `git` twice. Cache
+// the result per-cwd with a short TTL so rapid re-renders are free and the cost
+// is bounded to one refresh per cwd per interval. The cache is also size-bounded
+// so a long-lived VM that visits many cwds can't grow it without limit.
+const BUBBLE_TTL_MS = 4000;
+const BUBBLE_CACHE_MAX = 64;
+const bubbleCache: Record<string, { bubble: StatusBubble | null; ts: number }> = {};
+
+function computeBubble(cwd: string): StatusBubble | null {
   const branch = branchOf(cwd);
   if (!branch) return null; // not a repo → no pill
   const d = parsePorcelain(git(cwd, ["status", "--porcelain"]).stdout);
@@ -83,6 +90,20 @@ function statusBubble(ctx: PaneContext): StatusBubble | null {
     // Click opens the plugin's own Git view (its sandboxed iframe UI).
     action: "openPanel:view:git",
   };
+}
+
+function statusBubble(ctx: PaneContext): StatusBubble | null {
+  const cwd = ctx && ctx.cwd;
+  if (!cwd) return null;
+  const now = host.unixNowMs();
+  const hit = bubbleCache[cwd];
+  if (hit && now - hit.ts < BUBBLE_TTL_MS) return hit.bubble;
+  const bubble = computeBubble(cwd);
+  if (Object.keys(bubbleCache).length >= BUBBLE_CACHE_MAX) {
+    for (const k of Object.keys(bubbleCache)) delete bubbleCache[k];
+  }
+  bubbleCache[cwd] = { bubble, ts: now };
+  return bubble;
 }
 
 function renderGlance(ctx: PaneContext): GlanceView {
@@ -522,10 +543,67 @@ interface ViewArgs {
   message?: string;
 }
 
+// Methods that mutate the working tree / index / remote. These are NOT allowed
+// to run against an arbitrary iframe-supplied cwd (path-authority): a compromised
+// view could otherwise point add/commit/push/revert at any directory on disk.
+const MUTATING: Record<string, true> = {
+  gitStage: true,
+  gitUnstage: true,
+  gitCommit: true,
+  gitPush: true,
+  gitRevert: true,
+};
+
+// Resolve the repository root that `cwd` belongs to. git itself is the authority:
+// `rev-parse --show-toplevel` fails (→ null) for anything that is not a work tree.
+function repoRoot(cwd: string): string | null {
+  const r = git(cwd, ["rev-parse", "--show-toplevel"]);
+  if (!ok(r)) return null;
+  return (r.stdout || "").trim() || null;
+}
+
+// Reject pathspecs that could reach outside the repo: absolute paths (POSIX or
+// Windows drive form) and any `..` segment that escapes the root. git -C already
+// scopes most commands, but a pathspec like `../other/secret` would still resolve
+// relative to the repo — this is defense-in-depth on the iframe-supplied paths.
+function pathWithinRepo(p: string): boolean {
+  if (!p) return false;
+  if (p.charAt(0) === "/" || /^[A-Za-z]:[\\/]/.test(p) || p.charAt(0) === "\\") return false;
+  const segs = p.replace(/\\/g, "/").split("/");
+  let depth = 0;
+  for (const s of segs) {
+    if (s === "" || s === ".") continue;
+    if (s === "..") {
+      depth -= 1;
+      if (depth < 0) return false;
+    } else {
+      depth += 1;
+    }
+  }
+  return true;
+}
+
 function viewCall(method: string, args: ViewArgs): unknown {
   args = args || {};
   const cwd = args.cwd;
   if (!cwd) return { error: "no cwd" };
+
+  // For mutating ops we do NOT trust the iframe-supplied cwd. We canonicalize it
+  // to the repo root git reports (rejecting non-repos) and operate strictly from
+  // that root, and we validate every path argument stays inside the repo.
+  let opCwd = cwd;
+  if (MUTATING[method]) {
+    const root = repoRoot(cwd);
+    if (!root) return { error: `${method}: not a git repository` };
+    opCwd = root;
+    const paths = args.paths || (args.path ? [args.path] : []);
+    for (let i = 0; i < paths.length; i++) {
+      if (!pathWithinRepo(paths[i])) {
+        return { error: `${method}: refusing path outside repository: ${baseName(String(paths[i]))}` };
+      }
+    }
+  }
+
   try {
     switch (method) {
       case "gitGraph":
@@ -539,22 +617,24 @@ function viewCall(method: string, args: ViewArgs): unknown {
       case "gitWorkdirDiff":
         return gitWorkdirDiff(cwd, args.path as string);
       case "gitStage":
-        return gitStage(cwd, args.paths || (args.path ? [args.path] : []));
+        return gitStage(opCwd, args.paths || (args.path ? [args.path] : []));
       case "gitUnstage":
-        return gitUnstage(cwd, args.paths || (args.path ? [args.path] : []));
+        return gitUnstage(opCwd, args.paths || (args.path ? [args.path] : []));
       case "gitCommit":
-        return gitCommit(cwd, args.message as string);
+        return gitCommit(opCwd, args.message as string);
       case "gitPush":
-        return gitPush(cwd);
+        return gitPush(opCwd);
       case "gitRevert":
-        return gitRevert(cwd, args.path as string);
+        return gitRevert(opCwd, args.path as string);
       case "gitRepos":
         return gitRepos(cwd);
       default:
         return { error: `unknown method: ${method}` };
     }
   } catch (e) {
-    return { error: String(e) };
+    // Keep the method name (and thus the failing git op) in the message; the raw
+    // exception alone loses all context. cwd/paths are deliberately omitted.
+    return { error: `${method}: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
@@ -573,6 +653,7 @@ const plugin: PluginModule = {
   __test_parseNumstatCounts: parseNumstatCounts,
   __test_mergeWorkdirFiles: mergeWorkdirFiles,
   __test_classifyPorcelain: classifyPorcelain,
+  __test_pathWithinRepo: pathWithinRepo,
 };
 
 export default plugin;
