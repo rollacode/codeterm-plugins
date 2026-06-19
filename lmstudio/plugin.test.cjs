@@ -9,6 +9,8 @@ const fetchCalls = [];
 const streamCalls = [];
 const streamJobs = [];
 const execCalls = [];
+const execJobs = [];
+let pendingExecPolls = null;
 let settingsObj = {};
 let fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
 
@@ -40,6 +42,27 @@ globalThis.host = {
     const opts = JSON.parse(optsJson);
     execCalls.push(opts);
     return JSON.stringify({ code: 0, stdout: "pane-1\npane-2\n", stderr: "" });
+  },
+  // Async exec: start returns a jobId, poll drains queued responses (or a
+  // default done) just like the fetch-stream job-id/poll shape.
+  execStart: (optsJson) => {
+    const opts = JSON.parse(optsJson);
+    execCalls.push(opts);
+    const jobId = `exec-${execJobs.length}`;
+    execJobs.push({ jobId, polls: pendingExecPolls || [], closed: false });
+    pendingExecPolls = null;
+    return JSON.stringify({ jobId });
+  },
+  execPoll: (jobId) => {
+    const job = execJobs.find((j) => j.jobId === jobId);
+    if (!job) return JSON.stringify({ done: true, error: "unknown exec job" });
+    const next = job.polls.shift();
+    if (next) return JSON.stringify(next);
+    return JSON.stringify({ done: true, code: 0, stdout: "pane-1\npane-2\n", stderr: "" });
+  },
+  execClose: (jobId) => {
+    const job = execJobs.find((j) => j.jobId === jobId);
+    if (job) job.closed = true;
   },
   readFile: (path) => `file:${path}`,
   writeFile: () => true,
@@ -77,8 +100,16 @@ function reset(settings) {
   streamCalls.length = 0;
   streamJobs.length = 0;
   execCalls.length = 0;
+  execJobs.length = 0;
+  pendingExecPolls = null;
   settingsObj = settings || {};
   fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
+}
+
+// Seed the poll responses the NEXT host.exec.start job will hand back, in order.
+// Empty/unset → execPoll returns an immediate done with default stdout.
+function enqueueExec(polls) {
+  pendingExecPolls = polls.slice();
 }
 
 function pumpUntilDone(sessionId, limit = 50) {
@@ -322,6 +353,41 @@ test("codeterm-tool exec block runs host.exec, appends tool_result, then continu
   p = plugin.poll("react", null);
   const assistants = contents(p.messages, "assistant");
   assert(assistants[assistants.length - 1] === "You have pane-1 and pane-2.", "final answer");
+});
+
+test("exec tool runs async via host.exec.start/poll: pump polls until done, then tool_result + continuation", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "async-exec", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("async-exec", "list panes");
+
+  const answer = 'Checking.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"sleep 1 && echo done"}}\n```';
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-tool")], done: true, status: 200 }]);
+  // First poll: command still running; second poll: finished with output. This
+  // proves the VM lock is NOT held across the exec — start returns, pump polls.
+  enqueueExec([{ done: false }, { done: true, code: 0, stdout: "async-out\n", stderr: "" }]);
+
+  plugin.pump("async-exec"); // finishes stream → starts async exec → first poll not done
+  assert(execCalls.length === 1, "host.exec.start called once");
+  assert(execCalls[0].bin === "sh", "async exec uses the shell shape");
+  let p = plugin.poll("async-exec", null);
+  assert(contents(p.messages, "tool_result").length === 0, "no tool_result while exec still running");
+  assert(streamCalls.length === 1, "no continuation while exec pending");
+  assert(p.done === false, "session not done while exec pending");
+
+  plugin.pump("async-exec"); // second poll: exec done → tool_result + continuation
+  p = plugin.poll("async-exec", null);
+  const toolResults = contents(p.messages, "tool_result");
+  assert(toolResults.length === 1, "tool_result appended after exec completes");
+  assert(toolResults[0].includes("async-out"), "async stdout surfaced");
+  assert(streamCalls.length === 2, "continuation stream started after exec done");
+  const continuation = JSON.parse(streamCalls[1].body);
+  assert(continuation.previous_response_id === "resp-tool", "continuation uses previous_response_id");
+
+  enqueueStream(1, [{ chunks: [turn("All done.", "resp-final")], done: true, status: 200 }]);
+  pumpUntilDone("async-exec");
+  p = plugin.poll("async-exec", null);
+  const assistants = contents(p.messages, "assistant");
+  assert(assistants[assistants.length - 1] === "All done.", "final answer after async exec");
 });
 
 test("iteration cap stops after 8 tool rounds", () => {

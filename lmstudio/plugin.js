@@ -144,12 +144,33 @@ function pollFetchStream(jobId) {
 function shellQuote(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
-function execShell(cmd, cwd) {
-  const shellCmd = cwd && cwd.trim() ? `cd ${shellQuote(cwd)} && ${cmd}` : cmd;
+function execShellCmd(call) {
+  if (call.tool === "exec") {
+    const cmd = typeof call.args.cmd === "string" ? call.args.cmd : "";
+    const cwd = typeof call.args.cwd === "string" ? call.args.cwd : void 0;
+    if (!cmd) return { error: "exec requires args.cmd" };
+    return { shellCmd: cwd && cwd.trim() ? `cd ${shellQuote(cwd)} && ${cmd}` : cmd };
+  }
+  const args = typeof call.args.args === "string" ? call.args.args : "";
+  if (!args) return { error: "codeterm requires args.args" };
+  return { shellCmd: `codeterm ${args}` };
+}
+function startExecJob(shellCmd) {
   return parseJson(
-    host.exec(JSON.stringify({ bin: "sh", args: ["-lc", shellCmd], timeoutMs: 12e4 })),
-    { error: "host.exec returned non-JSON" }
+    host.execStart(JSON.stringify({ bin: "sh", args: ["-lc", shellCmd], timeoutMs: 12e4 })),
+    { error: "host.exec.start returned non-JSON" }
   );
+}
+function pollExecJob(jobId) {
+  return parseJson(host.execPoll(jobId), { done: true, error: "host.exec.poll returned non-JSON" });
+}
+function execResultFromPoll(poll) {
+  const result = {};
+  if (typeof poll.code === "number") result.code = poll.code;
+  if (typeof poll.stdout === "string") result.stdout = poll.stdout;
+  if (typeof poll.stderr === "string") result.stderr = poll.stderr;
+  if (typeof poll.error === "string") result.error = poll.error;
+  return result;
 }
 function formatToolResult(call, result) {
   return JSON.stringify({ tool: call.tool, args: call.args, result }, null, 2);
@@ -263,17 +284,6 @@ function parseToolEntries(text) {
 }
 function executeTool(call) {
   switch (call.tool) {
-    case "exec": {
-      const cmd = typeof call.args.cmd === "string" ? call.args.cmd : "";
-      const cwd = typeof call.args.cwd === "string" ? call.args.cwd : void 0;
-      if (!cmd) return { error: "exec requires args.cmd" };
-      return execShell(cmd, cwd);
-    }
-    case "codeterm": {
-      const args = typeof call.args.args === "string" ? call.args.args : "";
-      if (!args) return { error: "codeterm requires args.args" };
-      return execShell(`codeterm ${args}`);
-    }
     case "read_file": {
       const path = typeof call.args.path === "string" ? call.args.path : "";
       if (!path) return { error: "read_file requires args.path" };
@@ -413,21 +423,34 @@ function finishAssistantMessage(s, content, responseId, messageId) {
     return;
   }
   if (cleaned !== content) append(s, "assistant", cleaned, messageId);
-  for (const entry of entries) {
+  s.pendingTools = entries.slice();
+  advanceTools(s);
+}
+function emitToolResult(s, call, result) {
+  const formatted = formatToolResult(call, result);
+  append(s, "tool_result", formatted);
+  s.pendingInputs.push(`tool_result:
+${formatted}`);
+}
+function advanceTools(s) {
+  if (s.pendingExec) return;
+  while (s.pendingTools && s.pendingTools.length) {
+    const entry = s.pendingTools.shift();
     if (entry.error || !entry.call) {
-      const formatted2 = JSON.stringify(
+      const formatted = JSON.stringify(
         { tool: "parse_error", error: entry.error || "invalid tool call", raw: entry.raw },
         null,
         2
       );
-      append(s, "tool_result", formatted2);
+      append(s, "tool_result", formatted);
       s.pendingInputs.push(`tool_result:
-${formatted2}`);
+${formatted}`);
       continue;
     }
     const call = entry.call;
     if (s.toolRounds >= MAX_TOOL_ROUNDS) {
       s.pendingInputs = [];
+      s.pendingTools = null;
       if (!s.capReached) {
         append(s, "system", `Tool round cap (${MAX_TOOL_ROUNDS}) reached; stopping this turn.`);
         s.capReached = true;
@@ -436,13 +459,34 @@ ${formatted2}`);
       return;
     }
     s.toolRounds += 1;
-    const result = executeTool(call);
-    const formatted = formatToolResult(call, result);
-    append(s, "tool_result", formatted);
-    s.pendingInputs.push(`tool_result:
-${formatted}`);
+    if (call.tool === "exec" || call.tool === "codeterm") {
+      const shell = execShellCmd(call);
+      if (shell.error) {
+        emitToolResult(s, call, { error: shell.error });
+        continue;
+      }
+      const started = startExecJob(shell.shellCmd);
+      if (started.jobId) {
+        s.pendingExec = { call, jobId: started.jobId };
+        return;
+      }
+      emitToolResult(s, call, { error: started.error || "host.exec.start failed" });
+      continue;
+    }
+    emitToolResult(s, call, executeTool(call));
   }
-  startNextIfIdle(s);
+  s.pendingTools = null;
+}
+function drainExec(s) {
+  while (s.pendingExec) {
+    const poll = pollExecJob(s.pendingExec.jobId);
+    if (!poll.done) return;
+    const finished = s.pendingExec;
+    host.execClose(finished.jobId);
+    s.pendingExec = null;
+    emitToolResult(s, finished.call, execResultFromPoll(poll));
+    advanceTools(s);
+  }
 }
 function pollStream(s) {
   if (!s.stream) return;
@@ -493,7 +537,9 @@ function resolveSession(ctx) {
     stream: null,
     done: true,
     toolRounds: 0,
-    capReached: false
+    capReached: false,
+    pendingTools: null,
+    pendingExec: null
   };
 }
 var plugin = {
@@ -518,6 +564,7 @@ var plugin = {
     const s = sessions.get(sid);
     if (!s) return;
     pollStream(s);
+    drainExec(s);
     startNextIfIdle(s);
   },
   poll(sid, cursor) {
@@ -537,7 +584,7 @@ var plugin = {
     return {
       messages: s.messages.slice(from),
       cursor: String(nextCursor),
-      done: s.done && !s.stream && s.pendingInputs.length === 0
+      done: s.done && !s.stream && !s.pendingExec && s.pendingInputs.length === 0
     };
   },
   closeSession(sid) {

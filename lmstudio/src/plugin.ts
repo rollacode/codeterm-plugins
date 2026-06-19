@@ -50,11 +50,21 @@ interface Session {
   done: boolean;
   toolRounds: number;
   capReached: boolean;
+  // Tool calls parsed from the finished assistant message, processed one at a
+  // time across pumps (an async exec blocks the queue until its result lands).
+  pendingTools: ToolParseEntry[] | null;
+  // The async exec currently in flight (host.exec.start jobId), if any.
+  pendingExec: PendingExec | null;
 }
 
 interface ToolCall {
   tool: string;
   args: Record<string, unknown>;
+}
+
+interface PendingExec {
+  call: ToolCall;
+  jobId: string;
 }
 
 interface ToolParseEntry {
@@ -245,12 +255,55 @@ function shellQuote(s: string): string {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
-function execShell(cmd: string, cwd?: string): unknown {
-  const shellCmd = cwd && cwd.trim() ? `cd ${shellQuote(cwd)} && ${cmd}` : cmd;
-  return parseJson<unknown>(
-    host.exec(JSON.stringify({ bin: "sh", args: ["-lc", shellCmd], timeoutMs: 120000 })),
-    { error: "host.exec returned non-JSON" },
+// Build the `sh -lc` exec opts for an exec/codeterm tool call, or an error
+// result if required args are missing. The command runs async (host.exec.start)
+// so a multi-second tool exec never holds the shared VM lock.
+function execShellCmd(call: ToolCall): { shellCmd?: string; error?: string } {
+  if (call.tool === "exec") {
+    const cmd = typeof call.args.cmd === "string" ? call.args.cmd : "";
+    const cwd = typeof call.args.cwd === "string" ? call.args.cwd : undefined;
+    if (!cmd) return { error: "exec requires args.cmd" };
+    return { shellCmd: cwd && cwd.trim() ? `cd ${shellQuote(cwd)} && ${cmd}` : cmd };
+  }
+  const args = typeof call.args.args === "string" ? call.args.args : "";
+  if (!args) return { error: "codeterm requires args.args" };
+  return { shellCmd: `codeterm ${args}` };
+}
+
+interface ExecStartResult {
+  jobId?: string;
+  error?: string;
+}
+
+interface ExecPoll {
+  done?: boolean;
+  code?: number;
+  stdout?: string;
+  stderr?: string;
+  error?: string;
+}
+
+function startExecJob(shellCmd: string): ExecStartResult {
+  return parseJson<ExecStartResult>(
+    host.execStart(JSON.stringify({ bin: "sh", args: ["-lc", shellCmd], timeoutMs: 120000 })),
+    { error: "host.exec.start returned non-JSON" },
   );
+}
+
+function pollExecJob(jobId: string): ExecPoll {
+  return parseJson<ExecPoll>(host.execPoll(jobId), { done: true, error: "host.exec.poll returned non-JSON" });
+}
+
+// Shape the terminal poll into the same `{code, stdout, stderr}` (+ optional
+// error) object the old blocking exec returned, so tool_result rendering is
+// byte-for-byte identical from the user's view.
+function execResultFromPoll(poll: ExecPoll): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  if (typeof poll.code === "number") result.code = poll.code;
+  if (typeof poll.stdout === "string") result.stdout = poll.stdout;
+  if (typeof poll.stderr === "string") result.stderr = poll.stderr;
+  if (typeof poll.error === "string") result.error = poll.error;
+  return result;
 }
 
 function formatToolResult(call: ToolCall, result: unknown): string {
@@ -402,19 +455,10 @@ function parseToolEntries(text: string): ParsedTools {
   return { entries: [], cleaned: text };
 }
 
+// Sync tools only. exec/codeterm are dispatched separately via the async
+// host.exec.start/poll path (see advanceTools) so they never block the VM.
 function executeTool(call: ToolCall): unknown {
   switch (call.tool) {
-    case "exec": {
-      const cmd = typeof call.args.cmd === "string" ? call.args.cmd : "";
-      const cwd = typeof call.args.cwd === "string" ? call.args.cwd : undefined;
-      if (!cmd) return { error: "exec requires args.cmd" };
-      return execShell(cmd, cwd);
-    }
-    case "codeterm": {
-      const args = typeof call.args.args === "string" ? call.args.args : "";
-      if (!args) return { error: "codeterm requires args.args" };
-      return execShell(`codeterm ${args}`);
-    }
     case "read_file": {
       const path = typeof call.args.path === "string" ? call.args.path : "";
       if (!path) return { error: "read_file requires args.path" };
@@ -588,7 +632,26 @@ function finishAssistantMessage(
   // the user sees clean prose + the tool card, not the raw fence/native wrapper.
   if (cleaned !== content) append(s, "assistant", cleaned, messageId);
 
-  for (const entry of entries) {
+  // Queue the calls; advanceTools runs them in order. An exec/codeterm call
+  // starts an async job and parks the queue until drainExec sees it finish.
+  s.pendingTools = entries.slice();
+  advanceTools(s);
+}
+
+function emitToolResult(s: Session, call: ToolCall, result: unknown): void {
+  const formatted = formatToolResult(call, result);
+  append(s, "tool_result", formatted);
+  s.pendingInputs.push(`tool_result:\n${formatted}`);
+}
+
+// Walk the pending tool queue. Sync tools run inline; exec/codeterm start an
+// async job (host.exec.start) and return immediately, parking the queue on
+// s.pendingExec until drainExec resumes it. The VM lock is therefore held only
+// for the sub-ms start, never the command's full duration.
+function advanceTools(s: Session): void {
+  if (s.pendingExec) return;
+  while (s.pendingTools && s.pendingTools.length) {
+    const entry = s.pendingTools.shift() as ToolParseEntry;
     if (entry.error || !entry.call) {
       const formatted = JSON.stringify(
         { tool: "parse_error", error: entry.error || "invalid tool call", raw: entry.raw },
@@ -602,6 +665,7 @@ function finishAssistantMessage(
     const call = entry.call;
     if (s.toolRounds >= MAX_TOOL_ROUNDS) {
       s.pendingInputs = [];
+      s.pendingTools = null;
       if (!s.capReached) {
         append(s, "system", `Tool round cap (${MAX_TOOL_ROUNDS}) reached; stopping this turn.`);
         s.capReached = true;
@@ -610,12 +674,38 @@ function finishAssistantMessage(
       return;
     }
     s.toolRounds += 1;
-    const result = executeTool(call);
-    const formatted = formatToolResult(call, result);
-    append(s, "tool_result", formatted);
-    s.pendingInputs.push(`tool_result:\n${formatted}`);
+    if (call.tool === "exec" || call.tool === "codeterm") {
+      const shell = execShellCmd(call);
+      if (shell.error) {
+        emitToolResult(s, call, { error: shell.error });
+        continue;
+      }
+      const started = startExecJob(shell.shellCmd as string);
+      if (started.jobId) {
+        s.pendingExec = { call, jobId: started.jobId };
+        return; // park until drainExec sees the job finish
+      }
+      emitToolResult(s, call, { error: started.error || "host.exec.start failed" });
+      continue;
+    }
+    emitToolResult(s, call, executeTool(call));
   }
-  startNextIfIdle(s);
+  s.pendingTools = null;
+}
+
+// Poll the in-flight async exec(s). Non-blocking: a not-done poll returns and we
+// retry on the next pump. On completion, emit the tool_result and let
+// advanceTools resume the queue (which may start the next exec).
+function drainExec(s: Session): void {
+  while (s.pendingExec) {
+    const poll = pollExecJob(s.pendingExec.jobId);
+    if (!poll.done) return;
+    const finished = s.pendingExec;
+    host.execClose(finished.jobId);
+    s.pendingExec = null;
+    emitToolResult(s, finished.call, execResultFromPoll(poll));
+    advanceTools(s);
+  }
 }
 
 function pollStream(s: Session): void {
@@ -675,6 +765,8 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
     done: true,
     toolRounds: 0,
     capReached: false,
+    pendingTools: null,
+    pendingExec: null,
   };
 }
 
@@ -702,6 +794,7 @@ const plugin: ChatBackend = {
     const s = sessions.get(sid);
     if (!s) return;
     pollStream(s);
+    drainExec(s);
     startNextIfIdle(s);
   },
 
@@ -725,7 +818,7 @@ const plugin: ChatBackend = {
     return {
       messages: s.messages.slice(from),
       cursor: String(nextCursor),
-      done: s.done && !s.stream && s.pendingInputs.length === 0,
+      done: s.done && !s.stream && !s.pendingExec && s.pendingInputs.length === 0,
     };
   },
 
