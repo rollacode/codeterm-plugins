@@ -60,15 +60,30 @@ function presets() {
   const s = readSettings();
   if (!Array.isArray(s.presets)) return [];
   return s.presets.filter(
-    (p) => !!p && typeof p.id === "string" && typeof p.name === "string" && typeof p.systemPrompt === "string"
+    (p) => !!p && typeof p.id === "string" && typeof p.name === "string" && (p.systemPrompt === void 0 || typeof p.systemPrompt === "string")
   );
 }
-function resolvePreset(id) {
-  const all = presets();
+function presetById(all, id) {
+  if (!id) return null;
+  return all.find((p) => p.id === id) || null;
+}
+function defaultPreset(all) {
   if (!all.length) return null;
   const s = readSettings();
-  const wanted = id || s.defaultPreset || all[0].id;
-  return all.find((p) => p.id === wanted) || all[0];
+  return presetById(all, s.defaultPreset) || all[0];
+}
+function presetBoundToModel(all, modelId) {
+  if (!modelId) return null;
+  return all.find((p) => typeof p.model === "string" && p.model.trim() === modelId) || null;
+}
+function resolvePreset(id, modelId) {
+  const all = presets();
+  if (!all.length) return null;
+  return presetBoundToModel(all, modelId || "") || presetById(all, id) || defaultPreset(all);
+}
+function defaultSystemPrompt(all) {
+  const p = defaultPreset(all);
+  return p && typeof p.systemPrompt === "string" ? p.systemPrompt : "";
 }
 function nextId(s, prefix = "lmstudio") {
   const id = `${prefix}-${s.seq}`;
@@ -501,9 +516,13 @@ function pollStream(s) {
 }
 function resolveSession(ctx) {
   const s = readSettings();
-  const preset = resolvePreset(ctx.preset);
+  const allPresets = presets();
+  const chosenModel = ctx.model || s.model || "";
+  const boundPreset = presetBoundToModel(allPresets, chosenModel);
+  const preset = boundPreset || resolvePreset(ctx.preset, chosenModel);
   const model = ctx.model || preset && preset.model || s.model || "";
-  const generalSystemPrompt = ctx.systemPrompt || preset && preset.systemPrompt || "";
+  const presetSystemPrompt = preset && typeof preset.systemPrompt === "string" ? preset.systemPrompt : "";
+  const generalSystemPrompt = (boundPreset ? presetSystemPrompt || defaultSystemPrompt(allPresets) : ctx.systemPrompt || presetSystemPrompt) || defaultSystemPrompt(allPresets) || "";
   const systemPrompt = systemPromptForModel(generalSystemPrompt, model);
   const params = { ...s.params || {}, ...preset && preset.params || {} };
   return {

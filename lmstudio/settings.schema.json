@@ -16,27 +16,27 @@
         "key": "model",
         "label": "Model fallback",
         "placeholder": "leave blank to use the loaded model",
-        "description": "Fallback model id. A preset model or spawn-time model overrides this."
+        "description": "Fallback model id. A spawn-time model overrides this; matching preset model bindings select prompts and params."
       }
     ]
   },
   {
     "kind": "section",
     "title": "Presets",
-    "description": "Open-shell presets select the system prompt, model, and native LM Studio parameters for new sessions.",
+    "description": "Open-shell presets select the system prompt, model binding, and native LM Studio parameters for new sessions.",
     "fields": [
       {
         "kind": "text",
         "key": "defaultPreset",
         "label": "Default preset",
         "placeholder": "codeterm",
-        "description": "Preset id to use when a session does not specify ctx.preset."
+        "description": "Preset id to use when the chosen model has no bound preset and the session does not specify ctx.preset."
       },
       {
         "kind": "info",
         "level": "info",
         "title": "Preset objects",
-        "body": "Edit config.yaml for the presets array. Shape: presets: [{ id, name, systemPrompt, model?, params? }]. The default config seeds the codeterm preset from prompts/codeterm-default.md."
+        "body": "Edit config.yaml for the presets array. Shape: presets: [{ id, name, systemPrompt?, model?, params? }]. A preset with model binds to that exact model id and wins at session init; if it has no systemPrompt, the default preset prompt is used."
       }
     ]
   }
