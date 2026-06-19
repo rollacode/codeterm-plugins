@@ -20,7 +20,8 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // lmstudio/src/plugin.ts
 var plugin_exports = {};
 __export(plugin_exports, {
-  default: () => plugin_default
+  default: () => plugin_default,
+  describeModelSwitch: () => describeModelSwitch
 });
 module.exports = __toCommonJS(plugin_exports);
 var DEFAULT_BASE_URL = "http://localhost:1234";
@@ -87,6 +88,17 @@ function rememberLastModel(model) {
     host.writeFile(path, JSON.stringify({ lastModel }));
   } catch {
   }
+}
+function describeSwitchMessage(targetModel) {
+  return `Switching to ${targetModel} will unload the current one (VRAM). Continue?`;
+}
+function describeModelSwitch(sessionId, targetModel) {
+  const target = cleanModel(targetModel);
+  if (!target) return { needsConfirm: false, message: "" };
+  const s = sessions.get(sessionId);
+  const active = cleanModel(s && s.model);
+  if (!s || active === target) return { needsConfirm: false, message: "" };
+  return { needsConfirm: true, message: describeSwitchMessage(target) };
 }
 function baseUrl() {
   const s = readSettings();
@@ -183,6 +195,29 @@ function startFetchStream(opts) {
     ),
     { error: "fetchStream returned non-JSON" }
   );
+}
+function errorTextFromBody(raw) {
+  if (!raw) return "";
+  const parsed = parseJson(raw, null);
+  if (parsed && typeof parsed === "object") {
+    const obj = parsed;
+    const error = obj.error;
+    if (typeof error === "string") return error;
+    if (error && typeof error === "object") {
+      const nested = error;
+      if (typeof nested.message === "string") return nested.message;
+      if (typeof nested.error === "string") return nested.error;
+    }
+    if (typeof obj.message === "string") return obj.message;
+    if (typeof obj.detail === "string") return obj.detail;
+  }
+  return raw;
+}
+function isVramLoadFailure(text) {
+  return /(vram|insufficient|not enough|out of memory|failed to load|could not load|couldn't load)/i.test(text);
+}
+function vramLoadFailureMessage(model) {
+  return `couldn't load ${model}: not enough VRAM \u2014 unload a model in LM Studio or pick a smaller one`;
 }
 function pollFetchStream(jobId) {
   return parseJson(host.fetchStreamPoll(jobId), {
@@ -436,7 +471,8 @@ function startLmStudioCall(s, input) {
     body: JSON.stringify(body)
   });
   if (!started.jobId) {
-    append(s, "system", `LM Studio stream error: ${started.error || "missing jobId"}`);
+    const err = started.error || "missing jobId";
+    append(s, "system", isVramLoadFailure(err) ? vramLoadFailureMessage(s.model) : `LM Studio stream error: ${err}`);
     s.done = true;
     return;
   }
@@ -525,14 +561,19 @@ function pollStream(s) {
   const stream = s.stream;
   const poll = pollFetchStream(stream.jobId);
   if (poll.error) {
-    append(s, "system", `LM Studio stream error: ${poll.error}`);
+    append(s, "system", isVramLoadFailure(poll.error) ? vramLoadFailureMessage(s.model) : `LM Studio stream error: ${poll.error}`);
     host.fetchStreamClose(stream.jobId);
     s.stream = null;
     s.done = true;
     return;
   }
   if (poll.status && poll.status >= 400) {
-    append(s, "system", `LM Studio HTTP ${poll.status}`);
+    const err = errorTextFromBody(poll.body);
+    append(
+      s,
+      "system",
+      isVramLoadFailure(err) ? vramLoadFailureMessage(s.model) : `LM Studio HTTP ${poll.status}`
+    );
     host.fetchStreamClose(stream.jobId);
     s.stream = null;
     s.done = true;
@@ -660,9 +701,11 @@ var plugin = {
     const s = sessions.get(sid);
     return { model: s ? s.model : void 0 };
   },
+  describeModelSwitch,
   setModel(sid, model) {
     const s = sessions.get(sid);
     if (!s || typeof model !== "string" || !model) return;
+    if (s.model === model) return;
     s.model = model;
     rememberLastModel(model);
     s.previousResponseId = null;
