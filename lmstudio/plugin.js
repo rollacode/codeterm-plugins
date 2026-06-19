@@ -26,7 +26,8 @@ module.exports = __toCommonJS(plugin_exports);
 var DEFAULT_BASE_URL = "http://localhost:1234";
 var MAX_TOOL_ROUNDS = 8;
 var TOOL_FENCE_RE = /```codeterm-tool\s*\n([\s\S]*?)\n?```/g;
-var NATIVE_CALL_RE = /call\s*[:=]\s*([A-Za-z_][A-Za-z0-9_]*)\s*(\{[\s\S]*?\})/g;
+var CURATED_TOOLS = ["exec", "read_file", "write_file", "codeterm", "mem_search", "spawn_agent"];
+var NATIVE_CALL_RE = /call\s*[:=]\s*((?:[A-Za-z_][A-Za-z0-9_]*\s*:\s*)*[A-Za-z_][A-Za-z0-9_]*)\s*(\{[\s\S]*?\})/g;
 var NATIVE_ARG_ALIASES = {
   exec: { command: "cmd" },
   codeterm: { command: "args", cmd: "args" }
@@ -240,7 +241,8 @@ function collectNativeMatches(text) {
   NATIVE_CALL_RE.lastIndex = 0;
   let match;
   while ((match = NATIVE_CALL_RE.exec(text)) !== null) {
-    const tool = match[1];
+    const tool = match[1].split(":").pop().trim();
+    if (!CURATED_TOOLS.includes(tool)) continue;
     let start = match.index;
     let end = match.index + match[0].length;
     const wrapBefore = text.slice(0, start).match(/<\s*\|?\s*(?:tool_call|tool▁call)\s*\|?\s*>\s*$/i);

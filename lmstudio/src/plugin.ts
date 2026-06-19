@@ -92,7 +92,11 @@ const CURATED_TOOLS = ["exec", "read_file", "write_file", "codeterm", "mem_searc
 // for display and parse the call:NAME{...} shape (args may be loose JS-object
 // syntax: unquoted keys, single quotes).
 const NATIVE_WRAPPER_RE = /<\s*\|?\s*(?:tool_call|tool▁call)\s*\|?\s*>/gi;
-const NATIVE_CALL_RE = /call\s*[:=]\s*([A-Za-z_][A-Za-z0-9_]*)\s*(\{[\s\S]*?\})/g;
+// The call header may be namespaced — gemma emits `call:exec`, `call:default_api:exec`,
+// even `call:foo:bar:write_file`. Capture the whole colon-separated chain; the real
+// tool name is its LAST segment (resolved + validated in collectNativeMatches).
+const NATIVE_CALL_RE =
+  /call\s*[:=]\s*((?:[A-Za-z_][A-Za-z0-9_]*\s*:\s*)*[A-Za-z_][A-Za-z0-9_]*)\s*(\{[\s\S]*?\})/g;
 // Native arg aliases mapped to our curated arg names (gemma emits `command`).
 const NATIVE_ARG_ALIASES: Record<string, Record<string, string>> = {
   exec: { command: "cmd" },
@@ -404,7 +408,12 @@ function collectNativeMatches(text: string): ToolMatch[] {
   NATIVE_CALL_RE.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = NATIVE_CALL_RE.exec(text)) !== null) {
-    const tool = match[1];
+    // The tool name is the last colon-delimited segment of the header
+    // (call:exec → exec; call:default_api:exec → exec; call:a:b:write_file → write_file).
+    const tool = match[1].split(":").pop()!.trim();
+    // Only the 6 curated tools ever execute. An unknown native name (any namespace)
+    // is ignored entirely — no match, so the raw text simply stays in the bubble.
+    if (!CURATED_TOOLS.includes(tool)) continue;
     let start = match.index;
     let end = match.index + match[0].length;
     // Swallow adjacent wrapper tokens so stripping leaves no `<|tool_call>` residue.
