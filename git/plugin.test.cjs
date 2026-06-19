@@ -83,6 +83,20 @@ test("mergeWorkdirFiles joins numstat counts, untracked has no counts", () => {
   assert(merged[1].added === null && merged[1].deleted === null, "untracked null counts");
 });
 
+// ── path-authority (mutating-op path validation) ──
+
+test("pathWithinRepo accepts repo-relative paths, rejects escapes", () => {
+  const within = plugin.__test_pathWithinRepo;
+  assert(within("src/plugin.ts") === true, "relative path ok");
+  assert(within("a/b/../c.txt") === true, "internal .. that stays inside is ok");
+  assert(within("") === false, "empty rejected");
+  assert(within("../secret") === false, "parent escape rejected");
+  assert(within("a/../../x") === false, "deep parent escape rejected");
+  assert(within("/etc/passwd") === false, "absolute POSIX rejected");
+  assert(within("C:\\Windows\\x") === false, "absolute Windows drive rejected");
+  assert(within("\\\\server\\share") === false, "UNC / backslash-root rejected");
+});
+
 // ── manifest (Track S) ──
 
 test("plugin.json carries a non-empty configHelp", () => {

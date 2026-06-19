@@ -53,19 +53,52 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  // Server URL is a cheap read — fetch it on its own so the panel paints at once.
+  const refreshServer = useCallback(async () => {
     try {
-      const [s, su] = await Promise.all([ct().invoke("status"), ct().invoke("serverUrl")]);
-      setStatus(s as Status);
+      const su = await ct().invoke("serverUrl");
       setServerUrl((su as { url?: string })?.url ?? "");
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      /* leave the field empty; the status probe surfaces real errors */
     }
   }, []);
 
+  // `bw status` can take up to 30s, so it must not block the first paint. Run it
+  // as a host exec job and poll, leaving the UI responsive the whole time.
+  const refreshStatus = useCallback(async () => {
+    try {
+      const started = (await ct().invoke("statusStart")) as { jobId?: string; error?: string };
+      if (started?.error || !started?.jobId) {
+        // Fall back to the synchronous path if the async one is unavailable.
+        setStatus((await ct().invoke("status")) as Status);
+        return;
+      }
+      const jobId = started.jobId;
+      for (let i = 0; i < 130; i++) {
+        const p = (await ct().invoke("statusPoll", { jobId })) as { done: boolean; status?: Status; error?: string };
+        if (p?.error) throw new Error(p.error);
+        if (p?.done) {
+          if (p.status) setStatus(p.status);
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    }
+  }, []);
+
+  const refresh = useCallback(async () => {
+    await refreshServer();
+    await refreshStatus();
+  }, [refreshServer, refreshStatus]);
+
+  // Paint immediately: kick the cheap server read and the deferred status probe
+  // independently so neither blocks the other or the initial render.
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    void refreshServer();
+    void refreshStatus();
+  }, [refreshServer, refreshStatus]);
 
   const st = status?.status;
   const needsLogin = st !== "locked";
@@ -95,6 +128,8 @@ function App() {
       </div>
 
       <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--ct-muted, #9aa)", marginBottom: 8 }}>Connection</div>
+      {/* Reserve height so the panel doesn't jump when the deferred status lands. */}
+      <div style={{ minHeight: 132 }}>
       {!status ? (
         <span style={{ color: COLOR.muted, fontSize: 12.5 }}>Checking status…</span>
       ) : st === "unlocked" ? (
@@ -134,6 +169,7 @@ function App() {
           {busy && <span style={{ color: COLOR.muted, fontSize: 11 }}>Talking to the Bitwarden CLI — this can take 20–30s for self-hosted.</span>}
         </div>
       )}
+      </div>
       {error && <div style={{ color: COLOR.danger, fontSize: 12, marginTop: 10 }}>{error}</div>}
     </div>
   );

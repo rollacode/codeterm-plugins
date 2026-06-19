@@ -90,39 +90,64 @@ function buildLoginCipher(req, existingId, folderId) {
 function isValidHttpUrl(s) {
   const t = (s || "").trim().toLowerCase();
   if (!(t.indexOf("http://") === 0 || t.indexOf("https://") === 0)) return false;
-  const afterScheme = (s || "").split("://")[1] || "";
-  const h = afterScheme.replace(/^\/+/, "").split(/[\/?#]/)[0];
-  return h.length > 0;
+  return hostOf(s).length > 0;
 }
-function bw(args, opts) {
-  opts = opts || {};
+function hostOf(s) {
+  const afterScheme = (s || "").split("://")[1] || "";
+  const hostPort = afterScheme.replace(/^\/+/, "").split(/[\/?#]/)[0];
+  return (hostPort.split(":")[0] || "").toLowerCase();
+}
+function serverHostAllowed(url, allow) {
+  if (!isValidHttpUrl(url)) return false;
+  const h = hostOf(url);
+  if (!h) return false;
+  return (allow || []).some((a) => {
+    const e = hostOf("https://" + (a || "")) || (a || "").toLowerCase().split(":")[0];
+    return !!e && (h === e || h.lastIndexOf("." + e) === h.length - e.length - 1);
+  });
+}
+function effectiveAllow() {
+  let allow = [];
+  try {
+    const m = host.manifest();
+    const a = m && m.permissions && m.permissions.network && m.permissions.network.allow;
+    if (Array.isArray(a)) allow = a.filter((x) => typeof x === "string");
+  } catch (e) {
+    allow = [];
+  }
+  const def = hostOf(DEFAULT_SERVER);
+  if (def && allow.indexOf(def) < 0) allow.push(def);
+  return allow;
+}
+function parseBwOutput(ex) {
+  if (ex.error) return { success: false, message: ex.error };
+  try {
+    return JSON.parse((ex.stdout || "").trim());
+  } catch (e) {
+    const combined = ex.stderr && ex.stderr.length ? ex.stderr : ex.stdout || "bw exited " + ex.code;
+    return { success: false, message: combined };
+  }
+}
+function bwExecOpts(args, opts) {
   const full = args.concat(["--nointeraction", "--response"]);
   const env = opts.env || {};
   if (opts.session) env.BW_SESSION = opts.session;
-  const raw = host.exec(JSON.stringify({ bin: "bw", args: full, env, stdin: opts.stdin || null, timeoutMs: opts.timeoutMs || BW_TIMEOUT_MS }));
+  return JSON.stringify({ bin: "bw", args: full, env, stdin: opts.stdin || null, timeoutMs: opts.timeoutMs || BW_TIMEOUT_MS });
+}
+function bw(args, opts) {
+  opts = opts || {};
+  const raw = host.exec(bwExecOpts(args, opts));
   let ex;
   try {
     ex = JSON.parse(raw);
   } catch (e) {
     return { success: false, message: "exec parse: " + e };
   }
-  if (ex.error) return { success: false, message: ex.error };
-  let resp;
-  try {
-    resp = JSON.parse((ex.stdout || "").trim());
-  } catch (e) {
-    const combined = ex.stderr && ex.stderr.length ? ex.stderr : ex.stdout || "bw exited " + ex.code;
-    return { success: false, message: combined };
-  }
-  return resp;
+  return parseBwOutput(ex);
 }
 function runWithSession(args, stdin) {
-  let session = host.secretGet(K_SESSION);
-  if (!session) {
-    tryUnlockFromStore();
-    session = host.secretGet(K_SESSION);
-    if (!session) return { error: { kind: "locked" } };
-  }
+  const session = host.secretGet(K_SESSION);
+  if (!session) return { error: { kind: "locked" } };
   const r = bw(args, { session, stdin });
   if (!r.success) return { error: mapBwError(r.message) };
   return { ok: unwrapData(r.data) };
@@ -146,14 +171,8 @@ function bwStatus() {
   if (!r.success) return null;
   return unwrapData(r.data);
 }
-function tryUnlockFromStore() {
-  const master = host.secretGet(K_MASTER);
-  if (!master) return;
-  secretUnlock({ masterPassword: master, email: host.secretGet(K_EMAIL) || void 0 });
-}
-function secretStatus() {
+function statusFromBw(s) {
   const endpoint = serverUrl();
-  const s = bwStatus();
   if (!s) return { status: "unavailable", reason: "bw not available" };
   if (s.status === "unlocked") {
     if (s.userEmail) host.secretSet(K_EMAIL, s.userEmail);
@@ -161,6 +180,9 @@ function secretStatus() {
   }
   if (s.status === "locked") return { status: "locked", endpoint };
   return { status: "logged_out", endpoint };
+}
+function secretStatus() {
+  return statusFromBw(bwStatus());
 }
 function secretUnlock(creds) {
   creds = creds || {};
@@ -171,6 +193,9 @@ function secretUnlock(creds) {
   const server = serverUrl();
   if (!isValidHttpUrl(server)) {
     return { error: { kind: "bad_request", message: "invalid bitwarden server URL: " + server } };
+  }
+  if (!serverHostAllowed(server, effectiveAllow())) {
+    return { error: { kind: "bad_request", message: "server host not permitted by plugin network permissions: " + hostOf(server) } };
   }
   let st = bwStatus();
   let loggedIn = !!st && st.status !== "unauthenticated";
@@ -212,10 +237,7 @@ function secretUnlock(creds) {
   token = (token || "").trim();
   if (!token) return { error: { kind: "backend", message: "bw unlock returned empty session" } };
   host.secretSet(K_SESSION, token);
-  if (!creds.apiKeyClientId) {
-    host.secretSet(K_MASTER, creds.masterPassword);
-    if (creds.email) host.secretSet(K_EMAIL, creds.email);
-  }
+  if (!creds.apiKeyClientId && creds.email) host.secretSet(K_EMAIL, creds.email);
   return { ok: true };
 }
 function secretLock() {
@@ -349,10 +371,32 @@ function secretSync() {
   return { ok: true };
 }
 function secretInit() {
-  const s = bwStatus();
-  if (!s || s.status === "unlocked") return { ok: true };
-  tryUnlockFromStore();
   return { ok: true };
+}
+function statusStart() {
+  const session = host.secretGet(K_SESSION);
+  const optsJson = bwExecOpts(["status"], { session: session || void 0 });
+  let res;
+  try {
+    res = JSON.parse(host.execStart(optsJson));
+  } catch (e) {
+    return { error: "exec start: " + e };
+  }
+  if (res.error) return { error: res.error };
+  return { jobId: res.jobId };
+}
+function statusPoll(jobId) {
+  if (!jobId) return { done: true, error: "no jobId" };
+  let p;
+  try {
+    p = JSON.parse(host.execPoll(jobId));
+  } catch (e) {
+    return { done: true, error: "exec poll: " + e };
+  }
+  if (!p.done) return { done: false };
+  const resp = parseBwOutput(p);
+  const s = resp.success ? unwrapData(resp.data) : null;
+  return { done: true, status: statusFromBw(s) };
 }
 function renderGlance() {
   const s = secretStatus();
@@ -378,9 +422,18 @@ function renderGlance() {
 function viewCall(method, args) {
   args = args || {};
   if (method === "status") return secretStatus();
+  if (method === "statusStart") return statusStart();
+  if (method === "statusPoll") return statusPoll(args.jobId || "");
   if (method === "serverUrl") return { url: serverUrl() };
   if (method === "setServerUrl") {
-    host.secretSet("server_url", args.url || "");
+    const url = (args.url || "").trim();
+    if (url) {
+      if (!isValidHttpUrl(url)) return { error: "invalid server URL" };
+      if (!serverHostAllowed(url, effectiveAllow())) {
+        return { error: "server host not permitted by plugin network permissions: " + hostOf(url) };
+      }
+    }
+    host.secretSet("server_url", url);
     return { ok: true };
   }
   if (method === "unlock") {
@@ -423,6 +476,8 @@ var plugin = {
   __test_base64: base64Encode,
   __test_mapError: mapBwError,
   __test_unwrap: unwrapData,
-  __test_buildCipher: buildLoginCipher
+  __test_buildCipher: buildLoginCipher,
+  __test_hostOf: hostOf,
+  __test_serverHostAllowed: serverHostAllowed
 };
 var plugin_default = plugin;
