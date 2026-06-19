@@ -5,6 +5,7 @@
 import type {
   ChatBackend,
   ChatBackendOpenSessionCtx,
+  ChatSessionInfo,
   FetchResult,
   Model,
   NormalizedChatMessage,
@@ -858,6 +859,21 @@ const plugin: ChatBackend = {
 
   listPresets(): PresetInfo[] {
     return presets().map((p) => ({ id: p.id, name: p.name, description: p.description }));
+  },
+
+  sessionInfo(sid): ChatSessionInfo {
+    const s = sessions.get(sid);
+    return { model: s ? s.model : undefined };
+  },
+
+  setModel(sid, model) {
+    const s = sessions.get(sid);
+    if (!s || typeof model !== "string" || !model) return;
+    s.model = model;
+    // The previous_response_id chains to the OLD model's server-side state; a
+    // different model can't continue it. Reset so the next turn re-seeds context
+    // (assembledContext) under the new model instead of 400-ing on a stale id.
+    s.previousResponseId = null;
   },
 };
 

@@ -17,7 +17,7 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// src/plugin.ts
+// lmstudio/src/plugin.ts
 var plugin_exports = {};
 __export(plugin_exports, {
   default: () => plugin_default
@@ -610,6 +610,16 @@ var plugin = {
   },
   listPresets() {
     return presets().map((p) => ({ id: p.id, name: p.name, description: p.description }));
+  },
+  sessionInfo(sid) {
+    const s = sessions.get(sid);
+    return { model: s ? s.model : void 0 };
+  },
+  setModel(sid, model) {
+    const s = sessions.get(sid);
+    if (!s || typeof model !== "string" || !model) return;
+    s.model = model;
+    s.previousResponseId = null;
   }
 };
 var plugin_default = plugin;
