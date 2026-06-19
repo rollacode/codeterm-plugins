@@ -27,6 +27,7 @@ module.exports = __toCommonJS(plugin_exports);
 var DEFAULT_BASE_URL = "http://localhost:1234";
 var LAST_MODEL_PATH = ".codeterm/plugins/lmstudio/last-model.json";
 var AUTHORED_PROMPTS_PATH = ".codeterm/plugins/lmstudio/authored-prompts.json";
+var PROMPT_AUTHOR_WORKSPACE = "lmstudio-prompt-authoring";
 var MAX_TOOL_ROUNDS = 8;
 var MAX_MALFORMED_RETRIES = 2;
 var TOOL_SCHEMA_JSON = JSON.stringify({
@@ -124,6 +125,25 @@ function writeAuthoredPrompt(model, draft) {
     host.writeFile(path, JSON.stringify(current));
   } catch {
   }
+}
+function applyAuthoredPrompt(s, model, draft) {
+  if (!model) return;
+  writeAuthoredPrompt(model, draft);
+  s.systemPrompt = draft;
+}
+function buildAuthoringRequest(model, currentPrompt, instruction) {
+  const ask = instruction && instruction.trim() ? `
+
+User's tuning request: ${instruction.trim()}` : "";
+  return `You are tuning the system prompt for a local LM Studio chat model "${model}". Rewrite and improve the prompt below so it works well for that model \u2014 small local models learn best from short, concrete, example-led prompts. Preserve its intent and any tool-use rules. Reply with ONLY the new system prompt text: no preamble, no commentary, no code fences.` + ask + `
+
+--- CURRENT SYSTEM PROMPT ---
+${currentPrompt}`;
+}
+function stripPromptFence(text) {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/^```[^\r\n]*\r?\n([\s\S]*?)\r?\n?```$/);
+  return (fenced ? fenced[1] : trimmed).trim();
 }
 function describeSwitchMessage(targetModel) {
   return `Switching to ${targetModel} will unload the current one (VRAM). Continue?`;
@@ -616,6 +636,38 @@ function drainExec(s) {
     advanceTools(s);
   }
 }
+function drainAuthor(s) {
+  if (!s.pendingAuthor) return;
+  const pending = s.pendingAuthor;
+  let poll;
+  try {
+    poll = host.agent.poll(pending.ticket);
+  } catch (e) {
+    s.pendingAuthor = null;
+    try {
+      host.agent.reap(pending.agentSessionId);
+    } catch {
+    }
+    append(s, "system", `Prompt authoring failed: ${String(e)}`);
+    s.done = true;
+    return;
+  }
+  if (!poll || !poll.done) return;
+  s.pendingAuthor = null;
+  try {
+    host.agent.reap(pending.agentSessionId);
+  } catch {
+  }
+  const reply = typeof poll.reply === "string" ? poll.reply : "";
+  if (poll.error || !reply.trim()) {
+    append(s, "system", `Prompt authoring failed: ${poll.error || "the author agent returned no prompt"}.`);
+    s.done = true;
+    return;
+  }
+  applyAuthoredPrompt(s, pending.model, stripPromptFence(reply));
+  append(s, "system", `Updated the system prompt for ${pending.model} from the author agent.`);
+  s.done = true;
+}
 function pollStream(s) {
   if (!s.stream) return;
   const stream = s.stream;
@@ -683,7 +735,8 @@ function resolveSession(ctx) {
     capReached: false,
     malformedRetries: 0,
     pendingTools: null,
-    pendingExec: null
+    pendingExec: null,
+    pendingAuthor: null
   };
 }
 var plugin = {
@@ -711,6 +764,7 @@ var plugin = {
     if (!s) return;
     pollStream(s);
     drainExec(s);
+    drainAuthor(s);
     startNextIfIdle(s);
   },
   poll(sid, cursor) {
@@ -730,7 +784,7 @@ var plugin = {
     return {
       messages: s.messages.slice(from),
       cursor: String(nextCursor),
-      done: s.done && !s.stream && !s.pendingExec && s.pendingInputs.length === 0
+      done: s.done && !s.stream && !s.pendingExec && !s.pendingAuthor && s.pendingInputs.length === 0
     };
   },
   closeSession(sid) {
@@ -768,8 +822,51 @@ var plugin = {
   authorSystemPrompt(sid, draft) {
     const s = sessions.get(sid);
     if (!s || !s.model) return;
-    writeAuthoredPrompt(s.model, draft);
-    s.systemPrompt = draft;
+    applyAuthoredPrompt(s, s.model, draft);
+  },
+  // R6: hand the "tune this pane's system prompt for model X" task off to a
+  // separate agent pane. Plugin-mediated end to end: we read THIS session's
+  // model + current prompt, spawn an author agent (host.workspace/agent), send
+  // it the request, and park `pendingAuthor`. pump → drainAuthor polls the
+  // ticket across turns and writes the reply back via applyAuthoredPrompt, so
+  // the user iteratively improves the per-model prompt without editing JSON.
+  requestPromptAuthoring(sid, instruction) {
+    const s = sessions.get(sid);
+    if (!s || !s.model) return { ok: false, error: "no active session or model to author for" };
+    if (s.pendingAuthor) return { ok: false, error: "prompt authoring already in progress" };
+    let workspaceId = "";
+    try {
+      workspaceId = host.workspace.ensure({ name: PROMPT_AUTHOR_WORKSPACE }).workspaceId;
+    } catch (e) {
+      append(s, "system", `Prompt authoring unavailable: ${String(e)}`);
+      return { ok: false, error: String(e) };
+    }
+    if (!workspaceId) {
+      append(s, "system", "Prompt authoring failed: could not open an authoring workspace.");
+      return { ok: false, error: "no workspace" };
+    }
+    const spawned = host.agent.spawn(workspaceId, {
+      task: `Help tune the system prompt for the local LM Studio model "${s.model}".`
+    });
+    const agentSessionId = spawned && spawned.sessionId;
+    if (!agentSessionId) {
+      append(s, "system", "Prompt authoring failed: could not spawn an author agent.");
+      return { ok: false, error: "spawn failed" };
+    }
+    const sent = host.agent.send(agentSessionId, buildAuthoringRequest(s.model, s.systemPrompt, instruction));
+    const ticket = sent && sent.ticket;
+    if (!ticket) {
+      try {
+        host.agent.reap(agentSessionId);
+      } catch {
+      }
+      append(s, "system", "Prompt authoring failed: could not send the request to the author agent.");
+      return { ok: false, error: "send failed" };
+    }
+    s.pendingAuthor = { ticket, agentSessionId, model: s.model };
+    s.done = false;
+    append(s, "system", `Handing off system-prompt authoring for ${s.model} to an agent\u2026`);
+    return { ok: true };
   },
   setModel(sid, model) {
     const s = sessions.get(sid);
