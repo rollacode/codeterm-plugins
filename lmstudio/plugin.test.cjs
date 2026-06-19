@@ -12,6 +12,16 @@ const execCalls = [];
 const execJobs = [];
 const toolParseCalls = [];
 const fileStore = {};
+// R6 prompt-authoring hand-off (host.workspace + host.agent spawn/send/poll/reap).
+const workspaceCalls = [];
+const agentSpawns = [];
+const agentSends = [];
+const agentReaps = [];
+const agentPollCalls = [];
+// Queue of poll responses the next ticket hands back, in order; null/empty → an
+// immediate done carrying `agentReply`.
+let agentPolls = null;
+let agentReply = "DRAFTED PROMPT";
 let pendingExecPolls = null;
 // When set, host.toolcall.parse returns this verbatim (a tri-state JSON string)
 // or, if a function, calls it (used to simulate the native parser throwing).
@@ -148,8 +158,31 @@ globalThis.host = {
     return true;
   },
   mem: (optsJson) => JSON.stringify({ results: [{ title: "memory", body: optsJson }] }),
+  // Real host compute base shape (host.ts): object returns, sync per step.
+  workspace: {
+    ensure: (opts) => {
+      workspaceCalls.push(opts);
+      return { workspaceId: "ws-author" };
+    },
+    panes: () => [],
+  },
   agent: {
-    spawn: (optsJson) => JSON.stringify({ sessionId: "agent-1", opts: JSON.parse(optsJson) }),
+    spawn: (workspaceId, opts) => {
+      agentSpawns.push({ workspaceId, opts });
+      return { sessionId: `agent-${agentSpawns.length}` };
+    },
+    send: (sessionId, text) => {
+      agentSends.push({ sessionId, text });
+      return { ticket: `ticket-${agentSends.length}` };
+    },
+    poll: (ticket) => {
+      agentPollCalls.push(ticket);
+      if (agentPolls && agentPolls.length) return agentPolls.shift();
+      return { done: true, reply: agentReply };
+    },
+    reap: (sessionId) => {
+      agentReaps.push(sessionId);
+    },
   },
   worker: {
     start: (optsJson) => JSON.stringify({ jobId: "worker-1", opts: JSON.parse(optsJson) }),
@@ -187,11 +220,23 @@ function reset(settings) {
   execCalls.length = 0;
   execJobs.length = 0;
   toolParseCalls.length = 0;
+  workspaceCalls.length = 0;
+  agentSpawns.length = 0;
+  agentSends.length = 0;
+  agentReaps.length = 0;
+  agentPollCalls.length = 0;
+  agentPolls = null;
+  agentReply = "DRAFTED PROMPT";
   pendingExecPolls = null;
   forceParse = null;
   settingsObj = settings || {};
   for (const key of Object.keys(fileStore)) delete fileStore[key];
   fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
+}
+
+// Queue the poll responses the in-flight authoring ticket hands back, in order.
+function enqueueAgentPoll(polls) {
+  agentPolls = polls.slice();
 }
 
 // Seed the poll responses the NEXT host.exec.start job will hand back, in order.
@@ -1143,6 +1188,117 @@ test("authorSystemPrompt persists across multiple models independently", () => {
   const stored = JSON.parse(fileStore[authoredPromptsPath] || "{}");
   assert(stored["model-a"] === "Tuned for model-a", "model-a stored, got " + stored["model-a"]);
   assert(stored["model-b"] === "Tuned for model-b", "model-b stored, got " + stored["model-b"]);
+});
+
+// ── R6: requestPromptAuthoring — hand the tuning off to another agent pane ────
+
+test("requestPromptAuthoring hands off to an agent pane: ensures a workspace, spawns, and sends the current model + prompt", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [], model: "gemma-3" });
+  plugin.openSession({ paneId: "author-handoff-r6", config: {}, model: "gemma-3", systemPrompt: "current prompt body" });
+
+  agentReply = "TUNED PROMPT FOR GEMMA";
+  const res = plugin.requestPromptAuthoring("author-handoff-r6", "make it shorter and example-led");
+  assert(res && res.ok === true, "requestPromptAuthoring reports ok, got " + JSON.stringify(res));
+
+  assert(workspaceCalls.length === 1, "a workspace was ensured for the author, got " + workspaceCalls.length);
+  assert(agentSpawns.length === 1, "an author agent was spawned, got " + agentSpawns.length);
+  assert(agentSpawns[0].workspaceId === "ws-author", "spawn used the ensured workspace");
+  assert(agentSends.length === 1, "the authoring request was sent to the agent, got " + agentSends.length);
+  const sent = agentSends[0].text;
+  assert(/gemma-3/.test(sent), "request names the target model, got " + sent);
+  assert(/current prompt body/.test(sent), "request includes the current prompt, got " + sent);
+  assert(/make it shorter and example-led/.test(sent), "request includes the user instruction, got " + sent);
+});
+
+test("requestPromptAuthoring round-trip writes the agent's reply back as the authored prompt and updates the live session", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [], model: "gemma-3" });
+  plugin.openSession({ paneId: "author-rt-r6", config: {}, model: "gemma-3", systemPrompt: "old" });
+
+  agentReply = "TUNED PROMPT FOR GEMMA";
+  plugin.requestPromptAuthoring("author-rt-r6", "tune it");
+  pumpUntilDone("author-rt-r6");
+
+  const stored = JSON.parse(fileStore[authoredPromptsPath] || "{}");
+  assert(stored["gemma-3"] === "TUNED PROMPT FOR GEMMA", "authored prompt written for model, got " + JSON.stringify(stored));
+  assert(
+    plugin.sessionInfo("author-rt-r6").systemPrompt === "TUNED PROMPT FOR GEMMA",
+    "live session prompt updated, got " + plugin.sessionInfo("author-rt-r6").systemPrompt,
+  );
+  assert(agentReaps.length === 1 && agentReaps[0] === "agent-1", "the author agent was reaped, got " + JSON.stringify(agentReaps));
+});
+
+test("the prompt authored via the round-trip is used on the next session init", () => {
+  reset({
+    baseUrl: "http://localhost:1234",
+    model: "gemma-3",
+    presets: [{ id: "p1", name: "P1", systemPrompt: "Preset prompt", model: "gemma-3" }],
+    defaultPreset: "p1",
+  });
+  plugin.openSession({ paneId: "author-init-rt-r6", config: {}, model: "gemma-3", systemPrompt: "Preset prompt" });
+
+  agentReply = "ROUND-TRIP TUNED PROMPT";
+  plugin.requestPromptAuthoring("author-init-rt-r6", "tune");
+  pumpUntilDone("author-init-rt-r6");
+
+  // A fresh session for the same model must pick up the authored prompt.
+  streamCalls.length = 0;
+  streamJobs.length = 0;
+  const body = openAndStartBody({ paneId: "author-init-rt-r6b", config: {}, model: "gemma-3" });
+  assert(
+    body.system_prompt === "ROUND-TRIP TUNED PROMPT",
+    "next init uses the round-trip authored prompt over the preset, got " + body.system_prompt,
+  );
+});
+
+test("requestPromptAuthoring parks across pumps until the author agent's reply is ready", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [], model: "qwen-2.5" });
+  plugin.openSession({ paneId: "author-park-r6", config: {}, model: "qwen-2.5", systemPrompt: "p" });
+
+  enqueueAgentPoll([{ done: false }, { done: false }, { done: true, reply: "READY PROMPT" }]);
+  plugin.requestPromptAuthoring("author-park-r6", "tune");
+
+  // Not done while the agent is still working.
+  plugin.pump("author-park-r6");
+  assert(plugin.poll("author-park-r6", null).done === false, "session not done while author is in flight");
+
+  pumpUntilDone("author-park-r6");
+  assert(agentPollCalls.length >= 3, "polled until the reply was ready, got " + agentPollCalls.length);
+  const stored = JSON.parse(fileStore[authoredPromptsPath] || "{}");
+  assert(stored["qwen-2.5"] === "READY PROMPT", "authored prompt written after parking, got " + JSON.stringify(stored));
+});
+
+test("requestPromptAuthoring strips a code fence the author agent wraps the prompt in", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [], model: "gemma-3" });
+  plugin.openSession({ paneId: "author-fence-r6", config: {}, model: "gemma-3", systemPrompt: "p" });
+
+  agentReply = "```\nUNFENCED PROMPT\n```";
+  plugin.requestPromptAuthoring("author-fence-r6", "tune");
+  pumpUntilDone("author-fence-r6");
+
+  const stored = JSON.parse(fileStore[authoredPromptsPath] || "{}");
+  assert(stored["gemma-3"] === "UNFENCED PROMPT", "fence stripped from authored prompt, got " + JSON.stringify(stored));
+});
+
+test("requestPromptAuthoring surfaces an author-agent error as a system message and writes nothing", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [], model: "gemma-3" });
+  plugin.openSession({ paneId: "author-err-r6", config: {}, model: "gemma-3", systemPrompt: "keep me" });
+
+  enqueueAgentPoll([{ done: true, error: "author agent crashed" }]);
+  plugin.requestPromptAuthoring("author-err-r6", "tune");
+  const p = pumpUntilDone("author-err-r6");
+
+  assert(!fileStore[authoredPromptsPath], "nothing written on author error");
+  assert(plugin.sessionInfo("author-err-r6").systemPrompt === "keep me", "live prompt unchanged on error");
+  const systems = contents(p.messages, "system");
+  assert(systems.some((m) => /author agent crashed/.test(m)), "error surfaced as system message, got " + JSON.stringify(systems));
+  assert(agentReaps.length === 1, "agent reaped even on error");
+});
+
+test("requestPromptAuthoring on an unknown session or one without a model is a safe no-op", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [] });
+  const res = plugin.requestPromptAuthoring("no-such-session", "x");
+  assert(res && res.ok === false, "unknown session reports not-ok, got " + JSON.stringify(res));
+  assert(agentSpawns.length === 0 && workspaceCalls.length === 0, "no agent spawned for unknown session");
 });
 
 let failed = 0;
