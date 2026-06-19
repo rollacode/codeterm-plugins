@@ -776,6 +776,13 @@ test("settings schema and config expose presets/defaultPreset", () => {
   const config = readFileSync(join(__dirname, "config.yaml"), "utf8");
   assert(/defaultPreset:\s*codeterm/.test(config), "config has defaultPreset");
   assert(/systemPrompt:\s*\|/.test(config), "config seeds block systemPrompt");
+
+  const prompt = readFileSync(join(__dirname, "prompts", "codeterm-default.md"), "utf8");
+  const replyExample = '{"tool":"codeterm","args":{"args":"send \\"Hi, I got your message.\\" --pane 36b00886"}}';
+  assert(prompt.includes("Replying to messages from other panes"), "prompt documents inbound pane replies");
+  assert(prompt.includes("from_mesh=<peer>"), "prompt documents mesh reply routing");
+  assert(prompt.includes(replyExample), "prompt includes single-string codeterm reply example");
+  assert(config.includes(replyExample), "seed config includes single-string codeterm reply example");
 });
 
 let failed = 0;
