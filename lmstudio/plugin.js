@@ -28,6 +28,7 @@ var DEFAULT_BASE_URL = "http://localhost:1234";
 var LAST_MODEL_PATH = ".codeterm/plugins/lmstudio/last-model.json";
 var AUTHORED_PROMPTS_PATH = ".codeterm/plugins/lmstudio/authored-prompts.json";
 var MAX_TOOL_ROUNDS = 8;
+var MAX_MALFORMED_RETRIES = 2;
 var TOOL_SCHEMA_JSON = JSON.stringify({
   tools: [
     { name: "exec", args: ["cmd"], optional: ["cwd"] },
@@ -337,22 +338,29 @@ function parsedSpan(parsed, text) {
   return { start, end };
 }
 function parseToolEntries(text) {
-  let raw = "null";
+  let raw = "";
   try {
     raw = host.toolcall.parse(text, TOOL_SCHEMA_JSON);
   } catch (e) {
     host.log("warn", `host.toolcall.parse failed: ${String(e)}`);
-    return { entries: [], cleaned: text };
+    return { entries: [], cleaned: text, status: "none" };
   }
-  if (raw === "null") return { entries: [], cleaned: text };
   const parsed = parseJson(raw, null);
-  if (!parsed || typeof parsed.tool !== "string") return { entries: [], cleaned: text };
+  if (!parsed || typeof parsed !== "object") return { entries: [], cleaned: text, status: "none" };
+  if (parsed.status === "malformed") {
+    const reason = typeof parsed.reason === "string" && parsed.reason ? parsed.reason : "unparseable tool call";
+    return { entries: [], cleaned: text, status: "malformed", reason };
+  }
+  if (parsed.status !== "ok" || typeof parsed.tool !== "string") {
+    return { entries: [], cleaned: text, status: "none" };
+  }
   const args = parsed.args && typeof parsed.args === "object" && !Array.isArray(parsed.args) ? parsed.args : {};
   const span = parsedSpan(parsed, text);
   const cleaned = span ? stripSpans(text, [expandToolSpan(text, span)]) : text;
   return {
     entries: [{ call: { tool: parsed.tool, args } }],
-    cleaned
+    cleaned,
+    status: "ok"
   };
 }
 function toolContent(call) {
@@ -529,7 +537,24 @@ function startNextIfIdle(s) {
 }
 function finishAssistantMessage(s, content, responseId, messageId) {
   if (responseId) s.previousResponseId = responseId;
-  const { entries, cleaned } = parseToolEntries(content);
+  const { entries, cleaned, status, reason } = parseToolEntries(content);
+  if (status === "malformed") {
+    if (s.malformedRetries < MAX_MALFORMED_RETRIES) {
+      s.malformedRetries += 1;
+      s.pendingInputs.push(
+        `tool_result:
+ERROR: your codeterm-tool JSON was invalid (${reason || "unparseable tool call"}). Resend a single valid JSON tool call, or answer in plain text if no tool is needed.`
+      );
+      return;
+    }
+    append(
+      s,
+      "system",
+      `Could not parse a valid tool call after ${MAX_MALFORMED_RETRIES} retries; treating the reply as a normal message.`
+    );
+    s.done = true;
+    return;
+  }
   if (!entries.length) {
     s.done = true;
     return;
@@ -656,6 +681,7 @@ function resolveSession(ctx) {
     done: true,
     toolRounds: 0,
     capReached: false,
+    malformedRetries: 0,
     pendingTools: null,
     pendingExec: null
   };
@@ -675,6 +701,7 @@ var plugin = {
     append(s, "user", text);
     s.toolRounds = 0;
     s.capReached = false;
+    s.malformedRetries = 0;
     s.done = false;
     s.pendingInputs.push(text);
     startNextIfIdle(s);

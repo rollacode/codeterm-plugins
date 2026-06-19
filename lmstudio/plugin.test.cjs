@@ -13,6 +13,9 @@ const execJobs = [];
 const toolParseCalls = [];
 const fileStore = {};
 let pendingExecPolls = null;
+// When set, host.toolcall.parse returns this verbatim (a tri-state JSON string)
+// or, if a function, calls it (used to simulate the native parser throwing).
+let forceParse = null;
 let settingsObj = {};
 let fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
 const lastModelPath = "/tmp/codeterm-home/.codeterm/plugins/lmstudio/last-model.json";
@@ -53,6 +56,8 @@ function candidateFromObject(value, schema) {
 
 function mockToolcallParse(rawText, schemaJson) {
   toolParseCalls.push({ rawText, schemaJson });
+  if (typeof forceParse === "function") return forceParse(rawText, schemaJson);
+  if (forceParse !== null) return forceParse;
   const schema = JSON.parse(schemaJson);
   const candidates = [];
   const addJsonCandidate = (text, offset, confidence) => {
@@ -77,9 +82,12 @@ function mockToolcallParse(rawText, schemaJson) {
   }
 
   addJsonCandidate(rawText, 0, 0.86);
-  if (!candidates.length) return "null";
+  // Tri-state contract (R8a): a valid call -> {status:"ok",...}; no tool-call
+  // syntax at all -> {status:"none"}. (The malformed branch is exercised via
+  // forceParse, since this simplified parser can't reliably reproduce it.)
+  if (!candidates.length) return JSON.stringify({ status: "none" });
   candidates.sort((a, b) => b.confidence - a.confidence);
-  return JSON.stringify(candidates[0]);
+  return JSON.stringify({ status: "ok", ...candidates[0] });
 }
 
 globalThis.host = {
@@ -180,6 +188,7 @@ function reset(settings) {
   execJobs.length = 0;
   toolParseCalls.length = 0;
   pendingExecPolls = null;
+  forceParse = null;
   settingsObj = settings || {};
   for (const key of Object.keys(fileStore)) delete fileStore[key];
   fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
@@ -735,6 +744,93 @@ test("malformed trailing tool fence is a normal assistant message when host pars
   assert(execCalls.length === 0, "no tool executed for parser null");
   assert(streamCalls.length === 1, "no tool continuation after parser null");
   assert(contents(p.messages, "assistant").some((m) => m.includes("codeterm-tool")), "raw malformed text remains visible as assistant text");
+});
+
+// ── R8b: tri-state host.toolcall.parse (ok / none / malformed) ─────────────
+test("tri-state ok: a {status:'ok'} parse executes the validated call", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "tri-ok", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("tri-ok", "run it");
+  const answer = 'Running.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo hi"}}\n```';
+  forceParse = JSON.stringify({ status: "ok", tool: "exec", args: { cmd: "echo hi" }, confidence: 0.95, span: [9, answer.length] });
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-tri-ok")], done: true, status: 200 }]);
+  plugin.pump("tri-ok");
+
+  assert(execCalls.length === 1, "ok status executes the tool, got " + execCalls.length);
+  assert(execCalls[0].args.some((a) => String(a).includes("echo hi")), "ok status ran the parsed command");
+  const p = plugin.poll("tri-ok", null);
+  assert(contents(p.messages, "tool_result").length === 1, "ok status produces a tool_result");
+});
+
+test("tri-state none: a {status:'none'} parse is a normal assistant message, no tool", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "tri-none", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("tri-none", "just talk");
+  forceParse = JSON.stringify({ status: "none" });
+  enqueueStream(0, [{ chunks: [turn("Here is a plain answer.", "resp-tri-none")], done: true, status: 200 }]);
+  plugin.pump("tri-none");
+
+  const p = plugin.poll("tri-none", null);
+  assert(execCalls.length === 0, "none status executes no tool");
+  assert(streamCalls.length === 1, "none status starts no continuation/retry");
+  assert(contents(p.messages, "tool_result").length === 0, "none status produces no tool_result");
+  assert(contents(p.messages, "assistant").some((m) => m.includes("Here is a plain answer.")), "none status keeps the assistant prose");
+  assert(p.done === true, "none status ends the turn");
+});
+
+test("tri-state malformed: a {status:'malformed'} parse injects a retry note instead of silently dropping", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "tri-malf", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("tri-malf", "do a thing");
+  forceParse = JSON.stringify({ status: "malformed", reason: "unterminated args object", span: [0, 20] });
+  const bad = '```codeterm-tool\n{"tool":"exec","args":\n```';
+  enqueueStream(0, [{ chunks: [turn(bad, "resp-tri-malf")], done: true, status: 200 }]);
+  plugin.pump("tri-malf");
+
+  // Not silent: no tool runs, but a continuation stream carries a corrective note.
+  assert(execCalls.length === 0, "malformed runs no tool");
+  assert(streamCalls.length === 2, "malformed triggers a retry continuation, got " + streamCalls.length);
+  const retry = JSON.parse(streamCalls[1].body);
+  assert(/ERROR/.test(retry.input), "retry input flags an error: " + retry.input);
+  assert(/invalid/i.test(retry.input), "retry input says the JSON was invalid");
+  assert(/unterminated args object/.test(retry.input), "retry input includes the parser's reason");
+  assert(/resend a single valid json tool call/i.test(retry.input), "retry input asks for a corrected call");
+});
+
+test("tri-state malformed retries are capped per turn so a stuck model cannot loop forever", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "tri-cap", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("tri-cap", "go");
+  forceParse = JSON.stringify({ status: "malformed", reason: "still broken" });
+  const bad = '```codeterm-tool\n{"tool":"exec"\n```';
+  // Lockstep: each pump finishes the current stream and (until the cap) starts
+  // the next. Three streams (initial + 2 retries) then the cap halts the loop.
+  for (let i = 0; i < 3; i += 1) {
+    enqueueStream(i, [{ chunks: [turn(bad, `resp-cap-${i}`)], done: true, status: 200 }]);
+    plugin.pump("tri-cap");
+  }
+
+  const p = plugin.poll("tri-cap", null);
+  assert(streamCalls.length === 3, "capped at 2 retries (3 streams total), got " + streamCalls.length);
+  assert(execCalls.length === 0, "no tool executed across the malformed loop");
+  assert(p.done === true, "session is done after the retry cap");
+  const systems = contents(p.messages, "system");
+  assert(systems.some((m) => /valid tool call/i.test(m)), "a user-facing fallback note is emitted after the cap");
+});
+
+test("tri-state: a thrown host.toolcall.parse is handled as a normal message, not a crash", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "tri-throw", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("tri-throw", "talk");
+  forceParse = () => { throw new Error("native parser panic"); };
+  enqueueStream(0, [{ chunks: [turn("A safe answer.", "resp-tri-throw")], done: true, status: 200 }]);
+  plugin.pump("tri-throw");
+
+  const p = plugin.poll("tri-throw", null);
+  assert(execCalls.length === 0, "thrown parse executes no tool");
+  assert(streamCalls.length === 1, "thrown parse starts no continuation/retry");
+  assert(contents(p.messages, "assistant").some((m) => m.includes("A safe answer.")), "thrown parse keeps the assistant prose");
+  assert(p.done === true, "thrown parse ends the turn cleanly");
 });
 
 test("listPresets returns configured presets and listModels uses /api/v1/models", () => {

@@ -60,6 +60,10 @@ interface Session {
   done: boolean;
   toolRounds: number;
   capReached: boolean;
+  // How many times this turn the model emitted a tool-call-shaped block that the
+  // host parser flagged `malformed`; each one injects a corrective retry note.
+  // Capped at MAX_MALFORMED_RETRIES so a model that never recovers can't loop.
+  malformedRetries: number;
   // Tool calls parsed from the finished assistant message, processed one at a
   // time across pumps (an async exec blocks the queue until its result lands).
   pendingTools: ToolParseEntry[] | null;
@@ -83,9 +87,11 @@ interface ToolParseEntry {
 }
 
 interface ParsedToolCall {
+  status?: unknown;
   tool?: unknown;
   args?: unknown;
   span?: unknown;
+  reason?: unknown;
 }
 
 interface StreamPoll {
@@ -100,6 +106,7 @@ const DEFAULT_BASE_URL = "http://localhost:1234";
 const LAST_MODEL_PATH = ".codeterm/plugins/lmstudio/last-model.json";
 const AUTHORED_PROMPTS_PATH = ".codeterm/plugins/lmstudio/authored-prompts.json";
 const MAX_TOOL_ROUNDS = 8;
+const MAX_MALFORMED_RETRIES = 2;
 const TOOL_SCHEMA_JSON = JSON.stringify({
   tools: [
     { name: "exec", args: ["cmd"], optional: ["cwd"] },
@@ -453,9 +460,16 @@ function formatToolResult(call: ToolCall, result: unknown): string {
   return JSON.stringify({ tool: call.tool, args: call.args, result }, null, 2);
 }
 
+// Mirrors the host's tri-state contract: "ok" carries entries to execute,
+// "none" is a normal assistant message, "malformed" is a tool-call-shaped block
+// that failed parse+repair and must be retried (never silently dropped).
+type ParseStatus = "ok" | "none" | "malformed";
+
 interface ParsedTools {
   entries: ToolParseEntry[];
   cleaned: string;
+  status: ParseStatus;
+  reason?: string;
 }
 
 // Remove the given (executed) spans from the displayed text and tidy whitespace,
@@ -507,18 +521,30 @@ function parsedSpan(parsed: ParsedToolCall, text: string): { start: number; end:
 }
 
 // Delegate extraction/repair/validation to the host's Rust parser. It returns a
-// single validated call or "null"; invalid or unknown tool syntax is normal text.
+// tri-state JSON string: {status:"ok",tool,args,span} for a validated call,
+// {status:"none"} for plain prose, or {status:"malformed",reason} for a
+// tool-call-shaped block that survived neither parse nor repair (-> retry, not
+// drop). A parser throw is degraded to "none" so a single bad call never crashes
+// the turn.
 function parseToolEntries(text: string): ParsedTools {
-  let raw = "null";
+  let raw = "";
   try {
     raw = host.toolcall.parse(text, TOOL_SCHEMA_JSON);
   } catch (e) {
     host.log("warn", `host.toolcall.parse failed: ${String(e)}`);
-    return { entries: [], cleaned: text };
+    return { entries: [], cleaned: text, status: "none" };
   }
-  if (raw === "null") return { entries: [], cleaned: text };
+  // Tolerate the legacy "null"/non-JSON shapes by degrading to "none".
   const parsed = parseJson<ParsedToolCall | null>(raw, null);
-  if (!parsed || typeof parsed.tool !== "string") return { entries: [], cleaned: text };
+  if (!parsed || typeof parsed !== "object") return { entries: [], cleaned: text, status: "none" };
+
+  if (parsed.status === "malformed") {
+    const reason = typeof parsed.reason === "string" && parsed.reason ? parsed.reason : "unparseable tool call";
+    return { entries: [], cleaned: text, status: "malformed", reason };
+  }
+  if (parsed.status !== "ok" || typeof parsed.tool !== "string") {
+    return { entries: [], cleaned: text, status: "none" };
+  }
   const args = parsed.args && typeof parsed.args === "object" && !Array.isArray(parsed.args)
     ? (parsed.args as Record<string, unknown>)
     : {};
@@ -527,6 +553,7 @@ function parseToolEntries(text: string): ParsedTools {
   return {
     entries: [{ call: { tool: parsed.tool, args } }],
     cleaned,
+    status: "ok",
   };
 }
 
@@ -741,7 +768,29 @@ function finishAssistantMessage(
 ): void {
   if (responseId) s.previousResponseId = responseId;
 
-  const { entries, cleaned } = parseToolEntries(content);
+  const { entries, cleaned, status, reason } = parseToolEntries(content);
+  // A tool-call-shaped block that failed parse+repair: don't drop it silently
+  // (the live Gemma bug — the model never learns and the reply never arrives).
+  // Feed back a corrective note so the model resends a valid call, capping the
+  // retries so a model that never recovers can't loop forever.
+  if (status === "malformed") {
+    if (s.malformedRetries < MAX_MALFORMED_RETRIES) {
+      s.malformedRetries += 1;
+      s.pendingInputs.push(
+        `tool_result:\nERROR: your codeterm-tool JSON was invalid (${reason || "unparseable tool call"}). ` +
+          "Resend a single valid JSON tool call, or answer in plain text if no tool is needed.",
+      );
+      // Leave s.done false: startNextIfIdle will start the retry continuation.
+      return;
+    }
+    append(
+      s,
+      "system",
+      `Could not parse a valid tool call after ${MAX_MALFORMED_RETRIES} retries; treating the reply as a normal message.`,
+    );
+    s.done = true;
+    return;
+  }
   if (!entries.length) {
     s.done = true;
     return;
@@ -895,6 +944,7 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
     done: true,
     toolRounds: 0,
     capReached: false,
+    malformedRetries: 0,
     pendingTools: null,
     pendingExec: null,
   };
@@ -919,6 +969,7 @@ const plugin: ChatBackend & {
     append(s, "user", text);
     s.toolRounds = 0;
     s.capReached = false;
+    s.malformedRetries = 0;
     s.done = false;
     s.pendingInputs.push(text);
     startNextIfIdle(s);
