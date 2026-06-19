@@ -662,6 +662,24 @@ test("listPresets returns configured presets and listModels uses /api/v1/models"
   assert(models[0].id === "llama-3" && models[0].displayName === "llama-3", "first model");
 });
 
+test("sessionInfo reports the session model and setModel switches it for the next turn", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [] });
+  plugin.openSession({ paneId: "switch", config: {}, systemPrompt: "sys", model: "llama-3" });
+
+  // sessionInfo surfaces the model the session opened with.
+  assert(plugin.sessionInfo("switch").model === "llama-3", "sessionInfo returns opened model");
+
+  // setModel swaps the model the next /api/v1/chat will use.
+  plugin.setModel("switch", "qwen-2.5");
+  assert(plugin.sessionInfo("switch").model === "qwen-2.5", "setModel updates the session model");
+
+  // An unknown session / empty model is a safe no-op (no throw).
+  plugin.setModel("nope", "x");
+  plugin.setModel("switch", "");
+  assert(plugin.sessionInfo("switch").model === "qwen-2.5", "empty/unknown setModel is a no-op");
+  assert(plugin.sessionInfo("nope").model === undefined, "unknown session has no model");
+});
+
 test("settings schema and config expose presets/defaultPreset", () => {
   const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));
   const schemaText = JSON.stringify(schema);
