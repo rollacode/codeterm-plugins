@@ -33,6 +33,11 @@ interface LastModelState {
   lastModel?: unknown;
 }
 
+interface ModelSwitchDescription {
+  needsConfirm: boolean;
+  message: string;
+}
+
 interface StreamState {
   jobId: string;
   messageId: string;
@@ -169,6 +174,19 @@ function rememberLastModel(model: string): void {
   }
 }
 
+function describeSwitchMessage(targetModel: string): string {
+  return `Switching to ${targetModel} will unload the current one (VRAM). Continue?`;
+}
+
+export function describeModelSwitch(sessionId: string, targetModel: string): ModelSwitchDescription {
+  const target = cleanModel(targetModel);
+  if (!target) return { needsConfirm: false, message: "" };
+  const s = sessions.get(sessionId);
+  const active = cleanModel(s && s.model);
+  if (!s || active === target) return { needsConfirm: false, message: "" };
+  return { needsConfirm: true, message: describeSwitchMessage(target) };
+}
+
 function baseUrl(): string {
   const s = readSettings();
   const url = s.baseUrl && s.baseUrl.trim() ? s.baseUrl.trim() : DEFAULT_BASE_URL;
@@ -301,6 +319,32 @@ function startFetchStream(opts: {
     ),
     { error: "fetchStream returned non-JSON" },
   );
+}
+
+function errorTextFromBody(raw?: string): string {
+  if (!raw) return "";
+  const parsed = parseJson<unknown>(raw, null);
+  if (parsed && typeof parsed === "object") {
+    const obj = parsed as Record<string, unknown>;
+    const error = obj.error;
+    if (typeof error === "string") return error;
+    if (error && typeof error === "object") {
+      const nested = error as Record<string, unknown>;
+      if (typeof nested.message === "string") return nested.message;
+      if (typeof nested.error === "string") return nested.error;
+    }
+    if (typeof obj.message === "string") return obj.message;
+    if (typeof obj.detail === "string") return obj.detail;
+  }
+  return raw;
+}
+
+function isVramLoadFailure(text: string): boolean {
+  return /(vram|insufficient|not enough|out of memory|failed to load|could not load|couldn't load)/i.test(text);
+}
+
+function vramLoadFailureMessage(model: string): string {
+  return `couldn't load ${model}: not enough VRAM — unload a model in LM Studio or pick a smaller one`;
 }
 
 function pollFetchStream(jobId: string): StreamPoll {
@@ -627,7 +671,8 @@ function startLmStudioCall(s: Session, input: string): void {
     body: JSON.stringify(body),
   });
   if (!started.jobId) {
-    append(s, "system", `LM Studio stream error: ${started.error || "missing jobId"}`);
+    const err = started.error || "missing jobId";
+    append(s, "system", isVramLoadFailure(err) ? vramLoadFailureMessage(s.model) : `LM Studio stream error: ${err}`);
     s.done = true;
     return;
   }
@@ -741,14 +786,19 @@ function pollStream(s: Session): void {
   const stream = s.stream;
   const poll = pollFetchStream(stream.jobId);
   if (poll.error) {
-    append(s, "system", `LM Studio stream error: ${poll.error}`);
+    append(s, "system", isVramLoadFailure(poll.error) ? vramLoadFailureMessage(s.model) : `LM Studio stream error: ${poll.error}`);
     host.fetchStreamClose(stream.jobId);
     s.stream = null;
     s.done = true;
     return;
   }
   if (poll.status && poll.status >= 400) {
-    append(s, "system", `LM Studio HTTP ${poll.status}`);
+    const err = errorTextFromBody(poll.body);
+    append(
+      s,
+      "system",
+      isVramLoadFailure(err) ? vramLoadFailureMessage(s.model) : `LM Studio HTTP ${poll.status}`,
+    );
     host.fetchStreamClose(stream.jobId);
     s.stream = null;
     s.done = true;
@@ -810,7 +860,9 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
   };
 }
 
-const plugin: ChatBackend = {
+const plugin: ChatBackend & {
+  describeModelSwitch: (sessionId: string, targetModel: string) => ModelSwitchDescription;
+} = {
   openSession(ctx) {
     const sid = ctx.paneId;
     const s = resolveSession(ctx);
@@ -903,9 +955,12 @@ const plugin: ChatBackend = {
     return { model: s ? s.model : undefined };
   },
 
+  describeModelSwitch,
+
   setModel(sid, model) {
     const s = sessions.get(sid);
     if (!s || typeof model !== "string" || !model) return;
+    if (s.model === model) return;
     s.model = model;
     rememberLastModel(model);
     // The previous_response_id chains to the OLD model's server-side state; a

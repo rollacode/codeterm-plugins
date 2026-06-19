@@ -856,6 +856,20 @@ test("setModel persists the last-used model", () => {
   assert(stored.lastModel === "qwen-2.5", "last-used model persisted, got " + JSON.stringify(stored));
 });
 
+test("describeModelSwitch asks for confirmation only when target differs from active model", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [] });
+  plugin.openSession({ paneId: "describe-switch", config: {}, systemPrompt: "sys", model: "llama-3" });
+
+  let desc = plugin.describeModelSwitch("describe-switch", "llama-3");
+  assert(desc.needsConfirm === false, "same model is a no-op");
+  assert(desc.message === "", "same model has no confirm message");
+
+  desc = plugin.describeModelSwitch("describe-switch", "qwen-2.5");
+  assert(desc.needsConfirm === true, "different model needs confirmation");
+  assert(/qwen-2\.5/.test(desc.message), "message names target model, got " + desc.message);
+  assert(/unload the current one \(VRAM\)/.test(desc.message), "message explains unload/VRAM, got " + desc.message);
+});
+
 test("openSession without explicit model or preset binding restores the persisted last-used model", () => {
   reset({ baseUrl: "http://localhost:1234", model: "default-model", presets: [] });
   fileStore[lastModelPath] = JSON.stringify({ lastModel: "remembered-model" });
@@ -918,6 +932,29 @@ test("sessionInfo reports the session model and setModel switches it for the nex
   plugin.setModel("switch", "");
   assert(plugin.sessionInfo("switch").model === "qwen-2.5", "empty/unknown setModel is a no-op");
   assert(plugin.sessionInfo("nope").model === undefined, "unknown session has no model");
+});
+
+test("setModel surfaces a JIT-load VRAM failure from chat as a clean system message", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [] });
+  plugin.openSession({ paneId: "vram-switch", config: {}, systemPrompt: "sys", model: "llama-3" });
+
+  plugin.setModel("vram-switch", "qwen-72b");
+  plugin.sendMessage("vram-switch", "hello");
+  enqueueStream(0, [
+    {
+      chunks: [],
+      done: true,
+      status: 500,
+      body: JSON.stringify({ error: "Failed to load model: insufficient VRAM" }),
+    },
+  ]);
+
+  const p = pumpUntilDone("vram-switch");
+  const systems = contents(p.messages, "system");
+  assert(
+    systems.some((m) => m === "couldn't load qwen-72b: not enough VRAM — unload a model in LM Studio or pick a smaller one"),
+    "clean VRAM system message present, got " + JSON.stringify(systems),
+  );
 });
 
 test("settings schema and config expose presets/defaultPreset", () => {
