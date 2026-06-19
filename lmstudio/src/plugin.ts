@@ -29,6 +29,10 @@ interface LmStudioSettings {
   params?: Record<string, unknown>;
 }
 
+interface LastModelState {
+  lastModel?: unknown;
+}
+
 interface StreamState {
   jobId: string;
   messageId: string;
@@ -88,6 +92,7 @@ interface StreamPoll {
 }
 
 const DEFAULT_BASE_URL = "http://localhost:1234";
+const LAST_MODEL_PATH = ".codeterm/plugins/lmstudio/last-model.json";
 const MAX_TOOL_ROUNDS = 8;
 const TOOL_SCHEMA_JSON = JSON.stringify({
   tools: [
@@ -120,6 +125,47 @@ function readSettings(): LmStudioSettings {
     return raw && typeof raw === "object" ? raw : {};
   } catch {
     return {};
+  }
+}
+
+function cleanModel(model?: unknown): string {
+  return typeof model === "string" ? model.trim() : "";
+}
+
+function lastModelFilePath(): string | null {
+  try {
+    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
+    if (!home) return null;
+    return `${home.replace(/\/+$/, "")}/${LAST_MODEL_PATH}`;
+  } catch {
+    return null;
+  }
+}
+
+function readLastModel(): string {
+  try {
+    const path = lastModelFilePath();
+    if (!path) return "";
+    const raw = host.readFile(path);
+    if (!raw) return "";
+    const state = JSON.parse(raw) as LastModelState;
+    return cleanModel(state && state.lastModel);
+  } catch {
+    return "";
+  }
+}
+
+function rememberLastModel(model: string): void {
+  const lastModel = cleanModel(model);
+  if (!lastModel) return;
+  try {
+    const path = lastModelFilePath();
+    if (!path) return;
+    const slash = path.lastIndexOf("/");
+    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
+    host.writeFile(path, JSON.stringify({ lastModel }));
+  } catch {
+    // Best-effort persistence must never break chat.
   }
 }
 
@@ -561,6 +607,7 @@ function startLmStudioCall(s: Session, input: string): void {
       return;
     }
     s.model = resolved;
+    rememberLastModel(resolved);
   }
 
   const needsFallbackContext =
@@ -731,10 +778,14 @@ function pollStream(s: Session): void {
 function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
   const s = readSettings();
   const allPresets = presets();
-  const chosenModel = ctx.model || s.model || "";
+  const explicitModel = cleanModel(ctx.model);
+  const requestedPreset = presetById(allPresets, ctx.preset);
+  const presetModel = explicitModel ? "" : cleanModel(requestedPreset && requestedPreset.model);
+  const persistedModel = explicitModel || presetModel ? "" : readLastModel();
+  const chosenModel = explicitModel || presetModel || persistedModel || cleanModel(s.model);
   const boundPreset = presetBoundToModel(allPresets, chosenModel);
   const preset = boundPreset || resolvePreset(ctx.preset, chosenModel);
-  const model = ctx.model || (preset && preset.model) || s.model || "";
+  const model = chosenModel || cleanModel(preset && preset.model);
   const presetSystemPrompt = preset && typeof preset.systemPrompt === "string" ? preset.systemPrompt : "";
   const generalSystemPrompt =
     (boundPreset ? presetSystemPrompt || defaultSystemPrompt(allPresets) : ctx.systemPrompt || presetSystemPrompt) ||
@@ -765,6 +816,7 @@ const plugin: ChatBackend = {
     const s = resolveSession(ctx);
     if (s.systemPrompt) append(s, "user", markSystemPrompt(s.systemPrompt), "system-prompt");
     sessions.set(sid, s);
+    rememberLastModel(s.model);
     return { sessionId: sid };
   },
 
@@ -855,6 +907,7 @@ const plugin: ChatBackend = {
     const s = sessions.get(sid);
     if (!s || typeof model !== "string" || !model) return;
     s.model = model;
+    rememberLastModel(model);
     // The previous_response_id chains to the OLD model's server-side state; a
     // different model can't continue it. Reset so the next turn re-seeds context
     // (assembledContext) under the new model instead of 400-ing on a stale id.
