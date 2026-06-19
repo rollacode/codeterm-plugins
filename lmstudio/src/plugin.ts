@@ -98,6 +98,7 @@ interface StreamPoll {
 
 const DEFAULT_BASE_URL = "http://localhost:1234";
 const LAST_MODEL_PATH = ".codeterm/plugins/lmstudio/last-model.json";
+const AUTHORED_PROMPTS_PATH = ".codeterm/plugins/lmstudio/authored-prompts.json";
 const MAX_TOOL_ROUNDS = 8;
 const TOOL_SCHEMA_JSON = JSON.stringify({
   tools: [
@@ -169,6 +170,44 @@ function rememberLastModel(model: string): void {
     const slash = path.lastIndexOf("/");
     if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
     host.writeFile(path, JSON.stringify({ lastModel }));
+  } catch {
+    // Best-effort persistence must never break chat.
+  }
+}
+
+function authoredPromptsFilePath(): string | null {
+  try {
+    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
+    if (!home) return null;
+    return `${home.replace(/\/+$/, "")}/${AUTHORED_PROMPTS_PATH}`;
+  } catch {
+    return null;
+  }
+}
+
+function readAuthoredPrompts(): Record<string, string> {
+  try {
+    const path = authoredPromptsFilePath();
+    if (!path) return {};
+    const raw = host.readFile(path);
+    if (!raw) return {};
+    const data = JSON.parse(raw) as unknown;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return {};
+    return data as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function writeAuthoredPrompt(model: string, draft: string): void {
+  try {
+    const path = authoredPromptsFilePath();
+    if (!path) return;
+    const current = readAuthoredPrompts();
+    current[model] = draft;
+    const slash = path.lastIndexOf("/");
+    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
+    host.writeFile(path, JSON.stringify(current));
   } catch {
     // Best-effort persistence must never break chat.
   }
@@ -841,7 +880,8 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
     (boundPreset ? presetSystemPrompt || defaultSystemPrompt(allPresets) : ctx.systemPrompt || presetSystemPrompt) ||
     defaultSystemPrompt(allPresets) ||
     "";
-  const systemPrompt = systemPromptForModel(generalSystemPrompt, model);
+  const authoredPrompts = readAuthoredPrompts();
+  const systemPrompt = (model && authoredPrompts[model]) || systemPromptForModel(generalSystemPrompt, model);
   const params = { ...(s.params || {}), ...((preset && preset.params) || {}) };
   return {
     messages: [],
@@ -862,6 +902,7 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
 
 const plugin: ChatBackend & {
   describeModelSwitch: (sessionId: string, targetModel: string) => ModelSwitchDescription;
+  authorSystemPrompt: (sessionId: string, draft: string) => void;
 } = {
   openSession(ctx) {
     const sid = ctx.paneId;
@@ -950,12 +991,19 @@ const plugin: ChatBackend & {
     return presets().map((p) => ({ id: p.id, name: p.name, description: p.description }));
   },
 
-  sessionInfo(sid): ChatSessionInfo {
+  sessionInfo(sid): ChatSessionInfo & { systemPrompt?: string } {
     const s = sessions.get(sid);
-    return { model: s ? s.model : undefined };
+    return { model: s ? s.model : undefined, systemPrompt: s ? s.systemPrompt : undefined };
   },
 
   describeModelSwitch,
+
+  authorSystemPrompt(sid: string, draft: string): void {
+    const s = sessions.get(sid);
+    if (!s || !s.model) return;
+    writeAuthoredPrompt(s.model, draft);
+    s.systemPrompt = draft;
+  },
 
   setModel(sid, model) {
     const s = sessions.get(sid);
