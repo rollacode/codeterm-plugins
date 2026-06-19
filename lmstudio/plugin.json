@@ -13,7 +13,7 @@
     "chatBackend": { "spawnable": true }
   },
   "settingsSchema": "settings.schema.json",
-  "configHelp": "LM Studio turns a CodeTerm pane into an open agent shell. It uses LM Studio native v1 endpoints: POST /api/v1/chat for stateful streaming chat and GET /api/v1/models for model discovery. To use it: in LM Studio load a model and Developer tab → Start Server (defaults to http://localhost:1234). Knobs (set with `codeterm plugin config lmstudio --set key=value` or edit config.yaml): `baseUrl` — server base URL; `model` — fallback model id; `defaultPreset` — preset id; `presets` — array of {id,name,systemPrompt,model?,params?}. Spawn/open-session `systemPrompt` overrides the preset prompt.",
+  "configHelp": "LM Studio turns a CodeTerm pane into an open agent shell. It uses LM Studio native v1 endpoints: POST /api/v1/chat for stateful streaming chat and GET /api/v1/models for model discovery. To use it: in LM Studio load a model and Developer tab → Start Server (defaults to http://localhost:1234). Knobs (set with `codeterm plugin config lmstudio --set key=value` or edit config.yaml): `baseUrl` — server base URL; `model` — fallback model id; `defaultPreset` — fallback preset id; `presets` — array of {id,name,systemPrompt?,model?,params?}. A preset with `model` binds to that exact model id and is selected before an explicit preset request.",
   "permissions": {
     "network": {
       "allow": [

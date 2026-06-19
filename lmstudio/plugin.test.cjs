@@ -202,6 +202,13 @@ function contents(messages, type) {
   return messages.filter((m) => m.type === type).map((m) => m.content);
 }
 
+function openAndStartBody(ctx) {
+  plugin.openSession(ctx);
+  plugin.sendMessage(ctx.paneId, "hello");
+  assert(streamCalls.length === 1, "stream started for " + ctx.paneId);
+  return JSON.parse(streamCalls[0].body);
+}
+
 // ── SSE builders: native /api/v1/chat emits `event: <name>` + `data: {json}`
 //    blocks separated by blank lines. The answer is the message.* deltas;
 //    reasoning.* is the model's private thinking; chat.end carries response_id.
@@ -746,6 +753,89 @@ test("listPresets returns configured presets and listModels uses /api/v1/models"
   const models = plugin.listModels();
   assert(models.length === 2, "two valid models, got " + models.length);
   assert(models[0].id === "llama-3" && models[0].displayName === "llama-3", "first model");
+});
+
+test("model-bound preset resolves prompt and params for the chosen model", () => {
+  reset({
+    baseUrl: "http://localhost:1234",
+    model: "tiny-model",
+    params: { temperature: 0.7, max_tokens: 512 },
+    defaultPreset: "codeterm",
+    presets: [
+      { id: "codeterm", name: "CodeTerm", systemPrompt: "default prompt", params: { temperature: 0.6 } },
+      {
+        id: "tiny",
+        name: "Tiny",
+        model: "tiny-model",
+        systemPrompt: "simple prompt",
+        params: { temperature: 0.2, top_p: 0.8 },
+      },
+    ],
+  });
+
+  plugin.openSession({ paneId: "bound-model", config: {} });
+  let p = plugin.poll("bound-model", null);
+  assert(p.messages[0].content.includes("simple prompt"), "seed uses bound preset prompt");
+
+  plugin.sendMessage("bound-model", "hello");
+  const body = JSON.parse(streamCalls[0].body);
+  assert(body.model === "tiny-model", "uses chosen model");
+  assert(body.system_prompt === "simple prompt", "uses bound preset prompt");
+  assert(body.temperature === 0.2, "bound preset temperature overrides defaults");
+  assert(body.top_p === 0.8, "bound preset params are included");
+  assert(body.max_tokens === 512, "global params are retained");
+});
+
+test("unbound model falls back to defaultPreset", () => {
+  reset({
+    baseUrl: "http://localhost:1234",
+    model: "unbound-model",
+    params: { temperature: 0.7 },
+    defaultPreset: "codeterm",
+    presets: [
+      { id: "codeterm", name: "CodeTerm", systemPrompt: "default prompt", params: { temperature: 0.6 } },
+      { id: "tiny", name: "Tiny", model: "tiny-model", systemPrompt: "simple prompt", params: { temperature: 0.2 } },
+    ],
+  });
+
+  const body = openAndStartBody({ paneId: "unbound-model", config: {} });
+  assert(body.model === "unbound-model", "keeps unbound chosen model");
+  assert(body.system_prompt === "default prompt", "falls back to default preset prompt");
+  assert(body.temperature === 0.6, "default preset params override global defaults");
+});
+
+test("explicit preset request wins when the model has no binding", () => {
+  reset({
+    baseUrl: "http://localhost:1234",
+    params: { temperature: 0.7 },
+    defaultPreset: "codeterm",
+    presets: [
+      { id: "codeterm", name: "CodeTerm", systemPrompt: "default prompt", params: { temperature: 0.6 } },
+      { id: "creative", name: "Creative", systemPrompt: "creative prompt", params: { temperature: 0.95 } },
+      { id: "tiny", name: "Tiny", model: "tiny-model", systemPrompt: "simple prompt", params: { temperature: 0.2 } },
+    ],
+  });
+
+  const body = openAndStartBody({ paneId: "explicit-preset", config: {}, model: "unbound-model", preset: "creative" });
+  assert(body.model === "unbound-model", "keeps explicit unbound model");
+  assert(body.system_prompt === "creative prompt", "uses explicit preset prompt");
+  assert(body.temperature === 0.95, "uses explicit preset params");
+});
+
+test("model-bound preset without systemPrompt falls back to default prompt", () => {
+  reset({
+    baseUrl: "http://localhost:1234",
+    model: "tiny-model",
+    defaultPreset: "codeterm",
+    presets: [
+      { id: "codeterm", name: "CodeTerm", systemPrompt: "default prompt", params: { temperature: 0.6 } },
+      { id: "tiny", name: "Tiny", model: "tiny-model", params: { temperature: 0.2 } },
+    ],
+  });
+
+  const body = openAndStartBody({ paneId: "bound-without-prompt", config: {} });
+  assert(body.system_prompt === "default prompt", "missing bound prompt falls back to default");
+  assert(body.temperature === 0.2, "bound preset params still apply");
 });
 
 test("sessionInfo reports the session model and setModel switches it for the next turn", () => {

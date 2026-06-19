@@ -23,12 +23,17 @@ Config lives in [`config.yaml`](./config.yaml):
 
 - `baseUrl`: server base URL, default `http://localhost:1234`.
 - `model`: fallback model id; blank lets LM Studio use the loaded model.
-- `defaultPreset`: preset id for new sessions without an explicit preset.
-- `presets`: array of `{ id, name, systemPrompt, model?, params? }`.
+- `defaultPreset`: preset id when the chosen model has no bound preset and the
+  session does not request one explicitly.
+- `presets`: array of `{ id, name, systemPrompt?, model?, params? }`. A preset
+  with `model` binds to that exact model id.
 
-`ctx.systemPrompt` overrides the resolved preset prompt for that session. The
-prompt is emitted as the first `system_prompt` message so the UI can render it as
-an observable card.
+Preset resolution at session init is: chosen model's bound preset, then
+`ctx.preset`, then `defaultPreset`. A bound preset's `systemPrompt` and `params`
+apply automatically for that model. If a preset has no `systemPrompt`, the
+default preset prompt is used. For unbound models, `ctx.systemPrompt` can still
+override the resolved preset prompt for that session. The prompt is emitted as
+the first `system_prompt` message so the UI can render it as an observable card.
 
 The plugin may only reach hosts in `plugin.json` -> `permissions.network.allow`
 (defaults: `localhost:1234`, `127.0.0.1:1234`). Point `baseUrl` elsewhere and add
@@ -36,8 +41,9 @@ that `host:port` to the allowlist.
 
 ## How It Works
 
-- `openSession` resolves the preset and stores system prompt, model, params, and
-  LM Studio stateful continuation id for the pane.
+- `openSession` resolves the model-bound/requested/default preset and stores
+  system prompt, model, params, and LM Studio stateful continuation id for the
+  pane.
 - `sendMessage` appends the user turn and starts a native `POST /api/v1/chat`
   streaming job through `host.fetchStream`.
 - `pump` polls stream chunks, re-emits the growing assistant message with a

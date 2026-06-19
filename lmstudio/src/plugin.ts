@@ -16,7 +16,7 @@ interface Preset {
   id: string;
   name: string;
   description?: string;
-  systemPrompt: string;
+  systemPrompt?: string;
   model?: string;
   params?: Record<string, unknown>;
 }
@@ -137,16 +137,35 @@ function presets(): Preset[] {
       !!p &&
       typeof p.id === "string" &&
       typeof p.name === "string" &&
-      typeof p.systemPrompt === "string",
+      (p.systemPrompt === undefined || typeof p.systemPrompt === "string"),
   );
 }
 
-function resolvePreset(id?: string): Preset | null {
-  const all = presets();
+function presetById(all: Preset[], id?: string): Preset | null {
+  if (!id) return null;
+  return all.find((p) => p.id === id) || null;
+}
+
+function defaultPreset(all: Preset[]): Preset | null {
   if (!all.length) return null;
   const s = readSettings();
-  const wanted = id || s.defaultPreset || all[0].id;
-  return all.find((p) => p.id === wanted) || all[0];
+  return presetById(all, s.defaultPreset) || all[0];
+}
+
+function presetBoundToModel(all: Preset[], modelId: string): Preset | null {
+  if (!modelId) return null;
+  return all.find((p) => typeof p.model === "string" && p.model.trim() === modelId) || null;
+}
+
+function resolvePreset(id?: string, modelId?: string): Preset | null {
+  const all = presets();
+  if (!all.length) return null;
+  return presetBoundToModel(all, modelId || "") || presetById(all, id) || defaultPreset(all);
+}
+
+function defaultSystemPrompt(all: Preset[]): string {
+  const p = defaultPreset(all);
+  return p && typeof p.systemPrompt === "string" ? p.systemPrompt : "";
 }
 
 function nextId(s: Session, prefix = "lmstudio"): string {
@@ -711,9 +730,16 @@ function pollStream(s: Session): void {
 
 function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
   const s = readSettings();
-  const preset = resolvePreset(ctx.preset);
+  const allPresets = presets();
+  const chosenModel = ctx.model || s.model || "";
+  const boundPreset = presetBoundToModel(allPresets, chosenModel);
+  const preset = boundPreset || resolvePreset(ctx.preset, chosenModel);
   const model = ctx.model || (preset && preset.model) || s.model || "";
-  const generalSystemPrompt = ctx.systemPrompt || (preset && preset.systemPrompt) || "";
+  const presetSystemPrompt = preset && typeof preset.systemPrompt === "string" ? preset.systemPrompt : "";
+  const generalSystemPrompt =
+    (boundPreset ? presetSystemPrompt || defaultSystemPrompt(allPresets) : ctx.systemPrompt || presetSystemPrompt) ||
+    defaultSystemPrompt(allPresets) ||
+    "";
   const systemPrompt = systemPromptForModel(generalSystemPrompt, model);
   const params = { ...(s.params || {}), ...((preset && preset.params) || {}) };
   return {
