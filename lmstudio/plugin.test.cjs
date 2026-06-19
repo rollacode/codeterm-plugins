@@ -976,6 +976,79 @@ test("settings schema and config expose presets/defaultPreset", () => {
   assert(config.includes(replyExample), "seed config includes single-string codeterm reply example");
 });
 
+// ── R6: authorSystemPrompt — author/refine a pane's system prompt ─────────────
+
+const authoredPromptsPath = "/tmp/codeterm-home/.codeterm/plugins/lmstudio/authored-prompts.json";
+
+test("sessionInfo returns model and systemPrompt so an external author can read the current state", () => {
+  reset({
+    baseUrl: "http://localhost:1234",
+    presets: [{ id: "p1", name: "P1", systemPrompt: "Base prompt text" }],
+    defaultPreset: "p1",
+  });
+  plugin.openSession({ paneId: "info-r6", config: {}, model: "gemma-3" });
+  const info = plugin.sessionInfo("info-r6");
+  assert(info.model === "gemma-3", "sessionInfo.model matches opened model, got " + info.model);
+  assert(info.systemPrompt === "Base prompt text", "sessionInfo.systemPrompt matches preset, got " + info.systemPrompt);
+});
+
+test("authorSystemPrompt saves the drafted prompt for the session's model to the authored-prompts file", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [], model: "gemma-3" });
+  plugin.openSession({ paneId: "author-save-r6", config: {}, model: "gemma-3", systemPrompt: "original" });
+
+  plugin.authorSystemPrompt("author-save-r6", "My tuned prompt for gemma");
+
+  const stored = JSON.parse(fileStore[authoredPromptsPath] || "{}");
+  assert(stored["gemma-3"] === "My tuned prompt for gemma", "authored prompt stored for model, got " + JSON.stringify(stored));
+});
+
+test("authorSystemPrompt updates the live sessionInfo.systemPrompt immediately", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [], model: "qwen-2.5" });
+  plugin.openSession({ paneId: "author-live-r6", config: {}, model: "qwen-2.5", systemPrompt: "old" });
+
+  plugin.authorSystemPrompt("author-live-r6", "Tuned for qwen");
+
+  const info = plugin.sessionInfo("author-live-r6");
+  assert(info.systemPrompt === "Tuned for qwen", "live sessionInfo reflects authored prompt, got " + info.systemPrompt);
+});
+
+test("openSession for the same model picks up the authored prompt on subsequent init", () => {
+  reset({
+    baseUrl: "http://localhost:1234",
+    presets: [{ id: "p1", name: "P1", systemPrompt: "Preset prompt", model: "gemma-3" }],
+    defaultPreset: "p1",
+  });
+
+  // Seed the authored prompt as if a prior authorSystemPrompt call had written it.
+  fileStore[authoredPromptsPath] = JSON.stringify({ "gemma-3": "Tuned prompt from author" });
+
+  const body = openAndStartBody({ paneId: "authored-init-r6", config: {}, model: "gemma-3" });
+  assert(
+    body.system_prompt === "Tuned prompt from author",
+    "authored prompt wins over preset on session init, got " + body.system_prompt,
+  );
+});
+
+test("authorSystemPrompt on unknown session is a safe no-op that writes nothing", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [] });
+  // Must not throw
+  plugin.authorSystemPrompt("no-such-session", "some draft");
+  assert(!fileStore[authoredPromptsPath], "nothing written for unknown session");
+});
+
+test("authorSystemPrompt persists across multiple models independently", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [], model: "m1" });
+  plugin.openSession({ paneId: "multi-a", config: {}, model: "model-a", systemPrompt: "orig-a" });
+  plugin.openSession({ paneId: "multi-b", config: {}, model: "model-b", systemPrompt: "orig-b" });
+
+  plugin.authorSystemPrompt("multi-a", "Tuned for model-a");
+  plugin.authorSystemPrompt("multi-b", "Tuned for model-b");
+
+  const stored = JSON.parse(fileStore[authoredPromptsPath] || "{}");
+  assert(stored["model-a"] === "Tuned for model-a", "model-a stored, got " + stored["model-a"]);
+  assert(stored["model-b"] === "Tuned for model-b", "model-b stored, got " + stored["model-b"]);
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try { fn(); console.log(`✓ ${name}`); }

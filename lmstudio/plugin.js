@@ -26,6 +26,7 @@ __export(plugin_exports, {
 module.exports = __toCommonJS(plugin_exports);
 var DEFAULT_BASE_URL = "http://localhost:1234";
 var LAST_MODEL_PATH = ".codeterm/plugins/lmstudio/last-model.json";
+var AUTHORED_PROMPTS_PATH = ".codeterm/plugins/lmstudio/authored-prompts.json";
 var MAX_TOOL_ROUNDS = 8;
 var TOOL_SCHEMA_JSON = JSON.stringify({
   tools: [
@@ -86,6 +87,40 @@ function rememberLastModel(model) {
     const slash = path.lastIndexOf("/");
     if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
     host.writeFile(path, JSON.stringify({ lastModel }));
+  } catch {
+  }
+}
+function authoredPromptsFilePath() {
+  try {
+    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
+    if (!home) return null;
+    return `${home.replace(/\/+$/, "")}/${AUTHORED_PROMPTS_PATH}`;
+  } catch {
+    return null;
+  }
+}
+function readAuthoredPrompts() {
+  try {
+    const path = authoredPromptsFilePath();
+    if (!path) return {};
+    const raw = host.readFile(path);
+    if (!raw) return {};
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== "object" || Array.isArray(data)) return {};
+    return data;
+  } catch {
+    return {};
+  }
+}
+function writeAuthoredPrompt(model, draft) {
+  try {
+    const path = authoredPromptsFilePath();
+    if (!path) return;
+    const current = readAuthoredPrompts();
+    current[model] = draft;
+    const slash = path.lastIndexOf("/");
+    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
+    host.writeFile(path, JSON.stringify(current));
   } catch {
   }
 }
@@ -606,7 +641,8 @@ function resolveSession(ctx) {
   const model = chosenModel || cleanModel(preset && preset.model);
   const presetSystemPrompt = preset && typeof preset.systemPrompt === "string" ? preset.systemPrompt : "";
   const generalSystemPrompt = (boundPreset ? presetSystemPrompt || defaultSystemPrompt(allPresets) : ctx.systemPrompt || presetSystemPrompt) || defaultSystemPrompt(allPresets) || "";
-  const systemPrompt = systemPromptForModel(generalSystemPrompt, model);
+  const authoredPrompts = readAuthoredPrompts();
+  const systemPrompt = model && authoredPrompts[model] || systemPromptForModel(generalSystemPrompt, model);
   const params = { ...s.params || {}, ...preset && preset.params || {} };
   return {
     messages: [],
@@ -699,9 +735,15 @@ var plugin = {
   },
   sessionInfo(sid) {
     const s = sessions.get(sid);
-    return { model: s ? s.model : void 0 };
+    return { model: s ? s.model : void 0, systemPrompt: s ? s.systemPrompt : void 0 };
   },
   describeModelSwitch,
+  authorSystemPrompt(sid, draft) {
+    const s = sessions.get(sid);
+    if (!s || !s.model) return;
+    writeAuthoredPrompt(s.model, draft);
+    s.systemPrompt = draft;
+  },
   setModel(sid, model) {
     const s = sessions.get(sid);
     if (!s || typeof model !== "string" || !model) return;
