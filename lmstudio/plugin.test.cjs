@@ -11,9 +11,11 @@ const streamJobs = [];
 const execCalls = [];
 const execJobs = [];
 const toolParseCalls = [];
+const fileStore = {};
 let pendingExecPolls = null;
 let settingsObj = {};
 let fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
+const lastModelPath = "/tmp/codeterm-home/.codeterm/plugins/lmstudio/last-model.json";
 
 function parseLooseJson(raw) {
   const attempts = [
@@ -81,6 +83,8 @@ function mockToolcallParse(rawText, schemaJson) {
 }
 
 globalThis.host = {
+  homeDir: () => "/tmp/codeterm-home",
+  makeDirs: () => true,
   settingsJson: () => JSON.stringify(settingsObj),
   fetch: (optsJson) => {
     const opts = JSON.parse(optsJson);
@@ -130,8 +134,11 @@ globalThis.host = {
     const job = execJobs.find((j) => j.jobId === jobId);
     if (job) job.closed = true;
   },
-  readFile: (path) => `file:${path}`,
-  writeFile: () => true,
+  readFile: (path) => Object.prototype.hasOwnProperty.call(fileStore, path) ? fileStore[path] : null,
+  writeFile: (path, contents) => {
+    fileStore[path] = contents;
+    return true;
+  },
   mem: (optsJson) => JSON.stringify({ results: [{ title: "memory", body: optsJson }] }),
   agent: {
     spawn: (optsJson) => JSON.stringify({ sessionId: "agent-1", opts: JSON.parse(optsJson) }),
@@ -174,6 +181,7 @@ function reset(settings) {
   toolParseCalls.length = 0;
   pendingExecPolls = null;
   settingsObj = settings || {};
+  for (const key of Object.keys(fileStore)) delete fileStore[key];
   fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
 }
 
@@ -836,6 +844,62 @@ test("model-bound preset without systemPrompt falls back to default prompt", () 
   const body = openAndStartBody({ paneId: "bound-without-prompt", config: {} });
   assert(body.system_prompt === "default prompt", "missing bound prompt falls back to default");
   assert(body.temperature === 0.2, "bound preset params still apply");
+});
+
+test("setModel persists the last-used model", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "persist-set-model", config: {}, systemPrompt: "sys" });
+
+  plugin.setModel("persist-set-model", "qwen-2.5");
+
+  const stored = JSON.parse(fileStore[lastModelPath] || "{}");
+  assert(stored.lastModel === "qwen-2.5", "last-used model persisted, got " + JSON.stringify(stored));
+});
+
+test("openSession without explicit model or preset binding restores the persisted last-used model", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "default-model", presets: [] });
+  fileStore[lastModelPath] = JSON.stringify({ lastModel: "remembered-model" });
+
+  const body = openAndStartBody({ paneId: "restore-last-model", config: {}, systemPrompt: "sys" });
+
+  assert(body.model === "remembered-model", "restored persisted model, got " + body.model);
+  const stored = JSON.parse(fileStore[lastModelPath] || "{}");
+  assert(stored.lastModel === "remembered-model", "openSession records chosen model");
+});
+
+test("explicit model and preset-bound model win over the persisted last-used model", () => {
+  reset({
+    baseUrl: "http://localhost:1234",
+    model: "default-model",
+    defaultPreset: "codeterm",
+    presets: [
+      { id: "codeterm", name: "CodeTerm", systemPrompt: "default prompt" },
+      { id: "tiny", name: "Tiny", model: "tiny-model", systemPrompt: "tiny prompt" },
+    ],
+  });
+  fileStore[lastModelPath] = JSON.stringify({ lastModel: "remembered-model" });
+
+  let body = openAndStartBody({ paneId: "explicit-over-persisted", config: {}, model: "explicit-model" });
+  assert(body.model === "explicit-model", "explicit model wins, got " + body.model);
+
+  streamCalls.length = 0;
+  streamJobs.length = 0;
+  fileStore[lastModelPath] = JSON.stringify({ lastModel: "remembered-model" });
+  body = openAndStartBody({ paneId: "preset-over-persisted", config: {}, preset: "tiny" });
+  assert(body.model === "tiny-model", "preset-bound model wins, got " + body.model);
+  assert(body.system_prompt === "tiny prompt", "preset-bound prompt used");
+});
+
+test("missing or corrupt persisted last-used model falls back to defaultModel without throwing", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "default-model", presets: [] });
+  let body = openAndStartBody({ paneId: "missing-last-model", config: {}, systemPrompt: "sys" });
+  assert(body.model === "default-model", "missing persisted model falls back to default");
+
+  streamCalls.length = 0;
+  streamJobs.length = 0;
+  fileStore[lastModelPath] = "{not-json";
+  body = openAndStartBody({ paneId: "corrupt-last-model", config: {}, systemPrompt: "sys" });
+  assert(body.model === "default-model", "corrupt persisted model falls back to default");
 });
 
 test("sessionInfo reports the session model and setModel switches it for the next turn", () => {

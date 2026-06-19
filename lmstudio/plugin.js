@@ -24,6 +24,7 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 var DEFAULT_BASE_URL = "http://localhost:1234";
+var LAST_MODEL_PATH = ".codeterm/plugins/lmstudio/last-model.json";
 var MAX_TOOL_ROUNDS = 8;
 var TOOL_SCHEMA_JSON = JSON.stringify({
   tools: [
@@ -49,6 +50,42 @@ function readSettings() {
     return raw && typeof raw === "object" ? raw : {};
   } catch {
     return {};
+  }
+}
+function cleanModel(model) {
+  return typeof model === "string" ? model.trim() : "";
+}
+function lastModelFilePath() {
+  try {
+    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
+    if (!home) return null;
+    return `${home.replace(/\/+$/, "")}/${LAST_MODEL_PATH}`;
+  } catch {
+    return null;
+  }
+}
+function readLastModel() {
+  try {
+    const path = lastModelFilePath();
+    if (!path) return "";
+    const raw = host.readFile(path);
+    if (!raw) return "";
+    const state = JSON.parse(raw);
+    return cleanModel(state && state.lastModel);
+  } catch {
+    return "";
+  }
+}
+function rememberLastModel(model) {
+  const lastModel = cleanModel(model);
+  if (!lastModel) return;
+  try {
+    const path = lastModelFilePath();
+    if (!path) return;
+    const slash = path.lastIndexOf("/");
+    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
+    host.writeFile(path, JSON.stringify({ lastModel }));
+  } catch {
   }
 }
 function baseUrl() {
@@ -382,6 +419,7 @@ function startLmStudioCall(s, input) {
       return;
     }
     s.model = resolved;
+    rememberLastModel(resolved);
   }
   const needsFallbackContext = !s.previousResponseId && s.messages.some((m) => m.type === "assistant" || m.type === "tool_result");
   const body = {
@@ -517,10 +555,14 @@ function pollStream(s) {
 function resolveSession(ctx) {
   const s = readSettings();
   const allPresets = presets();
-  const chosenModel = ctx.model || s.model || "";
+  const explicitModel = cleanModel(ctx.model);
+  const requestedPreset = presetById(allPresets, ctx.preset);
+  const presetModel = explicitModel ? "" : cleanModel(requestedPreset && requestedPreset.model);
+  const persistedModel = explicitModel || presetModel ? "" : readLastModel();
+  const chosenModel = explicitModel || presetModel || persistedModel || cleanModel(s.model);
   const boundPreset = presetBoundToModel(allPresets, chosenModel);
   const preset = boundPreset || resolvePreset(ctx.preset, chosenModel);
-  const model = ctx.model || preset && preset.model || s.model || "";
+  const model = chosenModel || cleanModel(preset && preset.model);
   const presetSystemPrompt = preset && typeof preset.systemPrompt === "string" ? preset.systemPrompt : "";
   const generalSystemPrompt = (boundPreset ? presetSystemPrompt || defaultSystemPrompt(allPresets) : ctx.systemPrompt || presetSystemPrompt) || defaultSystemPrompt(allPresets) || "";
   const systemPrompt = systemPromptForModel(generalSystemPrompt, model);
@@ -547,6 +589,7 @@ var plugin = {
     const s = resolveSession(ctx);
     if (s.systemPrompt) append(s, "user", markSystemPrompt(s.systemPrompt), "system-prompt");
     sessions.set(sid, s);
+    rememberLastModel(s.model);
     return { sessionId: sid };
   },
   sendMessage(sid, text) {
@@ -621,6 +664,7 @@ var plugin = {
     const s = sessions.get(sid);
     if (!s || typeof model !== "string" || !model) return;
     s.model = model;
+    rememberLastModel(model);
     s.previousResponseId = null;
   }
 };
