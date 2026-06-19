@@ -501,6 +501,43 @@ test("a native <|tool_call|> exec wrapper is recognized and runs host.exec", () 
   assert(!/tool_call/.test(assistants[0] || ""), "native wrapper stripped from bubble, got " + assistants[0]);
 });
 
+test("a namespaced native tool-call header (call:default_api:exec) runs host.exec", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "ns-native", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("ns-native", "list panes");
+  // Live gemma shape: the tool name is the LAST colon segment of the call header,
+  // with a `default_api:` namespace prefix and single-quoted loose args.
+  const answer = "Sure.\n<|tool_call>call:default_api:exec{command: 'codeterm pane list'}<tool_call|>";
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-ns")], done: true, status: 200 }]);
+  plugin.pump("ns-native");
+
+  assert(execCalls.length === 1, "namespaced native tool-call ran host.exec, got " + execCalls.length);
+  assert(
+    execCalls[0].args.some((arg) => String(arg).includes("codeterm pane list")),
+    "namespaced exec command mapped to cmd and executed",
+  );
+  const p = plugin.poll("ns-native", null);
+  assert(contents(p.messages, "tool_result").length === 1, "namespaced tool-call produced a tool_result");
+  assert(streamCalls.length === 2, "namespaced tool-call continues the loop");
+  const assistants = contents(p.messages, "assistant");
+  assert(!/tool_call/.test(assistants[0] || ""), "namespaced wrapper stripped from bubble, got " + assistants[0]);
+});
+
+test("an unknown namespaced native tool-call (call:unknownns:notatool) is ignored", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "ns-unknown", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("ns-unknown", "go");
+  const answer = "Trying.\n<|tool_call>call:unknownns:notatool{command: 'rm -rf /'}<tool_call|>";
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-unk")], done: true, status: 200 }]);
+  plugin.pump("ns-unknown");
+
+  const p = plugin.poll("ns-unknown", null);
+  assert(execCalls.length === 0, "unknown native tool not executed, got " + execCalls.length);
+  assert(contents(p.messages, "tool_result").length === 0, "unknown native tool produced no tool_result");
+  assert(streamCalls.length === 1, "unknown native tool does not continue the loop");
+  assert(p.done === true, "turn ends without executing the unknown tool");
+});
+
 test("a codeterm-tool fence followed by trailing prose still executes", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({ paneId: "fence-prose", config: {}, systemPrompt: "sys" });
