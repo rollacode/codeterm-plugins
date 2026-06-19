@@ -25,13 +25,19 @@ __export(plugin_exports, {
 module.exports = __toCommonJS(plugin_exports);
 var DEFAULT_BASE_URL = "http://localhost:1234";
 var MAX_TOOL_ROUNDS = 8;
-var TOOL_FENCE_RE = /```codeterm-tool\s*\n([\s\S]*?)\n?```/g;
-var CURATED_TOOLS = ["exec", "read_file", "write_file", "codeterm", "mem_search", "spawn_agent"];
-var NATIVE_CALL_RE = /call\s*[:=]\s*((?:[A-Za-z_][A-Za-z0-9_]*\s*:\s*)*[A-Za-z_][A-Za-z0-9_]*)\s*(\{[\s\S]*?\})/g;
-var NATIVE_ARG_ALIASES = {
-  exec: { command: "cmd" },
-  codeterm: { command: "args", cmd: "args" }
-};
+var TOOL_SCHEMA_JSON = JSON.stringify({
+  tools: [
+    { name: "exec", args: ["cmd"], optional: ["cwd"] },
+    { name: "read_file", args: ["path"], optional: [] },
+    { name: "write_file", args: ["path", "content"], optional: [] },
+    { name: "codeterm", args: ["args"], optional: [] },
+    { name: "mem_search", args: ["query"], optional: [] },
+    { name: "spawn_agent", args: ["provider", "task"], optional: ["workspace"] }
+  ],
+  aliases: { command: "cmd", file: "path", filepath: "path" }
+});
+var FENCE_RE = /```[^\r\n`]*\r?\n[\s\S]*?```/g;
+var TOOL_WRAPPER_RE = /<\s*\|?\/?\s*(?:tool_call|tool▁call)\s*\|?\s*>/gi;
 var SYSTEM_PROMPT_MARKER = "-=-codeterm:system_prompt-=-";
 function markSystemPrompt(body) {
   return SYSTEM_PROMPT_MARKER + body;
@@ -69,14 +75,15 @@ function nextId(s, prefix = "lmstudio") {
   s.seq += 1;
   return id;
 }
-function append(s, type, content, id) {
+function append(s, type, content, id, extras) {
   const msgId = id || nextId(s);
   const existing = s.messages.find((m) => m.id === msgId);
   if (existing) {
     existing.content = content;
+    if (extras) Object.assign(existing, extras);
     return existing;
   }
-  const msg = { id: msgId, type, content };
+  const msg = { id: msgId, type, content, ...extras || {} };
   s.messages.push(msg);
   return msg;
 }
@@ -166,88 +173,6 @@ function execResultFromPoll(poll) {
 function formatToolResult(call, result) {
   return JSON.stringify({ tool: call.tool, args: call.args, result }, null, 2);
 }
-function parseToolJson(raw) {
-  try {
-    const parsed = JSON.parse(raw.trim());
-    if (!parsed || typeof parsed !== "object") {
-      return { raw, error: "tool JSON must be an object" };
-    }
-    const obj = parsed;
-    if (typeof obj.tool !== "string") {
-      return { raw, error: "tool JSON requires string field `tool`" };
-    }
-    const args = obj.args && typeof obj.args === "object" ? obj.args : {};
-    return { raw, call: { tool: obj.tool, args } };
-  } catch (e) {
-    return { raw, error: `tool JSON parse error: ${String(e)}` };
-  }
-}
-function collectFenceMatches(text) {
-  const matches = [];
-  TOOL_FENCE_RE.lastIndex = 0;
-  let match;
-  while ((match = TOOL_FENCE_RE.exec(text)) !== null) {
-    matches.push({ start: match.index, end: match.index + match[0].length, entry: parseToolJson(match[1]) });
-  }
-  return matches;
-}
-function trailingFenceGroup(text, matches) {
-  if (!matches.length) return [];
-  let firstTrailing = matches.length - 1;
-  while (firstTrailing > 0) {
-    const prev = matches[firstTrailing - 1];
-    const next = matches[firstTrailing];
-    if (text.slice(prev.end, next.start).trim() !== "") break;
-    firstTrailing -= 1;
-  }
-  return matches.slice(firstTrailing);
-}
-function parseLooseObject(raw) {
-  const attempt = (s) => {
-    try {
-      const v = JSON.parse(s);
-      return v && typeof v === "object" && !Array.isArray(v) ? v : null;
-    } catch {
-      return null;
-    }
-  };
-  const direct = attempt(raw);
-  if (direct) return direct;
-  const coerced = raw.replace(/([{,]\s*)([A-Za-z_$][A-Za-z0-9_$]*)(\s*:)/g, '$1"$2"$3').replace(/'/g, '"');
-  return attempt(coerced);
-}
-function applyArgAliases(tool, args) {
-  const aliases = NATIVE_ARG_ALIASES[tool];
-  if (!aliases) return args;
-  const out = { ...args };
-  for (const from of Object.keys(aliases)) {
-    const to = aliases[from];
-    if (out[to] === void 0 && out[from] !== void 0) out[to] = out[from];
-  }
-  return out;
-}
-function collectNativeMatches(text) {
-  const matches = [];
-  NATIVE_CALL_RE.lastIndex = 0;
-  let match;
-  while ((match = NATIVE_CALL_RE.exec(text)) !== null) {
-    const tool = match[1].split(":").pop().trim();
-    if (!CURATED_TOOLS.includes(tool)) continue;
-    let start = match.index;
-    let end = match.index + match[0].length;
-    const wrapBefore = text.slice(0, start).match(/<\s*\|?\s*(?:tool_call|tool▁call)\s*\|?\s*>\s*$/i);
-    if (wrapBefore) start -= wrapBefore[0].length;
-    const wrapAfter = text.slice(end).match(/^\s*<\s*\|?\s*(?:tool_call|tool▁call)\s*\|?\s*>/i);
-    if (wrapAfter) end += wrapAfter[0].length;
-    const parsed = parseLooseObject(match[2]);
-    if (!parsed) {
-      matches.push({ start, end, entry: { raw: match[0], error: "native tool-call args not parseable" } });
-      continue;
-    }
-    matches.push({ start, end, entry: { raw: match[0], call: { tool, args: applyArgAliases(tool, parsed) } } });
-  }
-  return matches;
-}
 function stripSpans(text, spans) {
   if (!spans.length) return text;
   const ordered = [...spans].sort((a, b) => a.start - b.start);
@@ -261,16 +186,89 @@ function stripSpans(text, spans) {
   out += text.slice(cursor);
   return out.replace(/\n{3,}/g, "\n\n").trim();
 }
+function expandToolSpan(text, span) {
+  FENCE_RE.lastIndex = 0;
+  let match;
+  while ((match = FENCE_RE.exec(text)) !== null) {
+    const start2 = match.index;
+    const end2 = match.index + match[0].length;
+    if (span.start >= start2 && span.end <= end2) return { start: start2, end: end2 };
+  }
+  let start = span.start;
+  let end = span.end;
+  const before = text.slice(0, start);
+  TOOL_WRAPPER_RE.lastIndex = 0;
+  let wrapper;
+  let lastBefore = null;
+  while ((wrapper = TOOL_WRAPPER_RE.exec(before)) !== null) lastBefore = wrapper;
+  if (lastBefore && before.slice(lastBefore.index + lastBefore[0].length).trim() === "") start = lastBefore.index;
+  const after = text.slice(end);
+  const afterWrapper = after.match(/^\s*<\s*\|?\/?\s*(?:tool_call|tool▁call)\s*\|?\s*>/i);
+  if (afterWrapper) end += afterWrapper[0].length;
+  return { start, end };
+}
+function parsedSpan(parsed, text) {
+  if (!Array.isArray(parsed.span) || parsed.span.length !== 2) return null;
+  const start = typeof parsed.span[0] === "number" ? parsed.span[0] : -1;
+  const end = typeof parsed.span[1] === "number" ? parsed.span[1] : -1;
+  if (start < 0 || end < start || end > text.length) return null;
+  return { start, end };
+}
 function parseToolEntries(text) {
-  const fenceTools = trailingFenceGroup(text, collectFenceMatches(text));
-  if (fenceTools.length) {
-    return { entries: fenceTools.map((m) => m.entry), cleaned: stripSpans(text, fenceTools) };
+  let raw = "null";
+  try {
+    raw = host.toolcall.parse(text, TOOL_SCHEMA_JSON);
+  } catch (e) {
+    host.log("warn", `host.toolcall.parse failed: ${String(e)}`);
+    return { entries: [], cleaned: text };
   }
-  const nativeTools = collectNativeMatches(text);
-  if (nativeTools.length) {
-    return { entries: nativeTools.map((m) => m.entry), cleaned: stripSpans(text, nativeTools) };
-  }
-  return { entries: [], cleaned: text };
+  if (raw === "null") return { entries: [], cleaned: text };
+  const parsed = parseJson(raw, null);
+  if (!parsed || typeof parsed.tool !== "string") return { entries: [], cleaned: text };
+  const args = parsed.args && typeof parsed.args === "object" && !Array.isArray(parsed.args) ? parsed.args : {};
+  const span = parsedSpan(parsed, text);
+  const cleaned = span ? stripSpans(text, [expandToolSpan(text, span)]) : text;
+  return {
+    entries: [{ call: { tool: parsed.tool, args } }],
+    cleaned
+  };
+}
+function toolContent(call) {
+  if (call.tool === "exec" && typeof call.args.cmd === "string") return call.args.cmd;
+  if (call.tool === "codeterm" && typeof call.args.args === "string") return `codeterm ${call.args.args}`;
+  return JSON.stringify(call.args);
+}
+function emitToolCall(s, call) {
+  const toolId = nextId(s, `lmstudio-tool-${call.tool}`);
+  const toolArgs = JSON.stringify(call.args);
+  append(s, "tool_call", toolContent(call), toolId, {
+    toolName: call.tool,
+    toolInput: call.args,
+    toolArgs,
+    toolId,
+    collapsed: true,
+    provider: "lmstudio"
+  });
+  return toolId;
+}
+function emitToolResult(s, call, result, toolId) {
+  const formatted = formatToolResult(call, result);
+  append(s, "tool_result", formatted, void 0, {
+    toolId,
+    toolResult: formatted,
+    collapsed: true,
+    provider: "lmstudio"
+  });
+  s.pendingInputs.push(`tool_result:
+${formatted}`);
+}
+function promptVariantForModel(modelId, generalPrompt) {
+  void modelId;
+  return generalPrompt;
+}
+function systemPromptForModel(generalPrompt, modelId) {
+  if (!modelId) return generalPrompt;
+  return promptVariantForModel(modelId, generalPrompt);
 }
 function executeTool(call) {
   switch (call.tool) {
@@ -423,27 +421,10 @@ function finishAssistantMessage(s, content, responseId, messageId) {
   s.pendingTools = entries.slice();
   advanceTools(s);
 }
-function emitToolResult(s, call, result) {
-  const formatted = formatToolResult(call, result);
-  append(s, "tool_result", formatted);
-  s.pendingInputs.push(`tool_result:
-${formatted}`);
-}
 function advanceTools(s) {
   if (s.pendingExec) return;
   while (s.pendingTools && s.pendingTools.length) {
     const entry = s.pendingTools.shift();
-    if (entry.error || !entry.call) {
-      const formatted = JSON.stringify(
-        { tool: "parse_error", error: entry.error || "invalid tool call", raw: entry.raw },
-        null,
-        2
-      );
-      append(s, "tool_result", formatted);
-      s.pendingInputs.push(`tool_result:
-${formatted}`);
-      continue;
-    }
     const call = entry.call;
     if (s.toolRounds >= MAX_TOOL_ROUNDS) {
       s.pendingInputs = [];
@@ -456,21 +437,22 @@ ${formatted}`);
       return;
     }
     s.toolRounds += 1;
+    const toolId = emitToolCall(s, call);
     if (call.tool === "exec" || call.tool === "codeterm") {
       const shell = execShellCmd(call);
       if (shell.error) {
-        emitToolResult(s, call, { error: shell.error });
+        emitToolResult(s, call, { error: shell.error }, toolId);
         continue;
       }
       const started = startExecJob(shell.shellCmd);
       if (started.jobId) {
-        s.pendingExec = { call, jobId: started.jobId };
+        s.pendingExec = { call, jobId: started.jobId, toolId };
         return;
       }
-      emitToolResult(s, call, { error: started.error || "host.exec.start failed" });
+      emitToolResult(s, call, { error: started.error || "host.exec.start failed" }, toolId);
       continue;
     }
-    emitToolResult(s, call, executeTool(call));
+    emitToolResult(s, call, executeTool(call), toolId);
   }
   s.pendingTools = null;
 }
@@ -481,7 +463,7 @@ function drainExec(s) {
     const finished = s.pendingExec;
     host.execClose(finished.jobId);
     s.pendingExec = null;
-    emitToolResult(s, finished.call, execResultFromPoll(poll));
+    emitToolResult(s, finished.call, execResultFromPoll(poll), finished.toolId);
     advanceTools(s);
   }
 }
@@ -520,8 +502,9 @@ function pollStream(s) {
 function resolveSession(ctx) {
   const s = readSettings();
   const preset = resolvePreset(ctx.preset);
-  const systemPrompt = ctx.systemPrompt || preset && preset.systemPrompt || "";
   const model = ctx.model || preset && preset.model || s.model || "";
+  const generalSystemPrompt = ctx.systemPrompt || preset && preset.systemPrompt || "";
+  const systemPrompt = systemPromptForModel(generalSystemPrompt, model);
   const params = { ...s.params || {}, ...preset && preset.params || {} };
   return {
     messages: [],

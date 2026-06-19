@@ -3,8 +3,7 @@
 A CodeTerm **chatBackend** plugin that turns a pane into an open agent shell
 backed by a local [LM Studio](https://lmstudio.ai) model. The shell uses LM
 Studio native v1 chat, streams partial tokens, shows the active system prompt as
-the first message, and can run the fenced `codeterm-tool` protocol from the
-default preset.
+the first message, and can run validated CodeTerm tool calls parsed by the host.
 
 LM Studio's local server is the model backend; this plugin connects to it via
 permission-gated host APIs.
@@ -42,8 +41,9 @@ that `host:port` to the allowlist.
 - `sendMessage` appends the user turn and starts a native `POST /api/v1/chat`
   streaming job through `host.fetchStream`.
 - `pump` polls stream chunks, re-emits the growing assistant message with a
-  stable id, parses completed `codeterm-tool` fenced JSON blocks, executes the
-  curated host tool, appends `tool_result`, and continues until no fence remains.
+  stable id, passes completed assistant text to `host.toolcall.parse` with the
+  curated schema, emits a structured `tool_call`, executes the selected host
+  tool, appends `tool_result`, and continues until the parser returns `null`.
 - LM Studio continuation uses `previous_response_id` from the previous
   `response_id`. If no continuation id is available, the plugin resends assembled
   visible context as `input`.

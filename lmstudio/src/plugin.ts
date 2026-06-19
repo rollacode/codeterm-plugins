@@ -66,12 +66,17 @@ interface ToolCall {
 interface PendingExec {
   call: ToolCall;
   jobId: string;
+  toolId?: string;
 }
 
 interface ToolParseEntry {
-  call?: ToolCall;
-  error?: string;
-  raw: string;
+  call: ToolCall;
+}
+
+interface ParsedToolCall {
+  tool?: unknown;
+  args?: unknown;
+  span?: unknown;
 }
 
 interface StreamPoll {
@@ -84,25 +89,19 @@ interface StreamPoll {
 
 const DEFAULT_BASE_URL = "http://localhost:1234";
 const MAX_TOOL_ROUNDS = 8;
-const TOOL_FENCE_RE = /```codeterm-tool\s*\n([\s\S]*?)\n?```/g;
-// The 6 curated tools — the only names we will ever execute. A native or fenced
-// call to anything else is rejected (executeTool's default surfaces an error).
-const CURATED_TOOLS = ["exec", "read_file", "write_file", "codeterm", "mem_search", "spawn_agent"];
-// gemma-style native tool calls: a wrapper token (<|tool_call>, <tool_call|>,
-// <|tool_call|>) plus a `call:NAME{args}` payload. We strip the wrapper tokens
-// for display and parse the call:NAME{...} shape (args may be loose JS-object
-// syntax: unquoted keys, single quotes).
-const NATIVE_WRAPPER_RE = /<\s*\|?\s*(?:tool_call|tool▁call)\s*\|?\s*>/gi;
-// The call header may be namespaced — gemma emits `call:exec`, `call:default_api:exec`,
-// even `call:foo:bar:write_file`. Capture the whole colon-separated chain; the real
-// tool name is its LAST segment (resolved + validated in collectNativeMatches).
-const NATIVE_CALL_RE =
-  /call\s*[:=]\s*((?:[A-Za-z_][A-Za-z0-9_]*\s*:\s*)*[A-Za-z_][A-Za-z0-9_]*)\s*(\{[\s\S]*?\})/g;
-// Native arg aliases mapped to our curated arg names (gemma emits `command`).
-const NATIVE_ARG_ALIASES: Record<string, Record<string, string>> = {
-  exec: { command: "cmd" },
-  codeterm: { command: "args", cmd: "args" },
-};
+const TOOL_SCHEMA_JSON = JSON.stringify({
+  tools: [
+    { name: "exec", args: ["cmd"], optional: ["cwd"] },
+    { name: "read_file", args: ["path"], optional: [] },
+    { name: "write_file", args: ["path", "content"], optional: [] },
+    { name: "codeterm", args: ["args"], optional: [] },
+    { name: "mem_search", args: ["query"], optional: [] },
+    { name: "spawn_agent", args: ["provider", "task"], optional: ["workspace"] },
+  ],
+  aliases: { command: "cmd", file: "path", filepath: "path" },
+});
+const FENCE_RE = /```[^\r\n`]*\r?\n[\s\S]*?```/g;
+const TOOL_WRAPPER_RE = /<\s*\|?\/?\s*(?:tool_call|tool▁call)\s*\|?\s*>/gi;
 
 // System prompts are not a valid ChatMessageKind — they ride on a type:'user'
 // message wrapped in this CodeTerm marker (twin of chat-core's markSystemPrompt
@@ -160,14 +159,21 @@ function nextId(s: Session, prefix = "lmstudio"): string {
 // id and grows across chunks. If an entry with that id already exists, replace
 // its content in place; otherwise push. This makes per-chunk duplicates
 // structurally impossible while keeping poll(sid, cursor) returning clean deltas.
-function append(s: Session, type: string, content: string, id?: string): NormalizedChatMessage {
+function append(
+  s: Session,
+  type: string,
+  content: string,
+  id?: string,
+  extras?: Record<string, unknown>,
+): NormalizedChatMessage {
   const msgId = id || nextId(s);
   const existing = s.messages.find((m) => m.id === msgId);
   if (existing) {
     existing.content = content;
+    if (extras) Object.assign(existing as unknown as Record<string, unknown>, extras);
     return existing;
   }
-  const msg = { id: msgId, type, content };
+  const msg = { id: msgId, type, content, ...(extras || {}) } as NormalizedChatMessage;
   s.messages.push(msg);
   return msg;
 }
@@ -299,121 +305,9 @@ function formatToolResult(call: ToolCall, result: unknown): string {
   return JSON.stringify({ tool: call.tool, args: call.args, result }, null, 2);
 }
 
-function parseToolJson(raw: string): ToolParseEntry {
-  try {
-    const parsed = JSON.parse(raw.trim()) as unknown;
-    if (!parsed || typeof parsed !== "object") {
-      return { raw, error: "tool JSON must be an object" };
-    }
-    const obj = parsed as { tool?: unknown; args?: unknown };
-    if (typeof obj.tool !== "string") {
-      return { raw, error: "tool JSON requires string field `tool`" };
-    }
-    const args = obj.args && typeof obj.args === "object" ? (obj.args as Record<string, unknown>) : {};
-    return { raw, call: { tool: obj.tool, args } };
-  } catch (e) {
-    return { raw, error: `tool JSON parse error: ${String(e)}` };
-  }
-}
-
-interface ToolMatch {
-  start: number;
-  end: number;
-  entry: ToolParseEntry;
-}
-
 interface ParsedTools {
   entries: ToolParseEntry[];
   cleaned: string;
-}
-
-function collectFenceMatches(text: string): ToolMatch[] {
-  const matches: ToolMatch[] = [];
-  TOOL_FENCE_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = TOOL_FENCE_RE.exec(text)) !== null) {
-    matches.push({ start: match.index, end: match.index + match[0].length, entry: parseToolJson(match[1]) });
-  }
-  return matches;
-}
-
-// The trailing contiguous fence group: starting from the last fence, include any
-// immediately preceding fences separated from it only by whitespace. Trailing
-// prose AFTER the last fence is now allowed (relaxed from the old strictly-
-// trailing guard) — gemma frequently appends a sentence after a real tool call.
-// A fence separated from the trailing group by prose is treated as illustrative
-// and not executed.
-function trailingFenceGroup(text: string, matches: ToolMatch[]): ToolMatch[] {
-  if (!matches.length) return [];
-  let firstTrailing = matches.length - 1;
-  while (firstTrailing > 0) {
-    const prev = matches[firstTrailing - 1];
-    const next = matches[firstTrailing];
-    if (text.slice(prev.end, next.start).trim() !== "") break;
-    firstTrailing -= 1;
-  }
-  return matches.slice(firstTrailing);
-}
-
-// Parse a brace-delimited args object, tolerating loose JS-object syntax that
-// native models emit (bare keys, single quotes) by coercing to JSON.
-function parseLooseObject(raw: string): Record<string, unknown> | null {
-  const attempt = (s: string): Record<string, unknown> | null => {
-    try {
-      const v = JSON.parse(s) as unknown;
-      return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
-    } catch {
-      return null;
-    }
-  };
-  const direct = attempt(raw);
-  if (direct) return direct;
-  const coerced = raw
-    .replace(/([{,]\s*)([A-Za-z_$][A-Za-z0-9_$]*)(\s*:)/g, '$1"$2"$3')
-    .replace(/'/g, '"');
-  return attempt(coerced);
-}
-
-function applyArgAliases(tool: string, args: Record<string, unknown>): Record<string, unknown> {
-  const aliases = NATIVE_ARG_ALIASES[tool];
-  if (!aliases) return args;
-  const out: Record<string, unknown> = { ...args };
-  for (const from of Object.keys(aliases)) {
-    const to = aliases[from];
-    if (out[to] === undefined && out[from] !== undefined) out[to] = out[from];
-  }
-  return out;
-}
-
-// Recognize native model tool-call wrappers — at minimum gemma's
-// `<|tool_call>call:NAME{args}<tool_call|>`. We only ever map to the curated
-// tool set; unknown native names surface a clear error via executeTool.
-function collectNativeMatches(text: string): ToolMatch[] {
-  const matches: ToolMatch[] = [];
-  NATIVE_CALL_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = NATIVE_CALL_RE.exec(text)) !== null) {
-    // The tool name is the last colon-delimited segment of the header
-    // (call:exec → exec; call:default_api:exec → exec; call:a:b:write_file → write_file).
-    const tool = match[1].split(":").pop()!.trim();
-    // Only the 6 curated tools ever execute. An unknown native name (any namespace)
-    // is ignored entirely — no match, so the raw text simply stays in the bubble.
-    if (!CURATED_TOOLS.includes(tool)) continue;
-    let start = match.index;
-    let end = match.index + match[0].length;
-    // Swallow adjacent wrapper tokens so stripping leaves no `<|tool_call>` residue.
-    const wrapBefore = text.slice(0, start).match(/<\s*\|?\s*(?:tool_call|tool▁call)\s*\|?\s*>\s*$/i);
-    if (wrapBefore) start -= wrapBefore[0].length;
-    const wrapAfter = text.slice(end).match(/^\s*<\s*\|?\s*(?:tool_call|tool▁call)\s*\|?\s*>/i);
-    if (wrapAfter) end += wrapAfter[0].length;
-    const parsed = parseLooseObject(match[2]);
-    if (!parsed) {
-      matches.push({ start, end, entry: { raw: match[0], error: "native tool-call args not parseable" } });
-      continue;
-    }
-    matches.push({ start, end, entry: { raw: match[0], call: { tool, args: applyArgAliases(tool, parsed) } } });
-  }
-  return matches;
 }
 
 // Remove the given (executed) spans from the displayed text and tidy whitespace,
@@ -432,22 +326,101 @@ function stripSpans(text: string, spans: { start: number; end: number }[]): stri
   return out.replace(/\n{3,}/g, "\n\n").trim();
 }
 
-// Unified tool-call extraction. Prefer our fenced format (trailing contiguous
-// group). If no fenced call is present, fall back to native model wrappers. A
-// trailing, well-formed tool call ALWAYS executes — even if it happens to match
-// the system-prompt example: the trailing-only / last-contiguous-group logic
-// already excludes mid-explanation echoes, and a genuine trailing call (e.g. the
-// 'codeterm pane list' that "list my panes" elicits) IS the user's intent.
+function expandToolSpan(text: string, span: { start: number; end: number }): { start: number; end: number } {
+  FENCE_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = FENCE_RE.exec(text)) !== null) {
+    const start = match.index;
+    const end = match.index + match[0].length;
+    if (span.start >= start && span.end <= end) return { start, end };
+  }
+
+  let start = span.start;
+  let end = span.end;
+  const before = text.slice(0, start);
+  TOOL_WRAPPER_RE.lastIndex = 0;
+  let wrapper: RegExpExecArray | null;
+  let lastBefore: RegExpExecArray | null = null;
+  while ((wrapper = TOOL_WRAPPER_RE.exec(before)) !== null) lastBefore = wrapper;
+  if (lastBefore && before.slice(lastBefore.index + lastBefore[0].length).trim() === "") start = lastBefore.index;
+
+  const after = text.slice(end);
+  const afterWrapper = after.match(/^\s*<\s*\|?\/?\s*(?:tool_call|tool▁call)\s*\|?\s*>/i);
+  if (afterWrapper) end += afterWrapper[0].length;
+  return { start, end };
+}
+
+function parsedSpan(parsed: ParsedToolCall, text: string): { start: number; end: number } | null {
+  if (!Array.isArray(parsed.span) || parsed.span.length !== 2) return null;
+  const start = typeof parsed.span[0] === "number" ? parsed.span[0] : -1;
+  const end = typeof parsed.span[1] === "number" ? parsed.span[1] : -1;
+  if (start < 0 || end < start || end > text.length) return null;
+  return { start, end };
+}
+
+// Delegate extraction/repair/validation to the host's Rust parser. It returns a
+// single validated call or "null"; invalid or unknown tool syntax is normal text.
 function parseToolEntries(text: string): ParsedTools {
-  const fenceTools = trailingFenceGroup(text, collectFenceMatches(text));
-  if (fenceTools.length) {
-    return { entries: fenceTools.map((m) => m.entry), cleaned: stripSpans(text, fenceTools) };
+  let raw = "null";
+  try {
+    raw = host.toolcall.parse(text, TOOL_SCHEMA_JSON);
+  } catch (e) {
+    host.log("warn", `host.toolcall.parse failed: ${String(e)}`);
+    return { entries: [], cleaned: text };
   }
-  const nativeTools = collectNativeMatches(text);
-  if (nativeTools.length) {
-    return { entries: nativeTools.map((m) => m.entry), cleaned: stripSpans(text, nativeTools) };
-  }
-  return { entries: [], cleaned: text };
+  if (raw === "null") return { entries: [], cleaned: text };
+  const parsed = parseJson<ParsedToolCall | null>(raw, null);
+  if (!parsed || typeof parsed.tool !== "string") return { entries: [], cleaned: text };
+  const args = parsed.args && typeof parsed.args === "object" && !Array.isArray(parsed.args)
+    ? (parsed.args as Record<string, unknown>)
+    : {};
+  const span = parsedSpan(parsed, text);
+  const cleaned = span ? stripSpans(text, [expandToolSpan(text, span)]) : text;
+  return {
+    entries: [{ call: { tool: parsed.tool, args } }],
+    cleaned,
+  };
+}
+
+function toolContent(call: ToolCall): string {
+  if (call.tool === "exec" && typeof call.args.cmd === "string") return call.args.cmd;
+  if (call.tool === "codeterm" && typeof call.args.args === "string") return `codeterm ${call.args.args}`;
+  return JSON.stringify(call.args);
+}
+
+function emitToolCall(s: Session, call: ToolCall): string {
+  const toolId = nextId(s, `lmstudio-tool-${call.tool}`);
+  const toolArgs = JSON.stringify(call.args);
+  append(s, "tool_call", toolContent(call), toolId, {
+    toolName: call.tool,
+    toolInput: call.args,
+    toolArgs,
+    toolId,
+    collapsed: true,
+    provider: "lmstudio",
+  });
+  return toolId;
+}
+
+function emitToolResult(s: Session, call: ToolCall, result: unknown, toolId?: string): void {
+  const formatted = formatToolResult(call, result);
+  append(s, "tool_result", formatted, undefined, {
+    toolId,
+    toolResult: formatted,
+    collapsed: true,
+    provider: "lmstudio",
+  });
+  s.pendingInputs.push(`tool_result:\n${formatted}`);
+}
+
+function promptVariantForModel(modelId: string, generalPrompt: string): string {
+  void modelId;
+  return generalPrompt;
+}
+
+function systemPromptForModel(generalPrompt: string, modelId: string): string {
+  if (!modelId) return generalPrompt;
+  return promptVariantForModel(modelId, generalPrompt);
 }
 
 // Sync tools only. exec/codeterm are dispatched separately via the async
@@ -642,12 +615,6 @@ function finishAssistantMessage(
   advanceTools(s);
 }
 
-function emitToolResult(s: Session, call: ToolCall, result: unknown): void {
-  const formatted = formatToolResult(call, result);
-  append(s, "tool_result", formatted);
-  s.pendingInputs.push(`tool_result:\n${formatted}`);
-}
-
 // Walk the pending tool queue. Sync tools run inline; exec/codeterm start an
 // async job (host.exec.start) and return immediately, parking the queue on
 // s.pendingExec until drainExec resumes it. The VM lock is therefore held only
@@ -656,16 +623,6 @@ function advanceTools(s: Session): void {
   if (s.pendingExec) return;
   while (s.pendingTools && s.pendingTools.length) {
     const entry = s.pendingTools.shift() as ToolParseEntry;
-    if (entry.error || !entry.call) {
-      const formatted = JSON.stringify(
-        { tool: "parse_error", error: entry.error || "invalid tool call", raw: entry.raw },
-        null,
-        2,
-      );
-      append(s, "tool_result", formatted);
-      s.pendingInputs.push(`tool_result:\n${formatted}`);
-      continue;
-    }
     const call = entry.call;
     if (s.toolRounds >= MAX_TOOL_ROUNDS) {
       s.pendingInputs = [];
@@ -678,21 +635,22 @@ function advanceTools(s: Session): void {
       return;
     }
     s.toolRounds += 1;
+    const toolId = emitToolCall(s, call);
     if (call.tool === "exec" || call.tool === "codeterm") {
       const shell = execShellCmd(call);
       if (shell.error) {
-        emitToolResult(s, call, { error: shell.error });
+        emitToolResult(s, call, { error: shell.error }, toolId);
         continue;
       }
       const started = startExecJob(shell.shellCmd as string);
       if (started.jobId) {
-        s.pendingExec = { call, jobId: started.jobId };
+        s.pendingExec = { call, jobId: started.jobId, toolId };
         return; // park until drainExec sees the job finish
       }
-      emitToolResult(s, call, { error: started.error || "host.exec.start failed" });
+      emitToolResult(s, call, { error: started.error || "host.exec.start failed" }, toolId);
       continue;
     }
-    emitToolResult(s, call, executeTool(call));
+    emitToolResult(s, call, executeTool(call), toolId);
   }
   s.pendingTools = null;
 }
@@ -707,7 +665,7 @@ function drainExec(s: Session): void {
     const finished = s.pendingExec;
     host.execClose(finished.jobId);
     s.pendingExec = null;
-    emitToolResult(s, finished.call, execResultFromPoll(poll));
+    emitToolResult(s, finished.call, execResultFromPoll(poll), finished.toolId);
     advanceTools(s);
   }
 }
@@ -754,8 +712,9 @@ function pollStream(s: Session): void {
 function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
   const s = readSettings();
   const preset = resolvePreset(ctx.preset);
-  const systemPrompt = ctx.systemPrompt || (preset && preset.systemPrompt) || "";
   const model = ctx.model || (preset && preset.model) || s.model || "";
+  const generalSystemPrompt = ctx.systemPrompt || (preset && preset.systemPrompt) || "";
+  const systemPrompt = systemPromptForModel(generalSystemPrompt, model);
   const params = { ...(s.params || {}), ...((preset && preset.params) || {}) };
   return {
     messages: [],
