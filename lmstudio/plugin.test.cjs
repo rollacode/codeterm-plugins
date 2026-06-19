@@ -553,24 +553,54 @@ test("a codeterm-tool fence followed by trailing prose still executes", () => {
   );
 });
 
-test("the system-prompt's documented example echoed back does not execute", () => {
+test("a trailing fence matching the old documented example now executes (no example-guard skip)", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({ paneId: "example", config: {}, systemPrompt: "sys" });
-  plugin.sendMessage("example", "show me the protocol");
-  // Exact documented example from config.yaml — echoing it must never run a tool.
+  plugin.sendMessage("example", "list my panes");
+  // The old isDocumentedExample guard skipped this exact call because it equals the
+  // former system-prompt example ('codeterm pane list'). That guard is REMOVED: the
+  // most common request ("list my panes") makes gemma emit precisely this trailing,
+  // well-formed fence — and a genuine trailing tool call IS the user's intent. The
+  // trailing-only / last-contiguous-group logic already prevents mid-explanation
+  // echoes from running, so the guard was both wrong (broke the common case) and
+  // redundant. It MUST execute, and the raw fence must NOT leak as the final answer.
   const answer =
-    'Here is the format:\n```codeterm-tool\n{"tool": "exec", "args": {"cmd": "codeterm pane list"}}\n```';
+    'Sure.\n```codeterm-tool\n{"tool": "exec", "args": {"cmd": "codeterm pane list"}}\n```';
   enqueueStream(0, [{ chunks: [turn(answer, "resp-ex")], done: true, status: 200 }]);
   plugin.pump("example");
 
-  const p = plugin.poll("example", null);
-  assert(execCalls.length === 0, "documented example did not run, got " + execCalls.length);
-  assert(p.done === true, "turn ends without tool execution");
+  assert(execCalls.length === 1, "trailing example-matching fence now executes, got " + execCalls.length);
+  assert(
+    execCalls[0].args.some((arg) => String(arg).includes("codeterm pane list")),
+    "the example command actually ran",
+  );
+  // continuation
+  enqueueStream(1, [{ chunks: [turn("You have pane-1 and pane-2.", "resp-final")], done: true, status: 200 }]);
+  const p = pumpUntilDone("example");
+  assert(contents(p.messages, "tool_result").length === 1, "produced a tool_result");
+  const assistants = contents(p.messages, "assistant");
+  assert(!assistants.some((c) => /codeterm-tool/.test(c)), "raw fence did not leak into the bubble");
+});
+
+test("a fence-only assistant reply leaves no empty assistant bubble", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "fence-only", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("fence-only", "list panes");
+  // The whole reply is the fence — after stripping the executed fence, cleaned === ''.
+  // That empty content must NOT be shown as a blank assistant bubble in the transcript.
+  const answer = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo hi"}}\n```';
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-fo")], done: true, status: 200 }]);
+  plugin.pump("fence-only");
+
+  assert(execCalls.length === 1, "fence-only reply still executes the tool, got " + execCalls.length);
+  enqueueStream(1, [{ chunks: [turn("Done.", "resp-fo-final")], done: true, status: 200 }]);
+  const p = pumpUntilDone("fence-only");
   const assistants = contents(p.messages, "assistant");
   assert(
-    assistants.some((c) => c.includes("codeterm pane list")),
-    "the documented example is preserved in the bubble (not stripped)",
+    assistants.every((c) => c.trim() !== ""),
+    "no empty assistant bubble, got " + JSON.stringify(assistants),
   );
+  assert(assistants[assistants.length - 1] === "Done.", "final answer present after continuation");
 });
 
 test("an executed tool-call fence is stripped from the displayed assistant content", () => {

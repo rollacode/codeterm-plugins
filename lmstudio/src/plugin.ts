@@ -103,22 +103,6 @@ const NATIVE_ARG_ALIASES: Record<string, Record<string, string>> = {
   codeterm: { command: "args", cmd: "args" },
 };
 
-// Canonical JSON (sorted keys) so the documented system-prompt example can be
-// recognized regardless of whitespace/key order and never executed.
-function canonicalJson(v: unknown): string {
-  if (v === null || typeof v !== "object") return JSON.stringify(v);
-  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
-  const obj = v as Record<string, unknown>;
-  return `{${Object.keys(obj)
-    .sort()
-    .map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`)
-    .join(",")}}`;
-}
-const DOCUMENTED_EXAMPLE_CANON = canonicalJson({ tool: "exec", args: { cmd: "codeterm pane list" } });
-function isDocumentedExample(call?: ToolCall): boolean {
-  return !!call && canonicalJson({ tool: call.tool, args: call.args }) === DOCUMENTED_EXAMPLE_CANON;
-}
-
 // System prompts are not a valid ChatMessageKind — they ride on a type:'user'
 // message wrapped in this CodeTerm marker (twin of chat-core's markSystemPrompt
 // / buildMarker("system_prompt", [], body)). chatPrefixes detects the marker and
@@ -448,16 +432,17 @@ function stripSpans(text: string, spans: { start: number; end: number }[]): stri
 }
 
 // Unified tool-call extraction. Prefer our fenced format (trailing contiguous
-// group, with the documented example never executed and never stripped). If no
-// fenced call is present, fall back to native model wrappers.
+// group). If no fenced call is present, fall back to native model wrappers. A
+// trailing, well-formed tool call ALWAYS executes — even if it happens to match
+// the system-prompt example: the trailing-only / last-contiguous-group logic
+// already excludes mid-explanation echoes, and a genuine trailing call (e.g. the
+// 'codeterm pane list' that "list my panes" elicits) IS the user's intent.
 function parseToolEntries(text: string): ParsedTools {
-  const fenceTools = trailingFenceGroup(text, collectFenceMatches(text)).filter(
-    (m) => !isDocumentedExample(m.entry.call),
-  );
+  const fenceTools = trailingFenceGroup(text, collectFenceMatches(text));
   if (fenceTools.length) {
     return { entries: fenceTools.map((m) => m.entry), cleaned: stripSpans(text, fenceTools) };
   }
-  const nativeTools = collectNativeMatches(text).filter((m) => !isDocumentedExample(m.entry.call));
+  const nativeTools = collectNativeMatches(text);
   if (nativeTools.length) {
     return { entries: nativeTools.map((m) => m.entry), cleaned: stripSpans(text, nativeTools) };
   }
@@ -639,7 +624,16 @@ function finishAssistantMessage(
   }
   // Strip the executed tool-call syntax from the displayed assistant bubble so
   // the user sees clean prose + the tool card, not the raw fence/native wrapper.
-  if (cleaned !== content) append(s, "assistant", cleaned, messageId);
+  // A fence-only reply strips down to '' — drop that entry entirely rather than
+  // leave a blank assistant bubble in the transcript.
+  if (cleaned !== content) {
+    if (cleaned.trim() === "") {
+      const idx = s.messages.findIndex((m) => m.id === messageId);
+      if (idx >= 0) s.messages.splice(idx, 1);
+    } else {
+      append(s, "assistant", cleaned, messageId);
+    }
+  }
 
   // Queue the calls; advanceTools runs them in order. An exec/codeterm call
   // starts an async job and parks the queue until drainExec sees it finish.

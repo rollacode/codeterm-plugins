@@ -17,7 +17,7 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// lmstudio/src/plugin.ts
+// src/plugin.ts
 var plugin_exports = {};
 __export(plugin_exports, {
   default: () => plugin_default
@@ -32,16 +32,6 @@ var NATIVE_ARG_ALIASES = {
   exec: { command: "cmd" },
   codeterm: { command: "args", cmd: "args" }
 };
-function canonicalJson(v) {
-  if (v === null || typeof v !== "object") return JSON.stringify(v);
-  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
-  const obj = v;
-  return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`).join(",")}}`;
-}
-var DOCUMENTED_EXAMPLE_CANON = canonicalJson({ tool: "exec", args: { cmd: "codeterm pane list" } });
-function isDocumentedExample(call) {
-  return !!call && canonicalJson({ tool: call.tool, args: call.args }) === DOCUMENTED_EXAMPLE_CANON;
-}
 var SYSTEM_PROMPT_MARKER = "-=-codeterm:system_prompt-=-";
 function markSystemPrompt(body) {
   return SYSTEM_PROMPT_MARKER + body;
@@ -272,13 +262,11 @@ function stripSpans(text, spans) {
   return out.replace(/\n{3,}/g, "\n\n").trim();
 }
 function parseToolEntries(text) {
-  const fenceTools = trailingFenceGroup(text, collectFenceMatches(text)).filter(
-    (m) => !isDocumentedExample(m.entry.call)
-  );
+  const fenceTools = trailingFenceGroup(text, collectFenceMatches(text));
   if (fenceTools.length) {
     return { entries: fenceTools.map((m) => m.entry), cleaned: stripSpans(text, fenceTools) };
   }
-  const nativeTools = collectNativeMatches(text).filter((m) => !isDocumentedExample(m.entry.call));
+  const nativeTools = collectNativeMatches(text);
   if (nativeTools.length) {
     return { entries: nativeTools.map((m) => m.entry), cleaned: stripSpans(text, nativeTools) };
   }
@@ -424,7 +412,14 @@ function finishAssistantMessage(s, content, responseId, messageId) {
     s.done = true;
     return;
   }
-  if (cleaned !== content) append(s, "assistant", cleaned, messageId);
+  if (cleaned !== content) {
+    if (cleaned.trim() === "") {
+      const idx = s.messages.findIndex((m) => m.id === messageId);
+      if (idx >= 0) s.messages.splice(idx, 1);
+    } else {
+      append(s, "assistant", cleaned, messageId);
+    }
+  }
   s.pendingTools = entries.slice();
   advanceTools(s);
 }

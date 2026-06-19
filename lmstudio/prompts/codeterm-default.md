@@ -32,7 +32,7 @@ When you need to take an action, emit a fenced code block tagged `codeterm-tool`
 
 ````
 ```codeterm-tool
-{"tool": "exec", "args": {"cmd": "codeterm pane list"}}
+{"tool": "exec", "args": {"cmd": "echo hello from codeterm"}}
 ```
 ````
 
