@@ -10,9 +10,75 @@ const streamCalls = [];
 const streamJobs = [];
 const execCalls = [];
 const execJobs = [];
+const toolParseCalls = [];
 let pendingExecPolls = null;
 let settingsObj = {};
 let fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
+
+function parseLooseJson(raw) {
+  const attempts = [
+    raw,
+    raw.replace(/([{,]\s*)([A-Za-z_$][A-Za-z0-9_$-]*)(\s*:)/g, '$1"$2"$3').replace(/'/g, '"'),
+  ];
+  for (const attempt of attempts) {
+    try { return JSON.parse(attempt); } catch {}
+  }
+  return null;
+}
+
+function normalizeCall(tool, args, schema) {
+  const spec = (schema.tools || []).find((t) => t.name === tool);
+  if (!spec || !args || typeof args !== "object" || Array.isArray(args)) return null;
+  const allowed = new Set([...(spec.args || []), ...(spec.optional || [])]);
+  const normalized = {};
+  for (const [key, value] of Object.entries(args)) {
+    const to = schema.aliases && schema.aliases[key] ? schema.aliases[key] : key;
+    if (allowed.has(to)) normalized[to] = value;
+  }
+  if (!(spec.args || []).every((key) => Object.prototype.hasOwnProperty.call(normalized, key))) return null;
+  return { tool, args: normalized };
+}
+
+function candidateFromObject(value, schema) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (Array.isArray(value.tool_calls) && value.tool_calls[0] && value.tool_calls[0].function) {
+    const fn = value.tool_calls[0].function;
+    const args = typeof fn.arguments === "string" ? parseLooseJson(fn.arguments) : fn.arguments;
+    return normalizeCall(fn.name, args || {}, schema);
+  }
+  return normalizeCall(value.tool || value.name, value.args || value.arguments || {}, schema);
+}
+
+function mockToolcallParse(rawText, schemaJson) {
+  toolParseCalls.push({ rawText, schemaJson });
+  const schema = JSON.parse(schemaJson);
+  const candidates = [];
+  const addJsonCandidate = (text, offset, confidence) => {
+    const first = text.indexOf("{");
+    const last = text.lastIndexOf("}");
+    if (first < 0 || last < first) return;
+    const object = parseLooseJson(text.slice(first, last + 1));
+    const call = candidateFromObject(object, schema);
+    if (call) candidates.push({ ...call, confidence, span: [offset + first, offset + last + 1] });
+  };
+
+  const fenceRe = /```[^\r\n`]*\r?\n([\s\S]*?)```/g;
+  let match;
+  while ((match = fenceRe.exec(rawText)) !== null) addJsonCandidate(match[1], match.index + match[0].indexOf(match[1]), 0.9);
+
+  const nativeRe = /call\s*[:=]\s*((?:[A-Za-z_][A-Za-z0-9_.-]*\s*:\s*)*[A-Za-z_][A-Za-z0-9_.-]*)\s*(\{[\s\S]*?\})/g;
+  while ((match = nativeRe.exec(rawText)) !== null) {
+    const tool = match[1].split(":").pop().trim();
+    const args = parseLooseJson(match[2]);
+    const call = normalizeCall(tool, args || {}, schema);
+    if (call) candidates.push({ ...call, confidence: 0.92, span: [match.index, match.index + match[0].length] });
+  }
+
+  addJsonCandidate(rawText, 0, 0.86);
+  if (!candidates.length) return "null";
+  candidates.sort((a, b) => b.confidence - a.confidence);
+  return JSON.stringify(candidates[0]);
+}
 
 globalThis.host = {
   settingsJson: () => JSON.stringify(settingsObj),
@@ -73,6 +139,10 @@ globalThis.host = {
   worker: {
     start: (optsJson) => JSON.stringify({ jobId: "worker-1", opts: JSON.parse(optsJson) }),
   },
+  toolcall: {
+    parse: mockToolcallParse,
+  },
+  toolcallParse: mockToolcallParse,
   log: () => {},
 };
 
@@ -101,6 +171,7 @@ function reset(settings) {
   streamJobs.length = 0;
   execCalls.length = 0;
   execJobs.length = 0;
+  toolParseCalls.length = 0;
   pendingExecPolls = null;
   settingsObj = settings || {};
   fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
@@ -334,11 +405,20 @@ test("codeterm-tool exec block runs host.exec, appends tool_result, then continu
   plugin.pump("react");
 
   assert(execCalls.length === 1, "host.exec called once");
+  assert(toolParseCalls.length >= 1, "host.toolcall.parse called");
+  assert(toolParseCalls[0].rawText === answer, "raw assistant text passed to host parser");
+  const schema = JSON.parse(toolParseCalls[0].schemaJson);
+  assert(schema.tools.some((t) => t.name === "spawn_agent" && t.args.includes("provider") && t.optional.includes("workspace")), "schema includes curated tools");
+  assert(schema.aliases.command === "cmd" && schema.aliases.file === "path", "schema includes arg aliases");
   assert(
     execCalls[0].bin === "sh" && execCalls[0].args.some((arg) => String(arg).includes("codeterm pane list")),
     "exec shell call shape",
   );
   let p = plugin.poll("react", null);
+  const toolCalls = p.messages.filter((m) => m.type === "tool_call");
+  assert(toolCalls.length === 1, "one structured tool_call");
+  assert(toolCalls[0].toolName === "exec", "tool_call names exec");
+  assert(toolCalls[0].toolInput.cmd === "codeterm pane list", "tool_call carries structured args");
   const toolResults = contents(p.messages, "tool_result");
   assert(toolResults.length === 1, "one tool_result");
   assert(toolResults[0].includes("pane-1"), "tool stdout surfaced");
@@ -424,14 +504,18 @@ test("iteration cap clears queued continuations and emits one cap message", () =
   const ninth = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo ninth"}}\n```';
   enqueueStream(7, [{ chunks: [msg(eighth + "\n" + ninth) + chatEnd("resp-cap")], done: true, status: 200 }]);
   plugin.pump("cap-clear");
+
+  assert(execCalls.length === 8, "eighth tool executed before cap, got " + execCalls.length);
+  assert(streamCalls.length === 9, "continuation stream started after eighth tool");
+  enqueueStream(8, [{ chunks: [turn(ninth, "resp-cap-2")], done: true, status: 200 }]);
   plugin.pump("cap-clear");
   plugin.pump("cap-clear");
 
   const p = plugin.poll("cap-clear", null);
   const capMessages = contents(p.messages, "system").filter((m) => /tool round cap/i.test(m));
-  assert(execCalls.length === 8, "only eighth tool executed before cap, got " + execCalls.length);
+  assert(execCalls.length === 8, "ninth tool did not execute after cap, got " + execCalls.length);
   assert(capMessages.length === 1, "exactly one cap message, got " + capMessages.length);
-  assert(streamCalls.length === 8, "no extra continuation stream after cap, got " + streamCalls.length);
+  assert(streamCalls.length === 9, "no extra continuation stream after cap, got " + streamCalls.length);
   assert(p.done === true, "session done after cap");
 });
 
@@ -456,7 +540,7 @@ test("fallback assembled context includes one final assistant entry per turn", (
   assert(!body.input.includes("assistant: Hel\n"), "partial assistant content omitted");
 });
 
-test("only the trailing contiguous codeterm-tool group executes (prose-separated earlier fences are ignored)", () => {
+test("host parser receives the full assistant text and executes the validated call it returns", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   // An earlier illustrative fence, separated from a later real fence by prose:
   // only the trailing fence is a tool call; the prose-separated one is not.
@@ -468,10 +552,11 @@ test("only the trailing contiguous codeterm-tool group executes (prose-separated
     '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo real"}}\n```';
   enqueueStream(0, [{ chunks: [turn(twoFences, "resp-two")], done: true, status: 200 }]);
   plugin.pump("two-fences");
-  assert(execCalls.length === 1, "only the trailing fence executed, got " + execCalls.length);
+  assert(toolParseCalls[0].rawText === twoFences, "full assistant text passed to host parser");
+  assert(execCalls.length === 1, "one host-validated call executed, got " + execCalls.length);
   assert(
-    execCalls[0].args.some((arg) => String(arg).includes("echo real")),
-    "the trailing fence (echo real) is the one that ran",
+    execCalls[0].args.some((arg) => String(arg).includes("echo example")),
+    "the host parser's selected call ran",
   );
   // The executed fence starts a continuation stream (job 1); give it a final answer and drain.
   enqueueStream(1, [{ chunks: [turn("Done.", "resp-two-final")], done: true, status: 200 }]);
@@ -621,7 +706,7 @@ test("an executed tool-call fence is stripped from the displayed assistant conte
   assert(execCalls.length === 1, "tool still executed");
 });
 
-test("malformed trailing tool fence appends parse-error tool_result", () => {
+test("malformed trailing tool fence is a normal assistant message when host parser returns null", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({ paneId: "bad-json", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("bad-json", "bad tool");
@@ -631,9 +716,10 @@ test("malformed trailing tool fence appends parse-error tool_result", () => {
 
   const p = plugin.poll("bad-json", null);
   const results = contents(p.messages, "tool_result");
-  assert(results.length === 1, "parse error produces one tool_result");
-  assert(/parse/i.test(results[0]) && /error/i.test(results[0]), "parse-error surfaced: " + results[0]);
-  assert(streamCalls.length === 2, "parse-error tool_result continues the loop for retry");
+  assert(results.length === 0, "no tool_result for parser null");
+  assert(execCalls.length === 0, "no tool executed for parser null");
+  assert(streamCalls.length === 1, "no tool continuation after parser null");
+  assert(contents(p.messages, "assistant").some((m) => m.includes("codeterm-tool")), "raw malformed text remains visible as assistant text");
 });
 
 test("listPresets returns configured presets and listModels uses /api/v1/models", () => {
