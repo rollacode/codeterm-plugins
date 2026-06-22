@@ -270,6 +270,26 @@ function modelFileLabel() {
   if (bytes !== null) return "present (" + bytes + " bytes, expected ~" + modelSizeMb(modelId()) + "MB)";
   return "present (~" + modelSizeMb(modelId()) + "MB)";
 }
+var SPEECH_PEAK_THRESHOLD_DB = -45;
+function devNull() {
+  return osKind() === "windows" ? "NUL" : "/dev/null";
+}
+function parseMaxVolumeDb(stderr) {
+  const m = stderr.match(/max_volume:\s*(-?\d+[.,]\d+|-?\d+)\s*dB/i);
+  if (!m) return null;
+  return parseFloat(m[1].replace(",", "."));
+}
+function hasSpeech(ffmpegBin, wav) {
+  const r = exec({
+    bin: ffmpegBin,
+    args: ["-i", wav, "-af", "volumedetect", "-f", "null", devNull()],
+    timeoutMs: 1e4
+  });
+  if (r.error) return true;
+  const maxDb = parseMaxVolumeDb(r.stderr || "");
+  if (maxDb === null) return true;
+  return maxDb > SPEECH_PEAK_THRESHOLD_DB;
+}
 function joinSegments(raw) {
   try {
     const data = JSON.parse(raw);
@@ -301,6 +321,10 @@ function transcribe(path, lang) {
   if (!exitedOk(conv)) {
     host.removeFile(wav);
     return errorResult("ffmpeg could not decode the audio: " + (conv.stderr || conv.error || "exit " + conv.code));
+  }
+  if (!hasSpeech(ffmpeg.bin, wav)) {
+    host.removeFile(wav);
+    return { text: "" };
   }
   const l = lang && lang.length ? lang : language();
   progress({ label: "Transcribing\u2026" });

@@ -364,6 +364,38 @@ function modelFileLabel(): string {
 
 // ── transcription (one-shot) ─────────────────────────────────────────
 
+// Whisper hallucinates text ('you', 'й', etc.) when given near-silent audio
+// because it pads input to 30 s internally and generates tokens for the full
+// window. Gate on the peak level measured by ffmpeg volumedetect BEFORE calling
+// whisper-cli: any real speech has a peak well above -45 dBFS; hardware noise
+// and ambient silence sit at -91 dBFS or below. Using max_volume (not mean)
+// so a short utterance surrounded by silence is never falsely dropped.
+const SPEECH_PEAK_THRESHOLD_DB = -45;
+
+function devNull(): string {
+  return osKind() === "windows" ? "NUL" : "/dev/null";
+}
+
+function parseMaxVolumeDb(stderr: string): number | null {
+  // ffmpeg volumedetect writes: "[Parsed_volumedetect_0 @ 0x...] max_volume: -9.8 dB"
+  // Accept comma as decimal separator for locale robustness.
+  const m = stderr.match(/max_volume:\s*(-?\d+[.,]\d+|-?\d+)\s*dB/i);
+  if (!m) return null;
+  return parseFloat(m[1].replace(",", "."));
+}
+
+function hasSpeech(ffmpegBin: string, wav: string): boolean {
+  const r = exec({
+    bin: ffmpegBin,
+    args: ["-i", wav, "-af", "volumedetect", "-f", "null", devNull()],
+    timeoutMs: 10000,
+  });
+  if (r.error) return true; // spawn failure → let whisper decide
+  const maxDb = parseMaxVolumeDb(r.stderr || "");
+  if (maxDb === null) return true; // parse failed → let whisper decide
+  return maxDb > SPEECH_PEAK_THRESHOLD_DB;
+}
+
 function joinSegments(raw: string): string {
   try {
     const data = JSON.parse(raw) as { transcription?: { text?: unknown }[]; text?: unknown };
@@ -402,6 +434,13 @@ function transcribe(path: string, lang?: string): TranscribeResult {
   if (!exitedOk(conv)) {
     host.removeFile(wav);
     return errorResult("ffmpeg could not decode the audio: " + (conv.stderr || conv.error || "exit " + conv.code));
+  }
+
+  // Gate: near-silent audio produces hallucinated tokens from Whisper.
+  // Return empty rather than a stray 'you' or 'й'.
+  if (!hasSpeech(ffmpeg.bin, wav)) {
+    host.removeFile(wav);
+    return { text: "" };
   }
 
   const l = lang && lang.length ? lang : language();
