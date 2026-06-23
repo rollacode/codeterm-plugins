@@ -30,6 +30,7 @@ import type {
 interface TranscriberSettings {
   language?: string;
   model?: string;
+  endpoint?: string;
 }
 
 type Resolved = { bin: string } | { error: string };
@@ -70,6 +71,13 @@ function language(): string {
   if (s.language && s.language.length) return s.language;
   const env = host.envGet("CODETERM_TRANSCRIBE_LANG");
   return env && env.length ? env : "auto";
+}
+
+// Empty => local whisper.cpp. Set => offload to a mesh GPU daemon over curl.
+function endpoint(): string {
+  const s = settings();
+  const ep = s.endpoint && s.endpoint.length ? s.endpoint : host.envGet("CODETERM_TRANSCRIBE_ENDPOINT");
+  return ep && ep.length ? ep.trim() : "";
 }
 
 function baseDir(): string {
@@ -380,8 +388,45 @@ function joinSegments(raw: string): string {
   }
 }
 
+// faster-whisper daemon returns {"text": "...", "language": "..."} or {"error": "..."}.
+function parseRemote(raw: string): { text: string } | { error: string } {
+  let data: { text?: unknown; error?: unknown };
+  try {
+    data = JSON.parse(raw) as { text?: unknown; error?: unknown };
+  } catch (e) {
+    return { error: "unparseable daemon response: " + (raw ? raw.substring(0, 200) : "empty body") };
+  }
+  if (typeof data.error === "string" && data.error.length) return { error: data.error };
+  if (typeof data.text !== "string") return { error: "daemon response missing `text`: " + raw.substring(0, 200) };
+  const text = data.text.trim();
+  if (!text.length) return { error: "daemon returned an empty transcript (no speech detected or upload rejected)" };
+  return { text };
+}
+
+// Remote mode: multipart-upload the raw audio to the GPU daemon; no local deps/model.
+function transcribeRemote(ep: string, path: string, lang?: string): TranscribeResult {
+  const l = lang && lang.length ? lang : language();
+  const args = ["-sS", "-m", "600", "-F", "file=@" + path];
+  // The daemon rejects "auto"; omit the field so faster-whisper auto-detects.
+  if (l && l.length && l !== "auto") args.push("-F", "language=" + l);
+  args.push(ep);
+  progress({ label: "Transcribing on remote…" });
+  const r = exec({ bin: "curl", args, timeoutMs: 660000 });
+  if (!exitedOk(r)) {
+    return errorResult(
+      "remote transcription failed (" + ep + "): " + (r.stderr || r.error || "curl exit " + r.code),
+    );
+  }
+  const parsed = parseRemote(r.stdout || "");
+  if ("error" in parsed) return errorResult("remote transcription failed (" + ep + "): " + parsed.error);
+  progress({ label: "Done", done: true });
+  return { text: parsed.text };
+}
+
 // path: absolute audio file. lang: BCP-47 hint ("" / undefined → settings / auto).
 function transcribe(path: string, lang?: string): TranscribeResult {
+  const ep = endpoint();
+  if (ep.length) return transcribeRemote(ep, path, lang);
   const ffmpeg = ensureFfmpeg();
   if ("error" in ffmpeg) return errorResult(ffmpeg.error);
   const engine = ensureEngine();
@@ -431,6 +476,8 @@ function present(name: string): boolean {
 }
 
 function transcribeStatus(): StatusResult {
+  const ep = endpoint();
+  if (ep.length) return { state: "ready", reason: "remote: " + ep };
   if (!host.homeDir()) return { state: "unavailable", reason: "no home directory" };
   const hasFfmpeg = present("ffmpeg");
   const hasEngine = present("whisper-cli");
@@ -447,6 +494,18 @@ function transcribeStatus(): StatusResult {
 // ── glance (status + a manual pre-warm button) ───────────────────────
 
 function renderGlance(): GlanceView {
+  const ep = endpoint();
+  if (ep.length) {
+    const nodes: ViewNode[] = [
+      { kind: "badge", label: "Remote", tone: "ok" },
+      { kind: "keyVal", key: "Endpoint", value: ep },
+      { kind: "keyVal", key: "Language", value: language() },
+      { kind: "note", body: "GPU offload — local whisper.cpp/model are not used." },
+      { kind: "divider" },
+      { kind: "button", label: "Settings", action: "settings" },
+    ];
+    return { title: "Transcriber", nodes };
+  }
   const st = transcribeStatus();
   const ready = st.state === "ready";
   const hasModel = host.fileExists(modelPath()) && host.fileExists(modelDonePath());

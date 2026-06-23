@@ -44,6 +44,11 @@ function language() {
   const env = host.envGet("CODETERM_TRANSCRIBE_LANG");
   return env && env.length ? env : "auto";
 }
+function endpoint() {
+  const s = settings();
+  const ep = s.endpoint && s.endpoint.length ? s.endpoint : host.envGet("CODETERM_TRANSCRIBE_ENDPOINT");
+  return ep && ep.length ? ep.trim() : "";
+}
 function baseDir() {
   const home = host.homeDir() || ".";
   return home + "/.codeterm/transcriber";
@@ -282,7 +287,39 @@ function joinSegments(raw) {
     return "";
   }
 }
+function parseRemote(raw) {
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (e) {
+    return { error: "unparseable daemon response: " + (raw ? raw.substring(0, 200) : "empty body") };
+  }
+  if (typeof data.error === "string" && data.error.length) return { error: data.error };
+  if (typeof data.text !== "string") return { error: "daemon response missing `text`: " + raw.substring(0, 200) };
+  const text = data.text.trim();
+  if (!text.length) return { error: "daemon returned an empty transcript (no speech detected or upload rejected)" };
+  return { text };
+}
+function transcribeRemote(ep, path, lang) {
+  const l = lang && lang.length ? lang : language();
+  const args = ["-sS", "-m", "600", "-F", "file=@" + path];
+  if (l && l.length && l !== "auto") args.push("-F", "language=" + l);
+  args.push(ep);
+  progress({ label: "Transcribing on remote\u2026" });
+  const r = exec({ bin: "curl", args, timeoutMs: 66e4 });
+  if (!exitedOk(r)) {
+    return errorResult(
+      "remote transcription failed (" + ep + "): " + (r.stderr || r.error || "curl exit " + r.code)
+    );
+  }
+  const parsed = parseRemote(r.stdout || "");
+  if ("error" in parsed) return errorResult("remote transcription failed (" + ep + "): " + parsed.error);
+  progress({ label: "Done", done: true });
+  return { text: parsed.text };
+}
 function transcribe(path, lang) {
+  const ep = endpoint();
+  if (ep.length) return transcribeRemote(ep, path, lang);
   const ffmpeg = ensureFfmpeg();
   if ("error" in ffmpeg) return errorResult(ffmpeg.error);
   const engine = ensureEngine();
@@ -326,6 +363,8 @@ function present(name) {
   return host.fileExists(localBin(name));
 }
 function transcribeStatus() {
+  const ep = endpoint();
+  if (ep.length) return { state: "ready", reason: "remote: " + ep };
   if (!host.homeDir()) return { state: "unavailable", reason: "no home directory" };
   const hasFfmpeg = present("ffmpeg");
   const hasEngine = present("whisper-cli");
@@ -338,6 +377,18 @@ function transcribeStatus() {
   return { state: "unloaded", reason: "needs: " + missing.join(", ") + " (installed on first use)" };
 }
 function renderGlance() {
+  const ep = endpoint();
+  if (ep.length) {
+    const nodes2 = [
+      { kind: "badge", label: "Remote", tone: "ok" },
+      { kind: "keyVal", key: "Endpoint", value: ep },
+      { kind: "keyVal", key: "Language", value: language() },
+      { kind: "note", body: "GPU offload \u2014 local whisper.cpp/model are not used." },
+      { kind: "divider" },
+      { kind: "button", label: "Settings", action: "settings" }
+    ];
+    return { title: "Transcriber", nodes: nodes2 };
+  }
   const st = transcribeStatus();
   const ready = st.state === "ready";
   const hasModel = host.fileExists(modelPath()) && host.fileExists(modelDonePath());

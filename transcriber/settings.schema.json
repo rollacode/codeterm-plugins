@@ -17,6 +17,13 @@
         "label": "Language hint",
         "placeholder": "auto",
         "description": "BCP-47 code (e.g. en, ru). auto detects the language per clip."
+      },
+      {
+        "kind": "text",
+        "key": "endpoint",
+        "label": "Remote endpoint",
+        "placeholder": "",
+        "description": "Optional GPU offload URL (e.g. http://host:7891/transcribe). When set, audio is uploaded there instead of running whisper.cpp locally — no ffmpeg/model download. Leave empty for offline local mode."
       }
     ]
   }
