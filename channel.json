@@ -19,7 +19,7 @@
     {
       "id": "transcriber",
       "path": "transcriber",
-      "version": "0.2.1",
+      "version": "0.4.0",
       "minCodeterm": "1.0.0"
     },
     {

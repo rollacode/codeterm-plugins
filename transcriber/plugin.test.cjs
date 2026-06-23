@@ -360,6 +360,101 @@ test("glanceAction reinstall after settings model change prunes old and keeps on
     "glance rerendered ready status, got " + JSON.stringify(view.nodes));
 });
 
+// ── Remote mode (mesh GPU offload) ──────────────────────────────────────
+
+// Fake daemon: respond to a curl multipart upload with the given JSON body.
+function remoteHandler(body) {
+  return (opts) => {
+    if (opts.bin === "curl") return JSON.stringify({ code: 0, stdout: JSON.stringify(body), stderr: "" });
+    return JSON.stringify({ code: 0, stdout: "", stderr: "" });
+  };
+}
+
+test("remote: uploads via curl to endpoint and parses daemon text, no local deps", () => {
+  reset({ endpoint: "http://gpu:7891/transcribe", language: "ru" }, "macos");
+  execHandler = remoteHandler({ text: "  привет мир  ", language: "ru" });
+
+  const r = plugin.transcribe("/tmp/note.m4a");
+  assert(r.text === "привет мир", "trims remote transcript, got " + JSON.stringify(r));
+
+  const curl = execCalls.find((c) => c.bin === "curl");
+  assert(curl, "curl invoked, calls=" + JSON.stringify(execCalls.map((c) => c.bin)));
+  const a = curl.args;
+  assert(a.indexOf("http://gpu:7891/transcribe") >= 0, "endpoint passed to curl, got " + JSON.stringify(a));
+  const fi = a.indexOf("-F");
+  assert(a.indexOf("file=@/tmp/note.m4a") >= 0, "audio uploaded as file field, got " + JSON.stringify(a));
+  assert(a.indexOf("language=ru") >= 0, "language hint forwarded, got " + JSON.stringify(a));
+
+  // Remote mode must NOT touch ffmpeg/whisper-cli/brew/model.
+  const localBins = execCalls.filter((c) => /ffmpeg|whisper-cli|brew/.test(c.bin));
+  assert(localBins.length === 0, "no local engine calls in remote mode, got " + JSON.stringify(localBins.map((c) => c.bin)));
+});
+
+test("remote: language=auto omits the language field (daemon rejects 'auto')", () => {
+  reset({ endpoint: "http://gpu:7891/transcribe" }, "macos"); // no language → auto
+  execHandler = remoteHandler({ text: "hello", language: "en" });
+
+  plugin.transcribe("/tmp/note.m4a");
+  const curl = execCalls.find((c) => c.bin === "curl");
+  assert(curl.args.every((x) => x.indexOf("language=") !== 0), "must not send language field, got " + JSON.stringify(curl.args));
+});
+
+test("remote: explicit lang arg wins over settings", () => {
+  reset({ endpoint: "http://gpu:7891/transcribe", language: "ru" }, "macos");
+  execHandler = remoteHandler({ text: "x", language: "de" });
+
+  plugin.transcribe("/tmp/note.m4a", "de");
+  const curl = execCalls.find((c) => c.bin === "curl");
+  assert(curl.args.indexOf("language=de") >= 0, "explicit arg forwarded, got " + JSON.stringify(curl.args));
+});
+
+test("remote: daemon error body is surfaced", () => {
+  reset({ endpoint: "http://gpu:7891/transcribe" }, "macos");
+  execHandler = remoteHandler({ error: "bad audio" });
+
+  const r = plugin.transcribe("/tmp/note.m4a");
+  assert(r.error, "must surface error, got " + JSON.stringify(r));
+  assert(/bad audio/.test(r.error), "includes daemon message, got " + r.error);
+  assert(!r.text, "no text on failure");
+});
+
+test("remote: empty transcript is surfaced as an error (no silent empty result)", () => {
+  reset({ endpoint: "http://gpu:7891/transcribe" }, "macos");
+  execHandler = remoteHandler({ text: "", language: "nn" });
+
+  const r = plugin.transcribe("/tmp/note.m4a");
+  assert(r.error, "empty transcript surfaces error, got " + JSON.stringify(r));
+  assert(/empty transcript/.test(r.error), "explains empty transcript, got " + r.error);
+});
+
+test("remote: curl transport failure is surfaced, no local fallback", () => {
+  reset({ endpoint: "http://gpu:7891/transcribe" }, "macos");
+  execHandler = (opts) => {
+    if (opts.bin === "curl") return JSON.stringify({ error: "Connection refused" });
+    return JSON.stringify({ code: 0 });
+  };
+
+  const r = plugin.transcribe("/tmp/note.m4a");
+  assert(r.error, "transport failure surfaces error, got " + JSON.stringify(r));
+  assert(/remote transcription failed/.test(r.error), "clear remote error, got " + r.error);
+  const localBins = execCalls.filter((c) => /ffmpeg|whisper-cli|brew/.test(c.bin));
+  assert(localBins.length === 0, "no silent local fallback, got " + JSON.stringify(localBins.map((c) => c.bin)));
+});
+
+test("remote: status is ready and glance shows the endpoint", () => {
+  reset({ endpoint: "http://gpu:7891/transcribe" }, "macos");
+  execHandler = () => JSON.stringify({ code: 0 });
+
+  const s = plugin.transcribeStatus();
+  assert(s.state === "ready", "remote status ready, got " + JSON.stringify(s));
+
+  const view = plugin.renderGlance();
+  assert(JSON.stringify(badgeLabels(view)) === JSON.stringify(["Remote"]), "remote badge, got " + JSON.stringify(view.nodes));
+  assert(view.nodes.some((n) => n.kind === "keyVal" && n.key === "Endpoint" && n.value === "http://gpu:7891/transcribe"),
+    "endpoint shown, got " + JSON.stringify(view.nodes));
+  assert(JSON.stringify(buttonLabels(view)) === JSON.stringify(["Settings"]), "only settings button, got " + JSON.stringify(view.nodes));
+});
+
 // ── Run ────────────────────────────────────────────────────────────────
 let failed = 0;
 for (const [name, fn] of tests) {
