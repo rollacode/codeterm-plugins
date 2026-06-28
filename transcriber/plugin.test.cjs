@@ -2,10 +2,14 @@
 // FAKE host (exec + an in-memory filesystem). The unit under test is the plugin's
 // pure bootstrap/transcribe logic — no real ffmpeg/whisper-cli/brew/curl runs.
 // Run: npx tsx transcriber/plugin.test.cjs
+const { readFileSync } = require("fs");
+const { join } = require("path");
 
 const HOME = "/home/test";
 const MODEL = HOME + "/.codeterm/transcriber/ggml-small.bin";
 const BASE_MODEL = HOME + "/.codeterm/transcriber/ggml-base.bin";
+const MANIFEST = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+const SUBPROCESS_ALLOW = MANIFEST.permissions.subprocess.allow;
 
 // ── Configurable fake host ─────────────────────────────────────────────
 const execCalls = [];
@@ -35,7 +39,9 @@ globalThis.host = {
     for (const f of Object.keys(files)) {
       if (!f.startsWith(prefix)) continue;
       const rest = f.substring(prefix.length);
-      if (rest.length && rest.indexOf("/") === -1) names.add(rest);
+      if (!rest.length) continue;
+      const slash = rest.indexOf("/");
+      names.add(slash === -1 ? rest : rest.substring(0, slash));
     }
     return Array.from(names);
   },
@@ -116,6 +122,24 @@ function installHandler() {
       return JSON.stringify({ code: 0 });
     }
     return JSON.stringify({ code: 0, stdout: "", stderr: "" });
+  };
+}
+
+function basename(bin) {
+  return String(bin).split(/[\\/]/).pop();
+}
+
+function manifestAllowsExec(bin) {
+  const base = basename(bin);
+  return SUBPROCESS_ALLOW.some((entry) => entry === bin || entry === base);
+}
+
+function withSandbox(handler) {
+  return (opts) => {
+    if (!manifestAllowsExec(opts.bin)) {
+      return JSON.stringify({ error: "denied exec(" + opts.bin + ") — not in subprocess.allow" });
+    }
+    return handler(opts);
   };
 }
 
@@ -290,6 +314,138 @@ test("missing deps that cannot be installed: clear actionable error", () => {
   assert(r.error, "must surface an error, got " + JSON.stringify(r));
   assert(!r.text, "no text on failure");
   assert(/install/i.test(r.error), "error tells the user to install, got: " + r.error);
+});
+
+test("windows: downloads whisper.cpp from current ggml-org release asset", () => {
+  reset({}, "windows");
+  files[HOME + "/.codeterm/transcriber/bin/ffmpeg.exe"] = "ffmpeg";
+  files[MODEL] = "x"; files[MODEL + ".done"] = "x";
+  execHandler = withSandbox((opts) => {
+    if (opts.bin === "ffmpeg" && (opts.args || [])[0] === "-version") {
+      return JSON.stringify({ error: "not on PATH" });
+    }
+    if (opts.bin === "whisper-cli" && (opts.args || [])[0] === "--help") {
+      return JSON.stringify({ error: "not found" });
+    }
+    if (opts.bin === "curl" && (opts.args || []).indexOf("https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip") >= 0) {
+      const i = opts.args.indexOf("-o");
+      files[opts.args[i + 1]] = "zip";
+      return JSON.stringify({ code: 0 });
+    }
+    if (opts.bin === "tar") {
+      files[HOME + "/.codeterm/transcriber/bin/Release/whisper-cli.exe"] = "exe";
+      return JSON.stringify({ code: 0 });
+    }
+    if (/whisper-cli/.test(opts.bin)) {
+      const i = (opts.args || []).indexOf("-of");
+      if (i >= 0) files[opts.args[i + 1] + ".json"] = whisperJson(["win ok"]);
+      return JSON.stringify({ code: 0 });
+    }
+    return JSON.stringify({ code: 0, stdout: "", stderr: "" });
+  });
+
+  const r = plugin.transcribe("/tmp/note.oga");
+  assert(r.text === "win ok", "transcribes after windows bootstrap, got " + JSON.stringify(r));
+  const whisperCurl = execCalls.find((c) => c.bin === "curl" && (c.args || []).some((a) => /whisper-bin-x64\.zip$/.test(a)));
+  assert(whisperCurl, "whisper asset downloaded with curl");
+  assert(whisperCurl.args.indexOf("https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip") >= 0,
+    "uses current ggml-org asset, got " + JSON.stringify(whisperCurl.args));
+});
+
+test("windows: discovers ffmpeg inside nested gyan.dev zip layout", () => {
+  reset({}, "windows");
+  const nestedFfmpeg = HOME + "/.codeterm/transcriber/bin/ffmpeg-7.1.1-essentials_build/bin/ffmpeg.exe";
+  files[nestedFfmpeg] = "ffmpeg";
+  files[HOME + "/.codeterm/transcriber/bin/whisper-cli.exe"] = "whisper";
+  files[MODEL] = "x"; files[MODEL + ".done"] = "x";
+  execHandler = withSandbox((opts) => {
+    if (opts.bin === "ffmpeg" && (opts.args || [])[0] === "-version") {
+      return JSON.stringify({ error: "not on PATH" });
+    }
+    if (opts.bin === "whisper-cli" && (opts.args || [])[0] === "--help") {
+      return JSON.stringify({ error: "not on PATH" });
+    }
+    if (/whisper-cli/.test(opts.bin)) {
+      const i = (opts.args || []).indexOf("-of");
+      if (i >= 0) files[opts.args[i + 1] + ".json"] = whisperJson(["nested ffmpeg ok"]);
+    }
+    return JSON.stringify({ code: 0, stdout: "", stderr: "" });
+  });
+
+  const r = plugin.transcribe("/tmp/note.oga");
+  assert(r.text === "nested ffmpeg ok", "transcribes with nested ffmpeg, got " + JSON.stringify(r));
+  const conv = execCalls.find((c) => c.bin === nestedFfmpeg && (c.args || []).indexOf("-ar") >= 0);
+  assert(conv, "uses nested ffmpeg for conversion, calls=" + JSON.stringify(execCalls.map((c) => c.bin)));
+  assert(!execCalls.some((c) => c.bin === "curl"), "must not redownload ffmpeg when nested binary exists");
+});
+
+test("windows: falls back to PowerShell when curl cannot write the release asset", () => {
+  reset({}, "windows");
+  const archive = HOME + "/.codeterm/transcriber/whisper.zip";
+  files[HOME + "/.codeterm/transcriber/bin/ffmpeg.exe"] = "ffmpeg";
+  files[MODEL] = "x"; files[MODEL + ".done"] = "x";
+  execHandler = withSandbox((opts) => {
+    if (opts.bin === "ffmpeg" && (opts.args || [])[0] === "-version") {
+      return JSON.stringify({ error: "not on PATH" });
+    }
+    if (opts.bin === "whisper-cli" && (opts.args || [])[0] === "--help") {
+      return JSON.stringify({ error: "not found" });
+    }
+    if (opts.bin === "curl" && (opts.args || []).some((a) => /whisper-bin-x64\.zip$/.test(a))) {
+      return JSON.stringify({ code: 23, stderr: "curl: (23) client returned ERROR on write" });
+    }
+    if (opts.bin === "powershell.exe" && (opts.args || []).join(" ").indexOf("Invoke-WebRequest") >= 0) {
+      files[archive] = "zip";
+      return JSON.stringify({ code: 0 });
+    }
+    if (opts.bin === "tar") {
+      files[HOME + "/.codeterm/transcriber/bin/Release/whisper-cli.exe"] = "exe";
+      return JSON.stringify({ code: 0 });
+    }
+    if (/whisper-cli/.test(opts.bin)) {
+      const i = (opts.args || []).indexOf("-of");
+      if (i >= 0) files[opts.args[i + 1] + ".json"] = whisperJson(["fallback ok"]);
+      return JSON.stringify({ code: 0 });
+    }
+    return JSON.stringify({ code: 0, stdout: "", stderr: "" });
+  });
+
+  const r = plugin.transcribe("/tmp/note.oga");
+  assert(r.text === "fallback ok", "transcribes after powershell fallback, got " + JSON.stringify(r));
+  assert(execCalls.some((c) => c.bin === "powershell.exe" && (c.args || []).join(" ").indexOf("Invoke-WebRequest") >= 0),
+    "powershell fallback invoked only for download");
+  assert(!execCalls.some((c) => c.bin === "powershell.exe" && (c.args || []).join(" ").indexOf("whisper-cli.exe") >= 0),
+    "must not run downloaded whisper-cli through powershell");
+});
+
+test("windows: downloaded binaries execute directly by manifest basename, without sandbox denial", () => {
+  reset({}, "windows");
+  files[HOME + "/.codeterm/transcriber/bin/ffmpeg.exe"] = "ffmpeg";
+  const nestedWhisper = HOME + "/.codeterm/transcriber/bin/Release/whisper-cli.exe";
+  files[nestedWhisper] = "exe";
+  files[MODEL] = "x"; files[MODEL + ".done"] = "x";
+  execHandler = withSandbox((opts) => {
+    if (opts.bin === "ffmpeg" && (opts.args || [])[0] === "-version") {
+      return JSON.stringify({ error: "not on PATH" });
+    }
+    if (opts.bin === "whisper-cli" && (opts.args || [])[0] === "--help") {
+      return JSON.stringify({ error: "not on PATH" });
+    }
+    if (/whisper-cli/.test(opts.bin)) {
+      const i = (opts.args || []).indexOf("-of");
+      if (i >= 0) files[opts.args[i + 1] + ".json"] = whisperJson(["direct"]);
+    }
+    return JSON.stringify({ code: 0, stdout: "", stderr: "" });
+  });
+
+  const r = plugin.transcribe("/tmp/note.oga");
+  assert(r.text === "direct", "transcribes by direct downloaded binary exec, got " + JSON.stringify(r));
+  assert(execCalls.some((c) => c.bin === HOME + "/.codeterm/transcriber/bin/ffmpeg.exe"),
+    "direct local ffmpeg.exe exec should be allowed by manifest basename");
+  assert(execCalls.some((c) => c.bin === nestedWhisper),
+    "direct nested whisper-cli.exe exec should be allowed by manifest basename");
+  assert(!execCalls.some((c) => c.bin === "powershell.exe"),
+    "must not use powershell runtime wrapper for downloaded binaries");
 });
 
 test("transcribeStatus: ready when deps+model present, unloaded otherwise", () => {

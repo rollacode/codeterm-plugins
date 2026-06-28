@@ -20,7 +20,7 @@ Dependencies are detected first and only installed if missing — into
 | OS | whisper-cli | ffmpeg |
 |----|-------------|--------|
 | **macOS** | `brew install whisper-cpp` | `brew install ffmpeg` |
-| **Windows** | `curl` the `whisper-bin-x64.zip` GitHub release → `tar` extract | `curl` a static ffmpeg zip → `tar` extract |
+| **Windows** | download the `whisper-bin-x64.zip` GitHub release (`curl`, with PowerShell fallback) → `tar` extract | `curl` a static ffmpeg zip → `tar` extract |
 | **Linux** | `curl` the whisper.cpp release zip → `tar` extract | `curl` a static ffmpeg build → `tar` extract |
 
 The model (`ggml-<model>.bin`, default `small`, ~466 MB, multilingual) is fetched from
@@ -41,7 +41,7 @@ Set them with `codeterm plugin config transcriber --set model=base --set languag
 
 | Permission | Why |
 |------------|-----|
-| `subprocess: brew, curl, tar, whisper-cli, ffmpeg` | Install deps (brew / curl + tar), then convert (ffmpeg) and transcribe (whisper-cli). |
+| `subprocess: brew, curl, powershell.exe, tar, whisper-cli, whisper-cli.exe, ffmpeg, ffmpeg.exe` | Install deps (brew / curl + tar; PowerShell only as a Windows download fallback), then convert and transcribe. CodeTerm allows full downloaded paths by basename, so the Windows `.exe` entries cover `~/.codeterm/transcriber/bin/**/ffmpeg.exe` and `**/whisper-cli.exe`. |
 
 No network or secrets permissions are needed — downloads run through `curl`, and there
 are no credentials to store.

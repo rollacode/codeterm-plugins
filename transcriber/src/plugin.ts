@@ -11,7 +11,7 @@
 //   • macOS   — `brew install whisper-cpp` (gives `whisper-cli`) and `brew install ffmpeg`.
 //   • Windows — `curl` the whisper-bin-x64.zip GitHub release + a static ffmpeg zip,
 //               extract with `tar` into ~/.codeterm/transcriber/bin.
-//   • Linux   — `curl` the whisper-bin-ubuntu tarball + a static ffmpeg build, extract
+//   • Linux   — `curl` the whisper-bin-Linux.zip release + a static ffmpeg build, extract
 //               with `tar`; clear manual-install message if that path is unavailable.
 //
 // Everything is detect-first: a dependency that is already on PATH (or already in our
@@ -43,9 +43,9 @@ interface StatusResult {
 }
 
 // whisper.cpp release tag the prebuilt binaries are pulled from (Win/Linux only).
-const WHISPER_RELEASE = "v1.7.4";
+const WHISPER_RELEASE = "v1.9.1";
 const WHISPER_BASE =
-  "https://github.com/ggerganov/whisper.cpp/releases/download/" + WHISPER_RELEASE;
+  "https://github.com/ggml-org/whisper.cpp/releases/download/" + WHISPER_RELEASE;
 const FFMPEG_WIN_ZIP =
   "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
 const FFMPEG_LINUX_TAR =
@@ -149,6 +149,10 @@ function exec(opts: ExecOpts): ExecResult {
   }
 }
 
+function runBin(bin: string, args: string[], timeoutMs?: number): ExecResult {
+  return exec({ bin, args, timeoutMs });
+}
+
 function ranOk(r: ExecResult): boolean {
   // "ran at all" — a missing binary surfaces as a spawn `error`; --help/--version
   // may exit non-zero, but the absence of `error` means the binary exists.
@@ -176,13 +180,97 @@ function localBin(name: string): string {
   return binDir() + "/" + name + exeSuffix();
 }
 
+function findLocalBin(name: string): string | null {
+  const root = binDir();
+  const suffix = exeSuffix();
+  const direct = root + "/" + name + suffix;
+  if (host.fileExists(direct)) return direct;
+
+  const fixedCandidates = [
+    root + "/bin/" + name + suffix,
+    root + "/Release/" + name + suffix,
+  ];
+  for (const c of fixedCandidates) {
+    if (host.fileExists(c)) return c;
+  }
+
+  const h = host as typeof host & { readDir?: (path: string) => DirEntry[] };
+  let entries: (DirEntry | string)[] = [];
+  try {
+    entries = h.readDir ? h.readDir(root) : host.fs.readDir(root);
+  } catch (e) {
+    return null;
+  }
+
+  for (const entry of entries) {
+    const child = entryName(entry);
+    if (!child || child.indexOf("/") !== -1 || child.indexOf("\\") !== -1) continue;
+    const base = root + "/" + child;
+    const candidates = [
+      base + "/" + name + suffix,
+      base + "/bin/" + name + suffix,
+      base + "/Release/" + name + suffix,
+    ];
+    for (const c of candidates) {
+      if (host.fileExists(c)) return c;
+    }
+  }
+  return null;
+}
+
 function download(url: string, dest: string): Ensured {
   host.makeDirs(dirOf(dest));
-  const r = exec({ bin: "curl", args: ["-fsSL", "-o", dest, url], timeoutMs: 1800000 });
-  if (!exitedOk(r)) {
-    return { error: "download failed (" + url + "): " + (r.stderr || r.error || "curl exit " + r.code) };
+  host.removeFile(dest);
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const r = exec({ bin: "curl", args: ["-fL", "--retry", "2", "--retry-delay", "2", "-o", dest, url], timeoutMs: 1800000 });
+    if (exitedOk(r)) return { ok: true };
+    host.removeFile(dest);
+
+    if (attempt === 2 && osKind() === "windows") {
+      const ps = downloadWithPowerShell(url, dest);
+      if ("error" in ps) {
+        return {
+          error:
+            "download failed (" +
+            url +
+            "): curl: " +
+            (r.stderr || r.error || "exit " + r.code) +
+            "; powershell: " +
+            ps.error,
+        };
+      }
+      return ps;
+    }
+
+    if (attempt === 2) {
+      return { error: "download failed (" + url + "): " + (r.stderr || r.error || "curl exit " + r.code) };
+    }
   }
   return { ok: true };
+}
+
+function downloadWithPowerShell(url: string, dest: string): Ensured {
+  const script =
+    "$ProgressPreference='SilentlyContinue';" +
+    "Invoke-WebRequest -Uri " +
+    psQuote(url) +
+    " -OutFile " +
+    psQuote(dest) +
+    " -UseBasicParsing";
+  const r = exec({
+    bin: "powershell.exe",
+    args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+    timeoutMs: 1800000,
+  });
+  if (!exitedOk(r) || !host.fileExists(dest)) {
+    return { error: r.stderr || r.error || "powershell exit " + r.code };
+  }
+  return { ok: true };
+}
+
+function psQuote(value: string): string {
+  return "'" + value.replace(/'/g, "''") + "'";
 }
 
 function untar(archive: string, dest: string): Ensured {
@@ -202,8 +290,8 @@ function dirOf(p: string): string {
 
 function ensureFfmpeg(): Resolved {
   if (ranOk(exec({ bin: "ffmpeg", args: ["-version"] }))) return { bin: "ffmpeg" };
-  const local = localBin("ffmpeg");
-  if (host.fileExists(local)) return { bin: local };
+  const local = findLocalBin("ffmpeg");
+  if (local) return { bin: local };
 
   const os = osKind();
   if (os === "macos") {
@@ -220,7 +308,8 @@ function ensureFfmpeg(): Resolved {
     const ex = untar(zip, binDir());
     if ("error" in ex) return ffmpegManual(ex.error);
     host.removeFile(zip);
-    if (host.fileExists(local)) return { bin: local };
+    const installed = findLocalBin("ffmpeg");
+    if (installed) return { bin: installed };
     return ffmpegManual("ffmpeg binary not found after extraction");
   }
   // linux
@@ -231,7 +320,8 @@ function ensureFfmpeg(): Resolved {
   const ex = untar(tar, binDir());
   if ("error" in ex) return ffmpegManual(ex.error);
   host.removeFile(tar);
-  if (host.fileExists(local)) return { bin: local };
+  const installed = findLocalBin("ffmpeg");
+  if (installed) return { bin: installed };
   return ffmpegManual("ffmpeg binary not found after extraction");
 }
 
@@ -246,8 +336,8 @@ function ffmpegManual(why: string): Resolved {
 
 function ensureEngine(): Resolved {
   if (ranOk(exec({ bin: "whisper-cli", args: ["--help"] }))) return { bin: "whisper-cli" };
-  const local = localBin("whisper-cli");
-  if (host.fileExists(local)) return { bin: local };
+  const local = findLocalBin("whisper-cli");
+  if (local) return { bin: local };
 
   const os = osKind();
   if (os === "macos") {
@@ -265,10 +355,8 @@ function ensureEngine(): Resolved {
   const ex = untar(archive, binDir());
   if ("error" in ex) return engineManual(os, ex.error);
   host.removeFile(archive);
-  if (host.fileExists(local)) return { bin: local };
-  // Some archives nest the binary under Release/; fall back to a discovered path.
-  const nested = binDir() + "/Release/whisper-cli" + exeSuffix();
-  if (host.fileExists(nested)) return { bin: nested };
+  const installed = findLocalBin("whisper-cli");
+  if (installed) return { bin: installed };
   return engineManual(os, "whisper-cli not found after extraction");
 }
 
@@ -279,7 +367,7 @@ function engineManual(os: string, why: string): Resolved {
       os +
       " (" +
       why +
-      "). Build/download whisper.cpp from https://github.com/ggerganov/whisper.cpp/releases and place `whisper-cli" +
+      "). Build/download whisper.cpp from https://github.com/ggml-org/whisper.cpp/releases and place `whisper-cli" +
       exeSuffix() +
       "` in " +
       binDir() +
@@ -393,11 +481,7 @@ function parseMaxVolumeDb(stderr: string): number | null {
 }
 
 function hasSpeech(ffmpegBin: string, wav: string): boolean {
-  const r = exec({
-    bin: ffmpegBin,
-    args: ["-i", wav, "-af", "volumedetect", "-f", "null", devNull()],
-    timeoutMs: 10000,
-  });
+  const r = runBin(ffmpegBin, ["-i", wav, "-af", "volumedetect", "-f", "null", devNull()], 10000);
   if (r.error) return true; // spawn failure → let whisper decide
   const maxDb = parseMaxVolumeDb(r.stderr || "");
   if (maxDb === null) return true; // parse failed → let whisper decide
@@ -473,11 +557,7 @@ function transcribe(path: string, lang?: string): TranscribeResult {
   const wav = base + ".wav";
   const json = base + ".json";
 
-  const conv = exec({
-    bin: ffmpeg.bin,
-    args: ["-y", "-i", path, "-ar", "16000", "-ac", "1", "-f", "wav", wav],
-    timeoutMs: 120000,
-  });
+  const conv = runBin(ffmpeg.bin, ["-y", "-i", path, "-ar", "16000", "-ac", "1", "-f", "wav", wav], 120000);
   if (!exitedOk(conv)) {
     host.removeFile(wav);
     return errorResult("ffmpeg could not decode the audio: " + (conv.stderr || conv.error || "exit " + conv.code));
@@ -492,11 +572,7 @@ function transcribe(path: string, lang?: string): TranscribeResult {
 
   const l = lang && lang.length ? lang : language();
   progress({ label: "Transcribing…" });
-  const tr = exec({
-    bin: engine.bin,
-    args: ["-m", modelPath(), "-f", wav, "-l", l, "-nt", "-oj", "-of", base],
-    timeoutMs: 600000,
-  });
+  const tr = runBin(engine.bin, ["-m", modelPath(), "-f", wav, "-l", l, "-nt", "-oj", "-of", base], 600000);
   if (!exitedOk(tr)) {
     host.removeFile(wav);
     host.removeFile(json);
@@ -513,7 +589,7 @@ function transcribe(path: string, lang?: string): TranscribeResult {
 
 function present(name: string): boolean {
   if (ranOk(exec({ bin: name, args: name === "ffmpeg" ? ["-version"] : ["--help"] }))) return true;
-  return host.fileExists(localBin(name));
+  return findLocalBin(name) !== null;
 }
 
 function transcribeStatus(): StatusResult {

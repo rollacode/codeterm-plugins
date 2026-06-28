@@ -23,8 +23,8 @@ __export(plugin_exports, {
   default: () => plugin_default
 });
 module.exports = __toCommonJS(plugin_exports);
-var WHISPER_RELEASE = "v1.7.4";
-var WHISPER_BASE = "https://github.com/ggerganov/whisper.cpp/releases/download/" + WHISPER_RELEASE;
+var WHISPER_RELEASE = "v1.9.1";
+var WHISPER_BASE = "https://github.com/ggml-org/whisper.cpp/releases/download/" + WHISPER_RELEASE;
 var FFMPEG_WIN_ZIP = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
 var FFMPEG_LINUX_TAR = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz";
 function settings() {
@@ -106,6 +106,9 @@ function exec(opts) {
     return { error: String(e) };
   }
 }
+function runBin(bin, args, timeoutMs) {
+  return exec({ bin, args, timeoutMs });
+}
 function ranOk(r) {
   return !r.error;
 }
@@ -120,16 +123,76 @@ function errorResult(message) {
   progress({ label: "Error", error: message });
   return { error: message };
 }
-function localBin(name) {
-  return binDir() + "/" + name + exeSuffix();
+function findLocalBin(name) {
+  const root = binDir();
+  const suffix = exeSuffix();
+  const direct = root + "/" + name + suffix;
+  if (host.fileExists(direct)) return direct;
+  const fixedCandidates = [
+    root + "/bin/" + name + suffix,
+    root + "/Release/" + name + suffix
+  ];
+  for (const c of fixedCandidates) {
+    if (host.fileExists(c)) return c;
+  }
+  const h = host;
+  let entries = [];
+  try {
+    entries = h.readDir ? h.readDir(root) : host.fs.readDir(root);
+  } catch (e) {
+    return null;
+  }
+  for (const entry of entries) {
+    const child = entryName(entry);
+    if (!child || child.indexOf("/") !== -1 || child.indexOf("\\") !== -1) continue;
+    const base = root + "/" + child;
+    const candidates = [
+      base + "/" + name + suffix,
+      base + "/bin/" + name + suffix,
+      base + "/Release/" + name + suffix
+    ];
+    for (const c of candidates) {
+      if (host.fileExists(c)) return c;
+    }
+  }
+  return null;
 }
 function download(url, dest) {
   host.makeDirs(dirOf(dest));
-  const r = exec({ bin: "curl", args: ["-fsSL", "-o", dest, url], timeoutMs: 18e5 });
-  if (!exitedOk(r)) {
-    return { error: "download failed (" + url + "): " + (r.stderr || r.error || "curl exit " + r.code) };
+  host.removeFile(dest);
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const r = exec({ bin: "curl", args: ["-fL", "--retry", "2", "--retry-delay", "2", "-o", dest, url], timeoutMs: 18e5 });
+    if (exitedOk(r)) return { ok: true };
+    host.removeFile(dest);
+    if (attempt === 2 && osKind() === "windows") {
+      const ps = downloadWithPowerShell(url, dest);
+      if ("error" in ps) {
+        return {
+          error: "download failed (" + url + "): curl: " + (r.stderr || r.error || "exit " + r.code) + "; powershell: " + ps.error
+        };
+      }
+      return ps;
+    }
+    if (attempt === 2) {
+      return { error: "download failed (" + url + "): " + (r.stderr || r.error || "curl exit " + r.code) };
+    }
   }
   return { ok: true };
+}
+function downloadWithPowerShell(url, dest) {
+  const script = "$ProgressPreference='SilentlyContinue';Invoke-WebRequest -Uri " + psQuote(url) + " -OutFile " + psQuote(dest) + " -UseBasicParsing";
+  const r = exec({
+    bin: "powershell.exe",
+    args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+    timeoutMs: 18e5
+  });
+  if (!exitedOk(r) || !host.fileExists(dest)) {
+    return { error: r.stderr || r.error || "powershell exit " + r.code };
+  }
+  return { ok: true };
+}
+function psQuote(value) {
+  return "'" + value.replace(/'/g, "''") + "'";
 }
 function untar(archive, dest) {
   host.makeDirs(dest);
@@ -145,8 +208,8 @@ function dirOf(p) {
 }
 function ensureFfmpeg() {
   if (ranOk(exec({ bin: "ffmpeg", args: ["-version"] }))) return { bin: "ffmpeg" };
-  const local = localBin("ffmpeg");
-  if (host.fileExists(local)) return { bin: local };
+  const local = findLocalBin("ffmpeg");
+  if (local) return { bin: local };
   const os = osKind();
   if (os === "macos") {
     progress({ label: "Installing ffmpeg\u2026" });
@@ -162,7 +225,8 @@ function ensureFfmpeg() {
     const ex2 = untar(zip, binDir());
     if ("error" in ex2) return ffmpegManual(ex2.error);
     host.removeFile(zip);
-    if (host.fileExists(local)) return { bin: local };
+    const installed2 = findLocalBin("ffmpeg");
+    if (installed2) return { bin: installed2 };
     return ffmpegManual("ffmpeg binary not found after extraction");
   }
   progress({ label: "Installing ffmpeg\u2026" });
@@ -172,7 +236,8 @@ function ensureFfmpeg() {
   const ex = untar(tar, binDir());
   if ("error" in ex) return ffmpegManual(ex.error);
   host.removeFile(tar);
-  if (host.fileExists(local)) return { bin: local };
+  const installed = findLocalBin("ffmpeg");
+  if (installed) return { bin: installed };
   return ffmpegManual("ffmpeg binary not found after extraction");
 }
 function ffmpegManual(why) {
@@ -182,8 +247,8 @@ function ffmpegManual(why) {
 }
 function ensureEngine() {
   if (ranOk(exec({ bin: "whisper-cli", args: ["--help"] }))) return { bin: "whisper-cli" };
-  const local = localBin("whisper-cli");
-  if (host.fileExists(local)) return { bin: local };
+  const local = findLocalBin("whisper-cli");
+  if (local) return { bin: local };
   const os = osKind();
   if (os === "macos") {
     progress({ label: "Installing whisper.cpp\u2026" });
@@ -199,14 +264,13 @@ function ensureEngine() {
   const ex = untar(archive, binDir());
   if ("error" in ex) return engineManual(os, ex.error);
   host.removeFile(archive);
-  if (host.fileExists(local)) return { bin: local };
-  const nested = binDir() + "/Release/whisper-cli" + exeSuffix();
-  if (host.fileExists(nested)) return { bin: nested };
+  const installed = findLocalBin("whisper-cli");
+  if (installed) return { bin: installed };
   return engineManual(os, "whisper-cli not found after extraction");
 }
 function engineManual(os, why) {
   return {
-    error: "whisper-cli (whisper.cpp) is required but could not be installed automatically on " + os + " (" + why + "). Build/download whisper.cpp from https://github.com/ggerganov/whisper.cpp/releases and place `whisper-cli" + exeSuffix() + "` in " + binDir() + "."
+    error: "whisper-cli (whisper.cpp) is required but could not be installed automatically on " + os + " (" + why + "). Build/download whisper.cpp from https://github.com/ggml-org/whisper.cpp/releases and place `whisper-cli" + exeSuffix() + "` in " + binDir() + "."
   };
 }
 function ensureModel(force = false) {
@@ -285,11 +349,7 @@ function parseMaxVolumeDb(stderr) {
   return parseFloat(m[1].replace(",", "."));
 }
 function hasSpeech(ffmpegBin, wav) {
-  const r = exec({
-    bin: ffmpegBin,
-    args: ["-i", wav, "-af", "volumedetect", "-f", "null", devNull()],
-    timeoutMs: 1e4
-  });
+  const r = runBin(ffmpegBin, ["-i", wav, "-af", "volumedetect", "-f", "null", devNull()], 1e4);
   if (r.error) return true;
   const maxDb = parseMaxVolumeDb(r.stderr || "");
   if (maxDb === null) return true;
@@ -350,11 +410,7 @@ function transcribe(path, lang) {
   const base = tmpDir() + "/job-" + host.unixNowMs();
   const wav = base + ".wav";
   const json = base + ".json";
-  const conv = exec({
-    bin: ffmpeg.bin,
-    args: ["-y", "-i", path, "-ar", "16000", "-ac", "1", "-f", "wav", wav],
-    timeoutMs: 12e4
-  });
+  const conv = runBin(ffmpeg.bin, ["-y", "-i", path, "-ar", "16000", "-ac", "1", "-f", "wav", wav], 12e4);
   if (!exitedOk(conv)) {
     host.removeFile(wav);
     return errorResult("ffmpeg could not decode the audio: " + (conv.stderr || conv.error || "exit " + conv.code));
@@ -365,11 +421,7 @@ function transcribe(path, lang) {
   }
   const l = lang && lang.length ? lang : language();
   progress({ label: "Transcribing\u2026" });
-  const tr = exec({
-    bin: engine.bin,
-    args: ["-m", modelPath(), "-f", wav, "-l", l, "-nt", "-oj", "-of", base],
-    timeoutMs: 6e5
-  });
+  const tr = runBin(engine.bin, ["-m", modelPath(), "-f", wav, "-l", l, "-nt", "-oj", "-of", base], 6e5);
   if (!exitedOk(tr)) {
     host.removeFile(wav);
     host.removeFile(json);
@@ -384,7 +436,7 @@ function transcribe(path, lang) {
 }
 function present(name) {
   if (ranOk(exec({ bin: name, args: name === "ffmpeg" ? ["-version"] : ["--help"] }))) return true;
-  return host.fileExists(localBin(name));
+  return findLocalBin(name) !== null;
 }
 function transcribeStatus() {
   const ep = endpoint();
