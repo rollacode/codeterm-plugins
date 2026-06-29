@@ -10,14 +10,14 @@ Use a [Bitwarden](https://bitwarden.com) vault as CodeTerm's secret store, so `c
 
 ## Requirements
 
-- The Bitwarden CLI (`bw`) on your `PATH`. Install via `brew install bitwarden-cli`, `npm i -g @bitwarden/cli`, or the official download.
+- The Bitwarden CLI (`bw`) on your `PATH`. Install via `brew install bitwarden-cli`, `npm i -g @bitwarden/cli`, or the official download. On Linux, user-local installs in `~/.local/bin` are also detected for GUI-launched CodeTerm daemons with a minimal `PATH`.
 - A Bitwarden account (cloud `vault.bitwarden.com`, or a self-hosted server URL set in the view).
 
 ## Permissions
 
 | Permission | Why |
 |------------|-----|
-| `subprocess: bw` | All vault operations go through the official `bw` CLI. |
+| `subprocess: bw, env` | All vault operations go through the official `bw` CLI; `env` is used only to expand `PATH` for user-local Linux installs. |
 | `network: vault.bitwarden.com` | Lets `bw` reach Bitwarden's cloud API. For self-hosted servers, the CLI is pointed at your host. |
 | `secrets` | Lets the plugin serve as CodeTerm's secret backend. |
 

@@ -25,7 +25,7 @@
     {
       "id": "bitwarden",
       "path": "bitwarden",
-      "version": "0.1.0",
+      "version": "0.1.2",
       "minCodeterm": "1.0.0"
     },
     {

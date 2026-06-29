@@ -128,10 +128,53 @@ function parseBwOutput(ex) {
     return { success: false, message: combined };
   }
 }
+function hostStringCall(name) {
+  try {
+    const h = host;
+    const fn = h[name];
+    if (typeof fn !== "function") return null;
+    const value = fn();
+    return typeof value === "string" && value.length ? value : null;
+  } catch (e) {
+    return null;
+  }
+}
+function hostEnvGet(key) {
+  try {
+    const h = host;
+    if (typeof h.envGet !== "function") return null;
+    const value = h.envGet(key);
+    return typeof value === "string" && value.length ? value : null;
+  } catch (e) {
+    return null;
+  }
+}
+function expandedBwPath() {
+  const platform = (hostStringCall("platform") || "").toLowerCase();
+  if (platform.indexOf("win") >= 0) return null;
+  const parts = [];
+  const home = hostStringCall("homeDir");
+  if (home) parts.push(`${home.replace(/\/+$/, "")}/.local/bin`);
+  const currentPath = hostEnvGet("PATH");
+  if (currentPath) parts.push.apply(parts, currentPath.split(":"));
+  parts.push("/snap/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin");
+  const seen = {};
+  const out = [];
+  for (const part of parts) {
+    if (!part || seen[part]) continue;
+    seen[part] = true;
+    out.push(part);
+  }
+  return out.length ? out.join(":") : null;
+}
 function bwExecOpts(args, opts) {
   const full = args.concat(["--nointeraction", "--response"]);
   const env = opts.env || {};
   if (opts.session) env.BW_SESSION = opts.session;
+  const path = expandedBwPath();
+  if (path) {
+    return JSON.stringify({ bin: "env", args: [`PATH=${path}`, "bw"].concat(full), env, stdin: opts.stdin || null, timeoutMs: opts.timeoutMs || BW_TIMEOUT_MS });
+  }
   return JSON.stringify({ bin: "bw", args: full, env, stdin: opts.stdin || null, timeoutMs: opts.timeoutMs || BW_TIMEOUT_MS });
 }
 function bw(args, opts) {
@@ -165,15 +208,20 @@ function serverUrl() {
   const u = host.secretGet("server_url");
   return u && u.length ? u : DEFAULT_SERVER;
 }
+var lastBwStatusError = "";
 function bwStatus() {
   const session = host.secretGet(K_SESSION);
   const r = bw(["status"], { session: session || void 0 });
-  if (!r.success) return null;
+  if (!r.success) {
+    lastBwStatusError = r.message || "bw failed";
+    return null;
+  }
+  lastBwStatusError = "";
   return unwrapData(r.data);
 }
 function statusFromBw(s) {
   const endpoint = serverUrl();
-  if (!s) return { status: "unavailable", reason: "bw not available" };
+  if (!s) return { status: "unavailable", reason: lastBwStatusError ? `bw not available: ${lastBwStatusError}` : "bw not available" };
   if (s.status === "unlocked") {
     if (s.userEmail) host.secretSet(K_EMAIL, s.userEmail);
     return { status: "unlocked", user: s.userEmail || null, transient: false, endpoint: s.serverUrl || endpoint };
@@ -478,6 +526,7 @@ var plugin = {
   __test_unwrap: unwrapData,
   __test_buildCipher: buildLoginCipher,
   __test_hostOf: hostOf,
-  __test_serverHostAllowed: serverHostAllowed
+  __test_serverHostAllowed: serverHostAllowed,
+  __test_bwExecOpts: bwExecOpts
 };
 var plugin_default = plugin;

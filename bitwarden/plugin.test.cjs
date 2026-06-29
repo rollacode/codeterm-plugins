@@ -72,6 +72,19 @@ test("serverHostAllowed honours allow-list incl. subdomains, rejects others", ()
   assert(allowed("https://vault.bitwarden.com", []) === false, "empty allow-list rejects all");
 });
 
+test("bw exec expands PATH with user-local bin on Unix", () => {
+  globalThis.host = {
+    platform: () => "linux",
+    homeDir: () => "/home/test",
+    envGet: (key) => key === "PATH" ? "/usr/bin:/bin" : null,
+  };
+  const opts = JSON.parse(plugin.__test_bwExecOpts(["status"], {}));
+  assert(opts.bin === "env", "uses env wrapper");
+  assert(opts.args[0] === "PATH=/home/test/.local/bin:/usr/bin:/bin:/snap/bin:/opt/homebrew/bin:/usr/local/bin", "expanded PATH");
+  assert(opts.args[1] === "bw", "runs bw through env PATH");
+  assert(opts.args.includes("status"), "preserves bw args");
+});
+
 // ── manifest (Track S) ──
 
 test("plugin.json carries a non-empty configHelp", () => {
