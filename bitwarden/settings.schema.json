@@ -11,5 +11,18 @@
         "description": "Bitwarden server — cloud or self-hosted."
       }
     ]
+  },
+  {
+    "kind": "section",
+    "title": "Auto-unlock",
+    "fields": [
+      {
+        "kind": "toggle",
+        "key": "rememberMasterPassword",
+        "label": "Remember master password",
+        "default": false,
+        "description": "Opt-in. Stores the master password in the plugin's secret bucket so a locked vault re-unlocks automatically (JIT). Off by default — a long-lived copy on disk is the secret most worth protecting."
+      }
+    ]
   }
 ]
