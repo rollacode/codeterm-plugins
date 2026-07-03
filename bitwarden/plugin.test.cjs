@@ -94,6 +94,57 @@ test("plugin.json carries a non-empty configHelp", () => {
   assert(typeof manifest.configHelp === "string" && manifest.configHelp.trim().length > 0, "configHelp is a non-empty string");
 });
 
+// ── auto-unlock parity (RED until Phase 3) ──
+// When the vault session is absent/expired but a master password is persisted,
+// a session op must auto-unlock (bw unlock --passwordenv) and retry, returning
+// the value. Functional host mock: exec succeeds only with a valid session.
+
+test("auto-unlock: no session + persisted master password → op retries and returns the value", () => {
+  const MASTER = "correct-horse-battery-staple";
+  const SESSION = "SESSION-TOKEN-XYZ";
+  const ITEM = {
+    object: "item", id: "id-1", type: 1, name: "db-pw", notes: null,
+    login: { username: null, password: "s3cr3t-value", totp: null, uris: [] },
+  };
+  const secrets = { master_password: MASTER }; // note: no "session" → locked
+  let unlockCalls = 0;
+
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      const args = o.args || [];
+      const env = o.env || {};
+      let body;
+      if (args.indexOf("unlock") >= 0) {
+        unlockCalls += 1;
+        body = env.BW_PASSWORD === MASTER
+          ? { success: true, data: { object: "message", raw: SESSION } }
+          : { success: false, message: "Invalid master password." };
+      } else {
+        body = env.BW_SESSION === SESSION
+          ? { success: true, data: ITEM }
+          : { success: false, message: "Vault is locked." };
+      }
+      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+    },
+  };
+
+  try {
+    const r = plugin.secretGetItem("db-pw");
+    assert("ok" in r, "expected auto-unlock+retry to return the item, got " + JSON.stringify(r));
+    assert(r.ok.value === "s3cr3t-value", "expected the decrypted secret value");
+    assert(unlockCalls === 1, "expected exactly one auto-unlock attempt, got " + unlockCalls);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try {
