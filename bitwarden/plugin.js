@@ -188,11 +188,52 @@ function bw(args, opts) {
   }
   return parseBwOutput(ex);
 }
+function extractSessionToken(data) {
+  const d = data;
+  const token = typeof d === "string" ? d : d && d.raw || d && d.template && d.template.raw;
+  return (token || "").trim();
+}
+var autoUnlocking = false;
+function tryAutoUnlock() {
+  if (autoUnlocking) return false;
+  autoUnlocking = true;
+  try {
+    const master = host.secretGet(K_MASTER);
+    if (master && master.length) {
+      const unlocked = bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: master } });
+      if (!unlocked.success) return false;
+      const token = extractSessionToken(unlocked.data);
+      if (!token) return false;
+      host.secretSet(K_SESSION, token);
+      return true;
+    }
+    return false;
+  } finally {
+    autoUnlocking = false;
+  }
+}
 function runWithSession(args, stdin) {
-  const session = host.secretGet(K_SESSION);
-  if (!session) return { error: { kind: "locked" } };
-  const r = bw(args, { session, stdin });
-  if (!r.success) return { error: mapBwError(r.message) };
+  let session = host.secretGet(K_SESSION);
+  let triedUnlock = false;
+  if (!session) {
+    if (!tryAutoUnlock()) return { error: { kind: "locked" } };
+    triedUnlock = true;
+    session = host.secretGet(K_SESSION);
+    if (!session) return { error: { kind: "locked" } };
+  }
+  let r = bw(args, { session, stdin });
+  if (!r.success) {
+    const err = mapBwError(r.message);
+    if (err.kind === "locked" && !triedUnlock && tryAutoUnlock()) {
+      const fresh = host.secretGet(K_SESSION);
+      if (fresh) {
+        r = bw(args, { session: fresh, stdin });
+        if (!r.success) return { error: mapBwError(r.message) };
+        return { ok: unwrapData(r.data) };
+      }
+    }
+    return { error: err };
+  }
   return { ok: unwrapData(r.data) };
 }
 function settings() {
@@ -208,20 +249,37 @@ function serverUrl() {
   const u = host.secretGet("server_url");
   return u && u.length ? u : DEFAULT_SERVER;
 }
-var lastBwStatusError = "";
+function isBinaryMissing(msg) {
+  const m = (msg || "").toLowerCase();
+  return m.indexOf("no such file") >= 0 || m.indexOf("enoent") >= 0 || m.indexOf("cannot find") >= 0 || m.indexOf("executable file not found") >= 0 || m.indexOf("spawn") >= 0 && m.indexOf("bw") >= 0;
+}
+function bwExecToStatusResult(ex) {
+  if (ex.error) {
+    if (isBinaryMissing(ex.error)) {
+      return { failure: { kind: "binary_missing", message: "Bitwarden CLI (bw) not found: " + ex.error } };
+    }
+    return { failure: { kind: "exec_error", message: ex.error } };
+  }
+  const resp = parseBwOutput(ex);
+  if (!resp.success) return { failure: { kind: "bw_error", message: resp.message || "bw status failed" } };
+  return { status: unwrapData(resp.data) };
+}
 function bwStatus() {
   const session = host.secretGet(K_SESSION);
-  const r = bw(["status"], { session: session || void 0 });
-  if (!r.success) {
-    lastBwStatusError = r.message || "bw failed";
-    return null;
+  const raw = host.exec(bwExecOpts(["status"], { session: session || void 0 }));
+  let ex;
+  try {
+    ex = JSON.parse(raw);
+  } catch (e) {
+    return { failure: { kind: "exec_error", message: "exec parse: " + e } };
   }
-  lastBwStatusError = "";
-  return unwrapData(r.data);
+  return bwExecToStatusResult(ex);
 }
-function statusFromBw(s) {
+function statusFromBw(res) {
   const endpoint = serverUrl();
-  if (!s) return { status: "unavailable", reason: lastBwStatusError ? `bw not available: ${lastBwStatusError}` : "bw not available" };
+  if (res.failure) return { status: "unavailable", reason: res.failure.message };
+  const s = res.status;
+  if (!s) return { status: "unavailable", reason: "bw status returned no data" };
   if (s.status === "unlocked") {
     if (s.userEmail) host.secretSet(K_EMAIL, s.userEmail);
     return { status: "unlocked", user: s.userEmail || null, transient: false, endpoint: s.serverUrl || endpoint };
@@ -230,12 +288,17 @@ function statusFromBw(s) {
   return { status: "logged_out", endpoint };
 }
 function secretStatus() {
-  return statusFromBw(bwStatus());
+  let st = statusFromBw(bwStatus());
+  if (st.status === "locked" && host.secretGet(K_MASTER) && tryAutoUnlock()) {
+    st = statusFromBw(bwStatus());
+  }
+  return st;
 }
 function secretUnlock(creds) {
   creds = creds || {};
   const hasPw = creds.masterPassword && creds.masterPassword.length;
   if (!hasPw && !creds.apiKeyClientId) {
+    if (tryAutoUnlock()) return { ok: true };
     return { error: { kind: "bad_request", message: "master password (or API-key creds) required" } };
   }
   const server = serverUrl();
@@ -245,7 +308,7 @@ function secretUnlock(creds) {
   if (!serverHostAllowed(server, effectiveAllow())) {
     return { error: { kind: "bad_request", message: "server host not permitted by plugin network permissions: " + hostOf(server) } };
   }
-  let st = bwStatus();
+  let st = bwStatus().status;
   let loggedIn = !!st && st.status !== "unauthenticated";
   const currentServer = st && st.serverUrl || "";
   if (loggedIn && currentServer && currentServer !== server) {
@@ -257,7 +320,7 @@ function secretUnlock(creds) {
     const cfg = bw(["config", "server", server]);
     if (!cfg.success) return { error: { kind: "backend", message: "could not point bw at " + server } };
   }
-  st = bwStatus();
+  st = bwStatus().status;
   loggedIn = !!st && st.status !== "unauthenticated";
   if (!loggedIn) {
     let login;
@@ -280,11 +343,12 @@ function secretUnlock(creds) {
   }
   const unlocked = bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: creds.masterPassword } });
   if (!unlocked.success) return { error: mapBwError(unlocked.message) };
-  const d = unlocked.data;
-  let token = typeof d === "string" ? d : d && d.raw || d && d.template && d.template.raw;
-  token = (token || "").trim();
+  const token = extractSessionToken(unlocked.data);
   if (!token) return { error: { kind: "backend", message: "bw unlock returned empty session" } };
   host.secretSet(K_SESSION, token);
+  const remember = settings().rememberMasterPassword === true || creds.rememberMasterPassword === true;
+  if (remember && hasPw) host.secretSet(K_MASTER, creds.masterPassword);
+  else host.secretDelete(K_MASTER);
   if (!creds.apiKeyClientId && creds.email) host.secretSet(K_EMAIL, creds.email);
   return { ok: true };
 }
@@ -442,9 +506,7 @@ function statusPoll(jobId) {
     return { done: true, error: "exec poll: " + e };
   }
   if (!p.done) return { done: false };
-  const resp = parseBwOutput(p);
-  const s = resp.success ? unwrapData(resp.data) : null;
-  return { done: true, status: statusFromBw(s) };
+  return { done: true, status: statusFromBw(bwExecToStatusResult(p)) };
 }
 function renderGlance() {
   const s = secretStatus();
@@ -457,7 +519,7 @@ function renderGlance() {
     nodes.push({ kind: "badge", label: "Locked", tone: "warn" });
     nodes.push({ kind: "text", text: "Vault is locked \u2014 unlock it in settings.", style: { tone: "muted" } });
   } else if (s.status === "unavailable") {
-    nodes.push({ kind: "badge", label: "bw not found", tone: "danger" });
+    nodes.push({ kind: "badge", label: "Unavailable", tone: "danger" });
     nodes.push({ kind: "note", body: s.reason || "The Bitwarden CLI isn't available.", level: "error" });
   } else {
     nodes.push({ kind: "badge", label: "Not signed in", tone: "danger" });
@@ -490,7 +552,8 @@ function viewCall(method, args) {
       email: args.email,
       twoFactorToken: args.twoFactorToken,
       apiKeyClientId: args.apiKeyClientId,
-      apiKeyClientSecret: args.apiKeyClientSecret
+      apiKeyClientSecret: args.apiKeyClientSecret,
+      rememberMasterPassword: args.rememberMasterPassword
     });
   }
   if (method === "signout") return secretLogout();

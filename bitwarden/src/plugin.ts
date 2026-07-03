@@ -247,19 +247,76 @@ function bw(args: string[], opts?: BwOpts): BwResponse {
   return parseBwOutput(ex);
 }
 
-// Run a session-scoped bw command. We persist ONLY the short-lived BW_SESSION
-// token, never the master password, so there is no silent JIT re-unlock: when the
-// session is gone the vault is locked and the user re-unlocks via the view.
+// bw unlock/--raw returns the session token either as a bare string or wrapped
+// in {raw} / {template:{raw}}. Normalise to a trimmed string ("" when absent).
+function extractSessionToken(data: unknown): string {
+  const d = data as string | { raw?: string; template?: { raw?: string } } | undefined;
+  const token = typeof d === "string" ? d : (d && d.raw) || (d && d.template && d.template.raw);
+  return (token || "").trim();
+}
+
+// Re-entrancy guard: one auto-unlock in flight at a time, never recursive.
+let autoUnlocking = false;
+
+// Re-establish a BW_SESSION headlessly from persisted credentials. Primary path
+// is a remembered master password (opt-in, K_MASTER); secrets pass via env only,
+// never argv, and are never logged. Returns true iff a fresh session was stored.
+function tryAutoUnlock(): boolean {
+  if (autoUnlocking) return false;
+  autoUnlocking = true;
+  try {
+    const master = host.secretGet(K_MASTER);
+    if (master && master.length) {
+      const unlocked = bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: master } });
+      if (!unlocked.success) return false;
+      const token = extractSessionToken(unlocked.data);
+      if (!token) return false;
+      host.secretSet(K_SESSION, token);
+      return true;
+    }
+    // API-key creds can re-login headlessly, but `bw unlock` still needs a master
+    // password we don't have when only api-key creds are persisted — so a silent
+    // unlock is impossible here. Documented limitation: enable remember-master to
+    // get JIT auto-unlock. Re-login without a usable unlock yields no session.
+    return false;
+  } finally {
+    autoUnlocking = false;
+  }
+}
+
+// Run a session-scoped bw command. Persist ONLY the short-lived BW_SESSION token.
+// If the session is missing/expired (or an op returns {locked} mid-flight) and a
+// master password is remembered, perform ONE JIT auto-unlock then retry ONCE.
+// A local guard bounds it to a single auto-unlock+retry so a persistent lock
+// cannot loop.
 function runWithSession(args: string[], stdin?: string): Envelope {
-  const session = host.secretGet(K_SESSION);
-  if (!session) return { error: { kind: "locked" } };
-  const r = bw(args, { session: session, stdin: stdin });
-  if (!r.success) return { error: mapBwError(r.message) };
+  let session = host.secretGet(K_SESSION);
+  let triedUnlock = false;
+  if (!session) {
+    if (!tryAutoUnlock()) return { error: { kind: "locked" } };
+    triedUnlock = true;
+    session = host.secretGet(K_SESSION);
+    if (!session) return { error: { kind: "locked" } };
+  }
+  let r = bw(args, { session: session, stdin: stdin });
+  if (!r.success) {
+    const err = mapBwError(r.message);
+    if (err.kind === "locked" && !triedUnlock && tryAutoUnlock()) {
+      const fresh = host.secretGet(K_SESSION);
+      if (fresh) {
+        r = bw(args, { session: fresh, stdin: stdin });
+        if (!r.success) return { error: mapBwError(r.message) };
+        return { ok: unwrapData(r.data) };
+      }
+    }
+    return { error: err };
+  }
   return { ok: unwrapData(r.data) };
 }
 
 interface BitwardenSettings {
   serverUrl?: string;
+  rememberMasterPassword?: boolean;
 }
 
 function settings(): BitwardenSettings {
@@ -283,26 +340,50 @@ interface BwStatus {
   serverUrl?: string;
 }
 
-let lastBwStatusError = "";
+// Why `bw status` failed, so statusFromBw can report the real cause (R3):
+// binary_missing = bw not on PATH; exec_error = other spawn failure;
+// bw_error = bw ran but reported a problem (server unreachable / bad session).
+type StatusFailure = { kind: "binary_missing" | "exec_error" | "bw_error"; message: string };
+type StatusResult = { status?: BwStatus; failure?: StatusFailure };
 
-function bwStatus(): BwStatus | null {
-  const session = host.secretGet(K_SESSION);
-  const r = bw(["status"], { session: session || undefined });
-  if (!r.success) {
-    lastBwStatusError = r.message || "bw failed";
-    return null;
+function isBinaryMissing(msg: string): boolean {
+  const m = (msg || "").toLowerCase();
+  return m.indexOf("no such file") >= 0 || m.indexOf("enoent") >= 0 ||
+    m.indexOf("cannot find") >= 0 || m.indexOf("executable file not found") >= 0 ||
+    (m.indexOf("spawn") >= 0 && m.indexOf("bw") >= 0);
+}
+
+// Map a raw bw exec result into a StatusResult, preserving the failure cause.
+function bwExecToStatusResult(ex: BwExec): StatusResult {
+  if (ex.error) {
+    if (isBinaryMissing(ex.error)) {
+      return { failure: { kind: "binary_missing", message: "Bitwarden CLI (bw) not found: " + ex.error } };
+    }
+    return { failure: { kind: "exec_error", message: ex.error } };
   }
-  lastBwStatusError = "";
-  return unwrapData(r.data) as BwStatus;
+  const resp = parseBwOutput(ex);
+  if (!resp.success) return { failure: { kind: "bw_error", message: resp.message || "bw status failed" } };
+  return { status: unwrapData(resp.data) as BwStatus };
+}
+
+function bwStatus(): StatusResult {
+  const session = host.secretGet(K_SESSION);
+  const raw = host.exec(bwExecOpts(["status"], { session: session || undefined }));
+  let ex: BwExec;
+  try { ex = JSON.parse(raw); } catch (e) { return { failure: { kind: "exec_error", message: "exec parse: " + e } }; }
+  return bwExecToStatusResult(ex);
 }
 
 // --- SecretStore trait surface (called by JsSecretBackend) ---
 
-// Map a raw bw status into the host's StoreStatus shape. Shared by the sync
-// secretStatus and the async statusStart/statusPoll path.
-function statusFromBw(s: BwStatus | null): SecretStatus {
+// Map a raw bw status result into the host's StoreStatus shape. Shared by the
+// sync secretStatus and the async statusStart/statusPoll path. On failure the
+// real cause (R3) is surfaced in `reason` rather than a generic string.
+function statusFromBw(res: StatusResult): SecretStatus {
   const endpoint = serverUrl();
-  if (!s) return { status: "unavailable", reason: lastBwStatusError ? `bw not available: ${lastBwStatusError}` : "bw not available" };
+  if (res.failure) return { status: "unavailable", reason: res.failure.message };
+  const s = res.status;
+  if (!s) return { status: "unavailable", reason: "bw status returned no data" };
   if (s.status === "unlocked") {
     if (s.userEmail) host.secretSet(K_EMAIL, s.userEmail);
     return { status: "unlocked", user: s.userEmail || null, transient: false, endpoint: s.serverUrl || endpoint };
@@ -311,14 +392,24 @@ function statusFromBw(s: BwStatus | null): SecretStatus {
   return { status: "logged_out", endpoint: endpoint };
 }
 
+// Sync status probe. If the vault reports locked but a master password is
+// remembered, attempt one JIT auto-unlock so status reflects the truly-reachable
+// state. Loop-guarded (tryAutoUnlock is single-flight; unlocked is terminal).
 function secretStatus(): SecretStatus {
-  return statusFromBw(bwStatus());
+  let st = statusFromBw(bwStatus());
+  if (st.status === "locked" && host.secretGet(K_MASTER) && tryAutoUnlock()) {
+    st = statusFromBw(bwStatus());
+  }
+  return st;
 }
 
 function secretUnlock(creds: SecretCreds): Envelope<true> {
   creds = creds || {};
   const hasPw = creds.masterPassword && creds.masterPassword.length;
   if (!hasPw && !creds.apiKeyClientId) {
+    // No input: honour the `mem secret unlock` no-arg contract by re-unlocking
+    // from persisted creds. Only when nothing is persisted is it a bad request.
+    if (tryAutoUnlock()) return { ok: true };
     return { error: { kind: "bad_request", message: "master password (or API-key creds) required" } };
   }
   const server = serverUrl();
@@ -329,7 +420,7 @@ function secretUnlock(creds: SecretCreds): Envelope<true> {
     return { error: { kind: "bad_request", message: "server host not permitted by plugin network permissions: " + hostOf(server) } };
   }
 
-  let st = bwStatus();
+  let st = bwStatus().status;
   let loggedIn = !!st && st.status !== "unauthenticated";
   const currentServer = (st && st.serverUrl) || "";
   if (loggedIn && currentServer && currentServer !== server) {
@@ -342,7 +433,7 @@ function secretUnlock(creds: SecretCreds): Envelope<true> {
     if (!cfg.success) return { error: { kind: "backend", message: "could not point bw at " + server } };
   }
 
-  st = bwStatus();
+  st = bwStatus().status;
   loggedIn = !!st && st.status !== "unauthenticated";
   if (!loggedIn) {
     let login: BwResponse;
@@ -366,16 +457,19 @@ function secretUnlock(creds: SecretCreds): Envelope<true> {
 
   const unlocked = bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: creds.masterPassword as string } });
   if (!unlocked.success) return { error: mapBwError(unlocked.message) };
-  const d = unlocked.data as string | { raw?: string; template?: { raw?: string } } | undefined;
-  let token = typeof d === "string" ? d : (d && d.raw) || (d && d.template && d.template.raw);
-  token = (token || "").trim();
+  const token = extractSessionToken(unlocked.data);
   if (!token) return { error: { kind: "backend", message: "bw unlock returned empty session" } };
 
-  // Persist ONLY the short-lived session token. The master password is never
-  // stored: a long-lived copy on disk is the secret most worth protecting, and
-  // keeping it enabled silent background re-unlock. Email (non-secret) is kept
-  // for unlock-form prefill convenience.
+  // Persist the short-lived session token. The master password is persisted ONLY
+  // when remember-master-password is opted in (settings toggle or the unlock
+  // view's checkbox) — that copy on disk is what enables JIT background
+  // re-unlock. Off by default: no K_MASTER, session-only, as before. Email
+  // (non-secret) is kept for unlock-form prefill convenience.
   host.secretSet(K_SESSION, token);
+  const remember = settings().rememberMasterPassword === true ||
+    (creds as SecretCreds & { rememberMasterPassword?: boolean }).rememberMasterPassword === true;
+  if (remember && hasPw) host.secretSet(K_MASTER, creds.masterPassword as string);
+  else host.secretDelete(K_MASTER);
   if (!creds.apiKeyClientId && creds.email) host.secretSet(K_EMAIL, creds.email);
   return { ok: true };
 }
@@ -559,9 +653,7 @@ function statusPoll(jobId: string): { done: boolean; status?: SecretStatus; erro
   let p: BwExec & { done?: boolean };
   try { p = JSON.parse(host.execPoll(jobId)); } catch (e) { return { done: true, error: "exec poll: " + e }; }
   if (!p.done) return { done: false };
-  const resp = parseBwOutput(p);
-  const s = resp.success ? (unwrapData(resp.data) as BwStatus) : null;
-  return { done: true, status: statusFromBw(s) };
+  return { done: true, status: statusFromBw(bwExecToStatusResult(p)) };
 }
 
 // Glance: a quick peek at the vault connection — not the unlock form.
@@ -576,7 +668,7 @@ function renderGlance(): GlanceView {
     nodes.push({ kind: "badge", label: "Locked", tone: "warn" });
     nodes.push({ kind: "text", text: "Vault is locked — unlock it in settings.", style: { tone: "muted" } });
   } else if (s.status === "unavailable") {
-    nodes.push({ kind: "badge", label: "bw not found", tone: "danger" });
+    nodes.push({ kind: "badge", label: "Unavailable", tone: "danger" });
     nodes.push({ kind: "note", body: s.reason || "The Bitwarden CLI isn't available.", level: "error" });
   } else {
     nodes.push({ kind: "badge", label: "Not signed in", tone: "danger" });
@@ -595,6 +687,7 @@ interface ViewArgs {
   apiKeyClientId?: string;
   apiKeyClientSecret?: string;
   organization?: string;
+  rememberMasterPassword?: boolean;
   jobId?: string;
 }
 
@@ -626,7 +719,8 @@ function viewCall(method: string, args: ViewArgs): unknown {
       twoFactorToken: args.twoFactorToken,
       apiKeyClientId: args.apiKeyClientId,
       apiKeyClientSecret: args.apiKeyClientSecret,
-    });
+      rememberMasterPassword: args.rememberMasterPassword,
+    } as SecretCreds);
   }
   if (method === "signout") return secretLogout();
   if (method === "organizations") {

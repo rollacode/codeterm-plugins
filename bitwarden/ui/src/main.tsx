@@ -50,6 +50,7 @@ function App() {
   const [email, setEmail] = useState("");
   const [master, setMaster] = useState("");
   const [twoFactor, setTwoFactor] = useState("");
+  const [remember, setRemember] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -140,7 +141,7 @@ function App() {
         </div>
       ) : st === "unavailable" ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <Badge tone="danger" label="bw not found" />
+          <Badge tone="danger" label="Unavailable" />
           <span style={{ color: COLOR.muted, fontSize: 11.5 }}>{status.reason || "The Bitwarden CLI isn't available."}</span>
         </div>
       ) : (
@@ -156,9 +157,9 @@ function App() {
           <div style={{ display: "flex", gap: 8 }}>
             <input style={inputStyle} type="password" autoComplete="current-password" placeholder="Master password"
               value={master} onChange={(e) => setMaster(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && canSubmit && !busy) void run(() => ct().invoke("unlock", { masterPassword: master, email: email.trim() || undefined, twoFactorToken: twoFactor.trim() || undefined }), "unlock"); }} />
+              onKeyDown={(e) => { if (e.key === "Enter" && canSubmit && !busy) void run(() => ct().invoke("unlock", { masterPassword: master, email: email.trim() || undefined, twoFactorToken: twoFactor.trim() || undefined, rememberMasterPassword: remember }), "unlock"); }} />
             <button style={btnStyle} disabled={busy || !canSubmit}
-              onClick={() => void run(() => ct().invoke("unlock", { masterPassword: master, email: email.trim() || undefined, twoFactorToken: twoFactor.trim() || undefined }), "unlock")}>
+              onClick={() => void run(() => ct().invoke("unlock", { masterPassword: master, email: email.trim() || undefined, twoFactorToken: twoFactor.trim() || undefined, rememberMasterPassword: remember }), "unlock")}>
               {busy ? "Unlocking…" : needsLogin ? "Sign in" : "Unlock"}
             </button>
           </div>
@@ -166,6 +167,10 @@ function App() {
             <input style={inputStyle} inputMode="numeric" placeholder="2FA code (if enabled)"
               value={twoFactor} onChange={(e) => setTwoFactor(e.target.value)} />
           )}
+          <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11.5, color: COLOR.muted, cursor: "pointer" }}>
+            <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+            Remember master password (auto-unlock)
+          </label>
           {busy && <span style={{ color: COLOR.muted, fontSize: 11 }}>Talking to the Bitwarden CLI — this can take 20–30s for self-hosted.</span>}
         </div>
       )}

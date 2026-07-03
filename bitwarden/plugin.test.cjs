@@ -94,6 +94,218 @@ test("plugin.json carries a non-empty configHelp", () => {
   assert(typeof manifest.configHelp === "string" && manifest.configHelp.trim().length > 0, "configHelp is a non-empty string");
 });
 
+// ── auto-unlock parity (RED until Phase 3) ──
+// When the vault session is absent/expired but a master password is persisted,
+// a session op must auto-unlock (bw unlock --passwordenv) and retry, returning
+// the value. Functional host mock: exec succeeds only with a valid session.
+
+test("auto-unlock: no session + persisted master password → op retries and returns the value", () => {
+  const MASTER = "correct-horse-battery-staple";
+  const SESSION = "SESSION-TOKEN-XYZ";
+  const ITEM = {
+    object: "item", id: "id-1", type: 1, name: "db-pw", notes: null,
+    login: { username: null, password: "s3cr3t-value", totp: null, uris: [] },
+  };
+  const secrets = { master_password: MASTER }; // note: no "session" → locked
+  let unlockCalls = 0;
+
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      const args = o.args || [];
+      const env = o.env || {};
+      let body;
+      if (args.indexOf("unlock") >= 0) {
+        unlockCalls += 1;
+        body = env.BW_PASSWORD === MASTER
+          ? { success: true, data: { object: "message", raw: SESSION } }
+          : { success: false, message: "Invalid master password." };
+      } else {
+        body = env.BW_SESSION === SESSION
+          ? { success: true, data: ITEM }
+          : { success: false, message: "Vault is locked." };
+      }
+      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+    },
+  };
+
+  try {
+    const r = plugin.secretGetItem("db-pw");
+    assert("ok" in r, "expected auto-unlock+retry to return the item, got " + JSON.stringify(r));
+    assert(r.ok.value === "s3cr3t-value", "expected the decrypted secret value");
+    assert(unlockCalls === 1, "expected exactly one auto-unlock attempt, got " + unlockCalls);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+// ── remember-master toggle OFF stays session-only (opt-in parity) ──
+// A successful unlock with the toggle off must NOT persist K_MASTER: a later
+// no-session op stays locked (no silent JIT re-unlock).
+
+test("remember off: unlock persists session only, K_MASTER never written", () => {
+  const MASTER = "hunter2";
+  const SESSION = "SESS-OFF";
+  const secrets = {};
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}", // remember OFF
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      const args = o.args || [], env = o.env || {};
+      let body;
+      if (args.indexOf("status") >= 0) body = { success: true, data: { status: "locked", serverUrl: "https://vault.bitwarden.com" } };
+      else if (args.indexOf("unlock") >= 0) body = env.BW_PASSWORD === MASTER ? { success: true, data: { raw: SESSION } } : { success: false, message: "Invalid master password." };
+      else body = { success: true, data: {} };
+      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+    },
+  };
+  try {
+    const r = plugin.secretUnlock({ masterPassword: MASTER, email: "a@b.c" });
+    assert("ok" in r, "expected unlock ok, got " + JSON.stringify(r));
+    assert(secrets.session === SESSION, "session must be persisted");
+    assert(!("master_password" in secrets), "K_MASTER must NOT be persisted when toggle is off");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+// ── remember-master ON persists K_MASTER (via unlock-view flag) ──
+
+test("remember on: unlock persists K_MASTER", () => {
+  const MASTER = "hunter2";
+  const SESSION = "SESS-ON";
+  const secrets = {};
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      const args = o.args || [], env = o.env || {};
+      let body;
+      if (args.indexOf("status") >= 0) body = { success: true, data: { status: "locked", serverUrl: "https://vault.bitwarden.com" } };
+      else if (args.indexOf("unlock") >= 0) body = env.BW_PASSWORD === MASTER ? { success: true, data: { raw: SESSION } } : { success: false, message: "Invalid master password." };
+      else body = { success: true, data: {} };
+      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+    },
+  };
+  try {
+    const r = plugin.secretUnlock({ masterPassword: MASTER, email: "a@b.c", rememberMasterPassword: true });
+    assert("ok" in r, "expected unlock ok, got " + JSON.stringify(r));
+    assert(secrets.master_password === MASTER, "K_MASTER must be persisted when toggle is on");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+// ── empty-creds unlock triggers auto-unlock (mem secret unlock no-arg) ──
+
+test("empty-creds unlock: no input + persisted master → auto-unlock succeeds", () => {
+  const MASTER = "hunter2";
+  const SESSION = "SESS-EMPTY";
+  const secrets = { master_password: MASTER };
+  let unlockCalls = 0;
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      const args = o.args || [], env = o.env || {};
+      let body;
+      if (args.indexOf("unlock") >= 0) { unlockCalls += 1; body = env.BW_PASSWORD === MASTER ? { success: true, data: { raw: SESSION } } : { success: false, message: "Invalid master password." }; }
+      else body = { success: true, data: {} };
+      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+    },
+  };
+  try {
+    const r = plugin.secretUnlock({});
+    assert("ok" in r, "expected empty-creds unlock to auto-unlock, got " + JSON.stringify(r));
+    assert(secrets.session === SESSION, "session must be set by auto-unlock");
+    assert(unlockCalls === 1, "expected exactly one unlock, got " + unlockCalls);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("empty-creds unlock: no input + nothing persisted → bad_request", () => {
+  const secrets = {};
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: () => JSON.stringify({ stdout: JSON.stringify({ success: false, message: "no creds" }), code: 1 }),
+  };
+  try {
+    const r = plugin.secretUnlock({});
+    assert("error" in r && r.error.kind === "bad_request", "expected bad_request with nothing persisted, got " + JSON.stringify(r));
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+// ── status cause mapping (R3): the real failure survives to `reason` ──
+
+test("status cause: bw binary missing → unavailable with probed detail", () => {
+  const secrets = {};
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: () => JSON.stringify({ error: "spawn bw: No such file or directory" }),
+  };
+  try {
+    const s = plugin.secretStatus();
+    assert(s.status === "unavailable", "expected unavailable, got " + JSON.stringify(s));
+    assert(/No such file/i.test(s.reason || ""), "reason must surface the exec error, got " + s.reason);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("status cause: bw-level error passes the bw message through", () => {
+  const secrets = {};
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: () => JSON.stringify({ stdout: JSON.stringify({ success: false, message: "Server is unreachable" }), code: 1 }),
+  };
+  try {
+    const s = plugin.secretStatus();
+    assert(s.status === "unavailable", "expected unavailable, got " + JSON.stringify(s));
+    assert(/unreachable/i.test(s.reason || ""), "reason must pass the bw message through, got " + s.reason);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try {
