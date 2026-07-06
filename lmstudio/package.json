@@ -5,6 +5,7 @@
   "type": "module",
   "description": "CodeTerm LM Studio plugin: a chatBackend transport that talks to a local LM Studio OpenAI-compatible server.",
   "devDependencies": {
-    "@codeterm/plugin-sdk": "^1.4.7"
+    "@codeterm/chat-engine": "file:../../codeterm-canvas/packages/chat-engine",
+    "@codeterm/plugin-sdk": "file:../../codeterm-canvas/packages/plugin-sdk"
   }
 }

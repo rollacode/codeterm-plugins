@@ -5,12 +5,16 @@
 import type {
   ChatBackend,
   ChatBackendOpenSessionCtx,
+  ContextEngineConfig,
   ChatSessionInfo,
   FetchResult,
   Model,
   NormalizedChatMessage,
   PresetInfo,
+  SessionMode,
+  WatcherTickInput,
 } from "@codeterm/plugin-sdk";
+import { assembleChat, assembleMachine, type EngineMessage } from "@codeterm/chat-engine";
 
 interface Preset {
   id: string;
@@ -52,6 +56,12 @@ interface Session {
   messages: NormalizedChatMessage[];
   seq: number;
   systemPrompt: string;
+  mode: SessionMode;
+  engine: ContextEngineConfig | null;
+  charter: string;
+  machineState: unknown;
+  currentRun: "interactive" | "watcher";
+  watcherTicks: number;
   model: string;
   params: Record<string, unknown>;
   previousResponseId: string | null;
@@ -754,7 +764,25 @@ function assembledContext(s: Session): string {
   return prior.map((m) => m.line).join("\n\n");
 }
 
-function startLmStudioCall(s: Session, input: string): void {
+function messagesAsEngineHistory(s: Session): EngineMessage[] {
+  const history: EngineMessage[] = [];
+  if (s.systemPrompt) history.push({ role: "system", content: s.systemPrompt });
+  for (const m of s.messages) {
+    if (m.type === "user") {
+      if (m.content.indexOf(SYSTEM_PROMPT_MARKER) === 0) continue;
+      history.push({ role: "user", content: m.content });
+    } else if (m.type === "assistant") {
+      history.push({ role: "assistant", content: m.content });
+    }
+  }
+  return history;
+}
+
+function requestInputFromMessages(messages: EngineMessage[]): string {
+  return messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
+}
+
+function startLmStudioCall(s: Session, input: string, opts?: { messages?: EngineMessage[]; watcher?: boolean }): void {
   if (!s.model) {
     const resolved = resolveModelId();
     if (!resolved) {
@@ -768,14 +796,22 @@ function startLmStudioCall(s: Session, input: string): void {
 
   const needsFallbackContext =
     !s.previousResponseId && s.messages.some((m) => m.type === "assistant" || m.type === "tool_result");
+  let requestInput: unknown = input;
+  if (opts?.messages) {
+    requestInput = requestInputFromMessages(opts.messages);
+  } else if (s.engine && s.engine.kind === "chat" && s.engine.window?.maxMessages !== undefined) {
+    requestInput = requestInputFromMessages(assembleChat(messagesAsEngineHistory(s), s.engine.window));
+  } else if (needsFallbackContext) {
+    requestInput = assembledContext(s);
+  }
   const body: Record<string, unknown> = {
     model: s.model,
     system_prompt: s.systemPrompt,
-    input: needsFallbackContext ? assembledContext(s) : input,
+    input: requestInput,
     stream: true,
     ...s.params,
   };
-  if (s.previousResponseId) body.previous_response_id = s.previousResponseId;
+  if (!opts?.messages && s.previousResponseId) body.previous_response_id = s.previousResponseId;
 
   const started = startFetchStream({
     url: `${baseUrl()}/api/v1/chat`,
@@ -797,12 +833,21 @@ function startLmStudioCall(s: Session, input: string): void {
     buffer: "",
     responseId: null,
   };
+  s.currentRun = opts?.watcher ? "watcher" : "interactive";
   s.done = false;
 }
 
 function startNextIfIdle(s: Session): void {
   if (!s.stream && s.pendingInputs.length) {
-    startLmStudioCall(s, s.pendingInputs.shift() || "");
+    const next = s.pendingInputs.shift() || "";
+    const queued = parseJson<{ watcherMessages?: EngineMessage[]; machineMessages?: EngineMessage[] } | null>(next, null);
+    if (queued && Array.isArray(queued.watcherMessages)) {
+      startLmStudioCall(s, "", { messages: queued.watcherMessages, watcher: true });
+    } else if (queued && Array.isArray(queued.machineMessages)) {
+      startLmStudioCall(s, "", { messages: queued.machineMessages });
+    } else {
+      startLmStudioCall(s, next);
+    }
   }
 }
 
@@ -812,7 +857,13 @@ function finishAssistantMessage(
   responseId: string | null,
   messageId: string,
 ): void {
-  if (responseId) s.previousResponseId = responseId;
+  if (s.currentRun === "watcher") {
+    append(s, "watcher_verdict", content);
+    s.done = true;
+    return;
+  }
+
+  if (responseId && !(s.engine && s.engine.kind === "machine")) s.previousResponseId = responseId;
 
   const { entries, cleaned, status, reason } = parseToolEntries(content);
   // A tool-call-shaped block that failed parse+repair: don't drop it silently
@@ -838,6 +889,7 @@ function finishAssistantMessage(
     return;
   }
   if (!entries.length) {
+    if (s.engine && s.engine.kind === "machine") s.machineState = extractVerdictState(content, s.machineState);
     s.done = true;
     return;
   }
@@ -858,6 +910,21 @@ function finishAssistantMessage(
   // starts an async job and parks the queue until drainExec sees it finish.
   s.pendingTools = entries.slice();
   advanceTools(s);
+}
+
+function extractVerdictState(text: string, prior: unknown): unknown {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const raw = fenced ? fenced[1] : trimmed;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && Object.prototype.hasOwnProperty.call(parsed, "state")) {
+      return (parsed as { state?: unknown }).state;
+    }
+  } catch {
+    // Keep prior state when the model returns prose or malformed JSON.
+  }
+  return prior;
 }
 
 // Walk the pending tool queue. Sync tools run inline; exec/codeterm start an
@@ -1018,10 +1085,20 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
   const authoredPrompts = readAuthoredPrompts();
   const systemPrompt = (model && authoredPrompts[model]) || systemPromptForModel(generalSystemPrompt, model);
   const params = { ...(s.params || {}), ...((preset && preset.params) || {}) };
+  const mode: SessionMode = ctx.mode === "watcher" ? "watcher" : "interactive";
+  const engine = ctx.engine && typeof ctx.engine === "object" ? ctx.engine : null;
+  const charter = engine && engine.kind === "machine" ? engine.charter : "";
+  const effectiveSystemPrompt = mode === "watcher" ? "" : systemPrompt;
   return {
     messages: [],
     seq: 0,
-    systemPrompt,
+    systemPrompt: effectiveSystemPrompt,
+    mode,
+    engine,
+    charter,
+    machineState: {},
+    currentRun: "interactive",
+    watcherTicks: 0,
     model,
     params,
     previousResponseId: null,
@@ -1050,7 +1127,11 @@ const plugin: ChatBackend & {
   openSession(ctx) {
     const sid = ctx.paneId;
     const s = resolveSession(ctx);
-    if (s.systemPrompt) append(s, "user", markSystemPrompt(s.systemPrompt), "system-prompt");
+    if (s.mode === "watcher") {
+      if (s.charter) append(s, "user", markSystemPrompt(s.charter), "system-prompt");
+    } else if (s.systemPrompt) {
+      append(s, "user", markSystemPrompt(s.systemPrompt), "system-prompt");
+    }
     sessions.set(sid, s);
     rememberLastModel(s.model);
     return { sessionId: sid };
@@ -1059,12 +1140,33 @@ const plugin: ChatBackend & {
   sendMessage(sid, text) {
     const s = sessions.get(sid);
     if (!s) return;
+    if (s.mode === "watcher") {
+      host.log("warn", `sendMessage ignored for watcher session ${sid}`);
+      return;
+    }
     append(s, "user", text);
     s.toolRounds = 0;
     s.capReached = false;
     s.malformedRetries = 0;
     s.done = false;
-    s.pendingInputs.push(text);
+    if (s.engine && s.engine.kind === "machine") {
+      const messages = assembleMachine(s.charter, s.machineState, { query: text });
+      s.pendingInputs.push(JSON.stringify({ machineMessages: messages }));
+    } else {
+      s.pendingInputs.push(text);
+    }
+    startNextIfIdle(s);
+  },
+
+  watcherTick(sid, input) {
+    const s = sessions.get(sid);
+    if (!s || s.mode !== "watcher") return;
+    const tickInput = input as WatcherTickInput;
+    const messages = assembleMachine(s.charter, tickInput.state, tickInput);
+    s.watcherTicks += 1;
+    append(s, "context_request", JSON.stringify(messages));
+    s.done = false;
+    s.pendingInputs.push(JSON.stringify({ watcherMessages: messages }));
     startNextIfIdle(s);
   },
 

@@ -24,6 +24,43 @@ __export(plugin_exports, {
   describeModelSwitch: () => describeModelSwitch
 });
 module.exports = __toCommonJS(plugin_exports);
+
+// ../codeterm-canvas/packages/chat-engine/src/index.ts
+var VERDICT_CONTRACT = [
+  "Respond ONLY with a JSON object of this exact shape (no markdown fences, no surrounding prose):",
+  "{",
+  '  "status": "ok" | "attention" | "stalled",',
+  '  "summary": "<one-line assessment>",',
+  '  "state": <updated state object>,',
+  '  "actions": [{ "kind": "nudge" | "notify" | "report", "pane": "<optional pane id>", "message": "<text>" }]',
+  "}"
+].join("\n");
+function assembleChat(history, window) {
+  const maxMessages = window?.maxMessages;
+  if (maxMessages === void 0) {
+    return history;
+  }
+  const leadingSystem = history[0]?.role === "system" ? history[0] : void 0;
+  const nonSystem = history.filter((m) => m.role !== "system");
+  const tail = nonSystem.slice(-maxMessages);
+  return leadingSystem ? [leadingSystem, ...tail] : tail;
+}
+function assembleMachine(charter, state, input) {
+  return [
+    {
+      role: "system",
+      content: `${charter}
+
+${VERDICT_CONTRACT}`
+    },
+    {
+      role: "user",
+      content: JSON.stringify({ state, input })
+    }
+  ];
+}
+
+// lmstudio/src/plugin.ts
 var DEFAULT_BASE_URL = "http://localhost:1234";
 var LAST_MODEL_PATH = ".codeterm/plugins/lmstudio/last-model.json";
 var AUTHORED_PROMPTS_PATH = ".codeterm/plugins/lmstudio/authored-prompts.json";
@@ -508,7 +545,23 @@ function assembledContext(s) {
   }
   return prior.map((m) => m.line).join("\n\n");
 }
-function startLmStudioCall(s, input) {
+function messagesAsEngineHistory(s) {
+  const history = [];
+  if (s.systemPrompt) history.push({ role: "system", content: s.systemPrompt });
+  for (const m of s.messages) {
+    if (m.type === "user") {
+      if (m.content.indexOf(SYSTEM_PROMPT_MARKER) === 0) continue;
+      history.push({ role: "user", content: m.content });
+    } else if (m.type === "assistant") {
+      history.push({ role: "assistant", content: m.content });
+    }
+  }
+  return history;
+}
+function requestInputFromMessages(messages) {
+  return messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
+}
+function startLmStudioCall(s, input, opts) {
   if (!s.model) {
     const resolved = resolveModelId();
     if (!resolved) {
@@ -520,14 +573,22 @@ function startLmStudioCall(s, input) {
     rememberLastModel(resolved);
   }
   const needsFallbackContext = !s.previousResponseId && s.messages.some((m) => m.type === "assistant" || m.type === "tool_result");
+  let requestInput = input;
+  if (opts?.messages) {
+    requestInput = requestInputFromMessages(opts.messages);
+  } else if (s.engine && s.engine.kind === "chat" && s.engine.window?.maxMessages !== void 0) {
+    requestInput = requestInputFromMessages(assembleChat(messagesAsEngineHistory(s), s.engine.window));
+  } else if (needsFallbackContext) {
+    requestInput = assembledContext(s);
+  }
   const body = {
     model: s.model,
     system_prompt: s.systemPrompt,
-    input: needsFallbackContext ? assembledContext(s) : input,
+    input: requestInput,
     stream: true,
     ...s.params
   };
-  if (s.previousResponseId) body.previous_response_id = s.previousResponseId;
+  if (!opts?.messages && s.previousResponseId) body.previous_response_id = s.previousResponseId;
   const started = startFetchStream({
     url: `${baseUrl()}/api/v1/chat`,
     method: "POST",
@@ -548,15 +609,29 @@ function startLmStudioCall(s, input) {
     buffer: "",
     responseId: null
   };
+  s.currentRun = opts?.watcher ? "watcher" : "interactive";
   s.done = false;
 }
 function startNextIfIdle(s) {
   if (!s.stream && s.pendingInputs.length) {
-    startLmStudioCall(s, s.pendingInputs.shift() || "");
+    const next = s.pendingInputs.shift() || "";
+    const queued = parseJson(next, null);
+    if (queued && Array.isArray(queued.watcherMessages)) {
+      startLmStudioCall(s, "", { messages: queued.watcherMessages, watcher: true });
+    } else if (queued && Array.isArray(queued.machineMessages)) {
+      startLmStudioCall(s, "", { messages: queued.machineMessages });
+    } else {
+      startLmStudioCall(s, next);
+    }
   }
 }
 function finishAssistantMessage(s, content, responseId, messageId) {
-  if (responseId) s.previousResponseId = responseId;
+  if (s.currentRun === "watcher") {
+    append(s, "watcher_verdict", content);
+    s.done = true;
+    return;
+  }
+  if (responseId && !(s.engine && s.engine.kind === "machine")) s.previousResponseId = responseId;
   const { entries, cleaned, status, reason } = parseToolEntries(content);
   if (status === "malformed") {
     if (s.malformedRetries < MAX_MALFORMED_RETRIES) {
@@ -576,6 +651,7 @@ ERROR: your codeterm-tool JSON was invalid (${reason || "unparseable tool call"}
     return;
   }
   if (!entries.length) {
+    if (s.engine && s.engine.kind === "machine") s.machineState = extractVerdictState(content, s.machineState);
     s.done = true;
     return;
   }
@@ -589,6 +665,19 @@ ERROR: your codeterm-tool JSON was invalid (${reason || "unparseable tool call"}
   }
   s.pendingTools = entries.slice();
   advanceTools(s);
+}
+function extractVerdictState(text, prior) {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const raw = fenced ? fenced[1] : trimmed;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && Object.prototype.hasOwnProperty.call(parsed, "state")) {
+      return parsed.state;
+    }
+  } catch {
+  }
+  return prior;
 }
 function advanceTools(s) {
   if (s.pendingExec) return;
@@ -721,10 +810,20 @@ function resolveSession(ctx) {
   const authoredPrompts = readAuthoredPrompts();
   const systemPrompt = model && authoredPrompts[model] || systemPromptForModel(generalSystemPrompt, model);
   const params = { ...s.params || {}, ...preset && preset.params || {} };
+  const mode = ctx.mode === "watcher" ? "watcher" : "interactive";
+  const engine = ctx.engine && typeof ctx.engine === "object" ? ctx.engine : null;
+  const charter = engine && engine.kind === "machine" ? engine.charter : "";
+  const effectiveSystemPrompt = mode === "watcher" ? "" : systemPrompt;
   return {
     messages: [],
     seq: 0,
-    systemPrompt,
+    systemPrompt: effectiveSystemPrompt,
+    mode,
+    engine,
+    charter,
+    machineState: {},
+    currentRun: "interactive",
+    watcherTicks: 0,
     model,
     params,
     previousResponseId: null,
@@ -743,7 +842,11 @@ var plugin = {
   openSession(ctx) {
     const sid = ctx.paneId;
     const s = resolveSession(ctx);
-    if (s.systemPrompt) append(s, "user", markSystemPrompt(s.systemPrompt), "system-prompt");
+    if (s.mode === "watcher") {
+      if (s.charter) append(s, "user", markSystemPrompt(s.charter), "system-prompt");
+    } else if (s.systemPrompt) {
+      append(s, "user", markSystemPrompt(s.systemPrompt), "system-prompt");
+    }
     sessions.set(sid, s);
     rememberLastModel(s.model);
     return { sessionId: sid };
@@ -751,12 +854,32 @@ var plugin = {
   sendMessage(sid, text) {
     const s = sessions.get(sid);
     if (!s) return;
+    if (s.mode === "watcher") {
+      host.log("warn", `sendMessage ignored for watcher session ${sid}`);
+      return;
+    }
     append(s, "user", text);
     s.toolRounds = 0;
     s.capReached = false;
     s.malformedRetries = 0;
     s.done = false;
-    s.pendingInputs.push(text);
+    if (s.engine && s.engine.kind === "machine") {
+      const messages = assembleMachine(s.charter, s.machineState, { query: text });
+      s.pendingInputs.push(JSON.stringify({ machineMessages: messages }));
+    } else {
+      s.pendingInputs.push(text);
+    }
+    startNextIfIdle(s);
+  },
+  watcherTick(sid, input) {
+    const s = sessions.get(sid);
+    if (!s || s.mode !== "watcher") return;
+    const tickInput = input;
+    const messages = assembleMachine(s.charter, tickInput.state, tickInput);
+    s.watcherTicks += 1;
+    append(s, "context_request", JSON.stringify(messages));
+    s.done = false;
+    s.pendingInputs.push(JSON.stringify({ watcherMessages: messages }));
     startNextIfIdle(s);
   },
   pump(sid) {
