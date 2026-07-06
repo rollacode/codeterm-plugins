@@ -1322,6 +1322,74 @@ test("setModel surfaces a JIT-load VRAM failure from chat as a clean system mess
   );
 });
 
+test("charter: id resolves shipped prompts/watcher-orchestration.md in openSession", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  const md = readFileSync(join(__dirname, "prompts", "watcher-orchestration.md"), "utf8").replace(/\s+$/, "");
+  const r = plugin.openSession({
+    paneId: "charter-ref",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "charter:watcher-orchestration" },
+  });
+  assert(r.sessionId === "charter-ref", "openSession succeeds, got " + JSON.stringify(r));
+
+  const p = plugin.poll("charter-ref", null);
+  assert(p.messages.length === 1, "charter card emitted");
+  const card = p.messages[0].content.replace("-=-codeterm:system_prompt-=-", "").trim();
+  assert(card === md, "shipped charter matches prompts/watcher-orchestration.md byte-for-byte (trailing ws normalized)");
+});
+
+test("charter: id accepts inline config override for custom charters", () => {
+  reset({
+    baseUrl: "http://localhost:1234",
+    model: "llama",
+    presets: [],
+    charters: { custom: "INLINE CHARTER BODY" },
+  });
+  plugin.openSession({
+    paneId: "charter-inline",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "charter:custom" },
+  });
+  const card = plugin.poll("charter-inline", null).messages[0].content;
+  assert(card.includes("INLINE CHARTER BODY"), "inline config charter used for unknown shipped id");
+});
+
+test("unknown charter: id fails openSession with an error", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [], charters: {} });
+  const r = plugin.openSession({
+    paneId: "charter-missing",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "charter:does-not-exist" },
+  });
+  assert(r.error === "unknown charter id: does-not-exist", "openSession returns error, got " + JSON.stringify(r));
+  assert(!r.sessionId, "no sessionId on failure");
+});
+
+test("charter ref resolves before watcherTick uses assembleMachine", () => {
+  reset({
+    baseUrl: "http://localhost:1234",
+    model: "llama",
+    presets: [],
+    charters: { health: "HEALTH CHARTER" },
+  });
+  plugin.openSession({
+    paneId: "charter-tick",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "charter:health" },
+  });
+  const tick = { tick: 1, nowMs: 99, state: {}, observations: {} };
+  plugin.watcherTick("charter-tick", tick);
+  const body = JSON.parse(streamCalls[0].body);
+  assert(
+    body.input === renderEngineMessages(expectedMachineMessages("HEALTH CHARTER", tick.state, tick)),
+    "watcherTick uses resolved charter text",
+  );
+});
+
 test("settings schema and config expose presets/defaultPreset", () => {
   const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));
   const schemaText = JSON.stringify(schema);
@@ -1332,6 +1400,14 @@ test("settings schema and config expose presets/defaultPreset", () => {
   const config = readFileSync(join(__dirname, "config.yaml"), "utf8");
   assert(/defaultPreset:\s*codeterm/.test(config), "config has defaultPreset");
   assert(/systemPrompt:\s*\|/.test(config), "config seeds block systemPrompt");
+  assert(/charters:/.test(config), "config exposes charters map");
+  assert(/watcher-orchestration:\s*prompts\/watcher-orchestration\.md/.test(config), "config references shipped charter path");
+
+  const watcherCharter = readFileSync(join(__dirname, "prompts", "watcher-orchestration.md"), "utf8").replace(/\s+$/, "");
+  assert(watcherCharter.includes("orchestrator_id"), "watcher charter documents orchestrator_id + panes[] shape");
+  assert(watcherCharter.includes("chatTail"), "watcher charter documents per-pane chatTail objects");
+  assert(watcherCharter.includes("from_pane_id"), "watcher charter documents report field names");
+  assert(watcherCharter.includes("7+ minutes"), "stalled example aligns with ~5+ min threshold");
 
   const prompt = readFileSync(join(__dirname, "prompts", "codeterm-default.md"), "utf8");
   const replyExample = '{"tool":"codeterm","args":{"args":"send \\"Hi, I got your message.\\" --pane 36b00886"}}';

@@ -15,6 +15,7 @@ import type {
   WatcherTickInput,
 } from "@codeterm/plugin-sdk";
 import { assembleChat, assembleMachine, type EngineMessage } from "@codeterm/chat-engine";
+import watcherOrchestrationCharter from "../prompts/watcher-orchestration.md";
 
 interface Preset {
   id: string;
@@ -31,6 +32,29 @@ interface LmStudioSettings {
   defaultPreset?: string;
   presets?: Preset[];
   params?: Record<string, unknown>;
+  charters?: Record<string, string>;
+}
+
+const CHARTER_REF_PREFIX = "charter:";
+
+/** Shipped watcher charters (prompts/*.md bundled at build). */
+const SHIPPED_CHARTERS: Record<string, string> = {
+  "watcher-orchestration": watcherOrchestrationCharter.replace(/\s+$/, ""),
+};
+
+function resolveCharterRef(ref: string): { charter: string; error?: string } {
+  if (!ref.startsWith(CHARTER_REF_PREFIX)) return { charter: ref };
+  const id = ref.slice(CHARTER_REF_PREFIX.length).trim();
+  if (!id) return { charter: "", error: "charter reference is missing an id" };
+  const shipped = SHIPPED_CHARTERS[id];
+  if (shipped) return { charter: shipped };
+  const settings = readSettings();
+  const raw = settings.charters;
+  const body = raw && typeof raw === "object" && !Array.isArray(raw) ? raw[id] : undefined;
+  if (typeof body === "string" && body.trim() && !body.trim().endsWith(".md")) {
+    return { charter: body.trim() };
+  }
+  return { charter: "", error: `unknown charter id: ${id}` };
 }
 
 interface LastModelState {
@@ -83,6 +107,7 @@ interface Session {
   // tuned system prompt; drainAuthor polls its ticket across pumps and writes
   // the reply back via applyAuthoredPrompt. Null when no hand-off is active.
   pendingAuthor: PendingAuthor | null;
+  charterError?: string;
 }
 
 interface ToolCall {
@@ -1087,7 +1112,13 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
   const params = { ...(s.params || {}), ...((preset && preset.params) || {}) };
   const mode: SessionMode = ctx.mode === "watcher" ? "watcher" : "interactive";
   const engine = ctx.engine && typeof ctx.engine === "object" ? ctx.engine : null;
-  const charter = engine && engine.kind === "machine" ? engine.charter : "";
+  let charter = "";
+  let charterError: string | undefined;
+  if (engine && engine.kind === "machine") {
+    const resolved = resolveCharterRef(engine.charter);
+    charter = resolved.charter;
+    charterError = resolved.error;
+  }
   const effectiveSystemPrompt = mode === "watcher" ? "" : systemPrompt;
   return {
     messages: [],
@@ -1111,6 +1142,7 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
     pendingTools: null,
     pendingExec: null,
     pendingAuthor: null,
+    charterError,
   };
 }
 
@@ -1127,6 +1159,10 @@ const plugin: ChatBackend & {
   openSession(ctx) {
     const sid = ctx.paneId;
     const s = resolveSession(ctx);
+    if (s.charterError) {
+      host.log("error", `openSession failed for ${sid}: ${s.charterError}`);
+      return { error: s.charterError };
+    }
     if (s.mode === "watcher") {
       if (s.charter) append(s, "user", markSystemPrompt(s.charter), "system-prompt");
     } else if (s.systemPrompt) {
