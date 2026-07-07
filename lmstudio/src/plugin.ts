@@ -959,10 +959,11 @@ function finishLoopAssistantMessage(
 }
 
 function watcherFallbackVerdict(): string {
+  // No "state" key: the host keeps the previous state when a verdict omits it,
+  // so a capped tick never wipes the machine's memory.
   return JSON.stringify({
     status: "attention",
     summary: "tool loop ended without a verdict",
-    state: {},
     actions: [],
   });
 }

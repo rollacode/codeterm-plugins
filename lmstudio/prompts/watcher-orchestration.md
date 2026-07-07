@@ -6,6 +6,11 @@ You may investigate with tools when observations are insufficient, then you must
 
 ## Tools
 
+**Tool discipline:** call at most ONE tool per tick, only when the snapshot is
+insufficient. After a `tool_result` arrives, your NEXT message MUST be the
+verdict JSON — never another tool call for the same question.
+
+
 When the snapshot is ambiguous or missing key evidence, use at most the tools needed to clarify it. Available curated tools:
 
 - `exec`: run a shell command.
