@@ -13,12 +13,13 @@
     "chatBackend": { "spawnable": true }
   },
   "settingsSchema": "settings.schema.json",
-  "configHelp": "LM Studio turns a CodeTerm pane into an open agent shell. It uses LM Studio native v1 endpoints: POST /api/v1/chat for stateful streaming chat and GET /api/v1/models for model discovery. To use it: in LM Studio load a model and Developer tab → Start Server (defaults to http://localhost:1234). Knobs (set with `codeterm plugin config lmstudio --set key=value` or edit config.yaml): `baseUrl` — server base URL; `model` — fallback model id; `defaultPreset` — fallback preset id; `presets` — array of {id,name,systemPrompt?,model?,params?}. A preset with `model` binds to that exact model id and is selected before an explicit preset request.",
+  "configHelp": "LM Studio turns a CodeTerm pane into an open agent shell. It uses LM Studio native v1 endpoints: POST /api/v1/chat for stateful streaming chat and GET /api/v1/models for model discovery. To use it: in LM Studio load a model and Developer tab → Start Server (defaults to http://localhost:1234). Knobs (set with `codeterm plugin config lmstudio --set key=value` or edit config.yaml): `baseUrl` — server base URL; `model` — fallback model id; `maxToolRounds` — per-turn tool-call cap (1-64, default 8); `responseFormat` — structured-output response_format object passed to LM Studio; `defaultPreset` — fallback preset id; `presets` — array of {id,name,systemPrompt?,model?,params?}. A preset with `model` binds to that exact model id and is selected before an explicit preset request; preset params may override `maxToolRounds` and `responseFormat`.",
   "permissions": {
     "network": {
       "allow": [
         "localhost:1234",
-        "127.0.0.1:1234"
+        "127.0.0.1:1234",
+        "192.168.1.126:1234"
       ]
     },
     "subprocess": {

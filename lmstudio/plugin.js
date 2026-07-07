@@ -28,14 +28,17 @@ var DEFAULT_BASE_URL = "http://localhost:1234";
 var LAST_MODEL_PATH = ".codeterm/plugins/lmstudio/last-model.json";
 var AUTHORED_PROMPTS_PATH = ".codeterm/plugins/lmstudio/authored-prompts.json";
 var PROMPT_AUTHOR_WORKSPACE = "lmstudio-prompt-authoring";
-var MAX_TOOL_ROUNDS = 8;
+var DEFAULT_MAX_TOOL_ROUNDS = 8;
+var MIN_TOOL_ROUNDS = 1;
+var MAX_TOOL_ROUNDS_LIMIT = 64;
 var MAX_MALFORMED_RETRIES = 2;
 var TOOL_SCHEMA_JSON = JSON.stringify({
   tools: [
     { name: "exec", args: ["cmd"], optional: ["cwd"] },
     { name: "read_file", args: ["path"], optional: [] },
     { name: "write_file", args: ["path", "content"], optional: [] },
-    { name: "codeterm", args: ["args"], optional: [] },
+    { name: "codeterm", args: ["args"], optional: ["env", "shell"] },
+    { name: "codeterm-tool", args: ["args"], optional: ["env", "shell"] },
     { name: "mem_search", args: ["query"], optional: [] },
     { name: "spawn_agent", args: ["provider", "task"], optional: ["workspace"] }
   ],
@@ -55,6 +58,36 @@ function readSettings() {
   } catch {
     return {};
   }
+}
+function clampNumber(value, fallback, min, max) {
+  const parsed = typeof value === "string" && value.trim() ? Number(value.trim()) : value;
+  const n = typeof parsed === "number" && Number.isFinite(parsed) ? Math.floor(parsed) : fallback;
+  return Math.max(min, Math.min(max, n));
+}
+function maxToolRoundsForPreset(preset) {
+  const settings = readSettings();
+  const presetValue = preset && preset.params ? preset.params.maxToolRounds : void 0;
+  return clampNumber(
+    presetValue ?? settings.maxToolRounds,
+    DEFAULT_MAX_TOOL_ROUNDS,
+    MIN_TOOL_ROUNDS,
+    MAX_TOOL_ROUNDS_LIMIT
+  );
+}
+function configuredResponseFormat(preset) {
+  const settings = readSettings();
+  const presetValue = preset && preset.params ? preset.params.responseFormat : void 0;
+  const value = presetValue ?? settings.responseFormat;
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed) return void 0;
+  return parseJson(trimmed, value);
+}
+function buildParams(settingsParams, presetParams) {
+  const params = { ...settingsParams || {}, ...presetParams || {} };
+  delete params.maxToolRounds;
+  delete params.responseFormat;
+  return params;
 }
 function cleanModel(model) {
   return typeof model === "string" ? model.trim() : "";
@@ -285,6 +318,44 @@ function pollFetchStream(jobId) {
 function shellQuote(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
+function validEnvKey(key) {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
+}
+function envPrefix(env) {
+  if (!env || typeof env !== "object" || Array.isArray(env)) return "";
+  const parts = [];
+  for (const [key, value] of Object.entries(env)) {
+    if (!validEnvKey(key)) continue;
+    if (value === null || value === void 0) continue;
+    parts.push(`${key}=${shellQuote(String(value))}`);
+  }
+  return parts.length ? `${parts.join(" ")} ` : "";
+}
+function codetermShellCmd(args, env, shell = false) {
+  if (shell) return `${envPrefix(env)}${args}`;
+  const resolver = 'CODETERM_BIN="${CODETERM_BIN:-}"; if [ -z "$CODETERM_BIN" ] || [ ! -x "$CODETERM_BIN" ]; then for candidate in /opt/homebrew/bin/codeterm /usr/local/bin/codeterm codeterm; do if command -v "$candidate" >/dev/null 2>&1; then CODETERM_BIN="$candidate"; break; fi; done; fi; if [ -z "$CODETERM_BIN" ]; then echo "codeterm: command not found" >&2; exit 127; fi';
+  return `${resolver}; ${envPrefix(env)}"$CODETERM_BIN" ${args}`;
+}
+function looksLikeShellCommand(args) {
+  return /^\s*(?:env\s|CODETERM_[A-Z0-9_]*=|\/(?:opt|usr)\/[^\s]*\/codeterm\s)/.test(args);
+}
+function nestedArgsObject(args) {
+  if (!args.args || typeof args.args !== "object" || Array.isArray(args.args)) return void 0;
+  return args.args;
+}
+function codetermArgsString(args) {
+  if (typeof args.args === "string") return args.args;
+  const nested = nestedArgsObject(args);
+  return typeof nested?.args === "string" ? nested.args : "";
+}
+function codetermEnv(args) {
+  if (args.env !== void 0) return args.env;
+  return nestedArgsObject(args)?.env;
+}
+function codetermShellFlag(args) {
+  if (args.shell === true) return true;
+  return nestedArgsObject(args)?.shell === true;
+}
 function execShellCmd(call) {
   if (call.tool === "exec") {
     const cmd = typeof call.args.cmd === "string" ? call.args.cmd : "";
@@ -292,9 +363,9 @@ function execShellCmd(call) {
     if (!cmd) return { error: "exec requires args.cmd" };
     return { shellCmd: cwd && cwd.trim() ? `cd ${shellQuote(cwd)} && ${cmd}` : cmd };
   }
-  const args = typeof call.args.args === "string" ? call.args.args : "";
+  const args = codetermArgsString(call.args);
   if (!args) return { error: "codeterm requires args.args" };
-  return { shellCmd: `codeterm ${args}` };
+  return { shellCmd: codetermShellCmd(args, codetermEnv(call.args), codetermShellFlag(call.args) || looksLikeShellCommand(args)) };
 }
 function startExecJob(shellCmd) {
   return parseJson(
@@ -357,15 +428,28 @@ function parsedSpan(parsed, text) {
   if (start < 0 || end < start || end > text.length) return null;
   return { start, end };
 }
-function parseToolEntries(text) {
+function normalizeNativeToolJsonSeparator(text) {
+  return text.replace(
+    /(call\s*[:=]\s*(?:(?:[A-Za-z_][A-Za-z0-9_.-]*\s*:\s*)*[A-Za-z_][A-Za-z0-9_.-]*)):(\s*\{)/g,
+    "$1 $2"
+  );
+}
+function parseToolsRaw(text) {
   let raw = "";
   try {
     raw = host.toolcall.parse(text, TOOL_SCHEMA_JSON);
   } catch (e) {
     host.log("warn", `host.toolcall.parse failed: ${String(e)}`);
-    return { entries: [], cleaned: text, status: "none" };
+    return null;
   }
-  const parsed = parseJson(raw, null);
+  return parseJson(raw, null);
+}
+function parseToolEntries(text) {
+  let parsed = parseToolsRaw(text);
+  if ((!parsed || parsed.status !== "ok") && /call\s*[:=][\s\S]*?:\s*\{/.test(text)) {
+    const normalized = normalizeNativeToolJsonSeparator(text);
+    if (normalized !== text) parsed = parseToolsRaw(normalized);
+  }
   if (!parsed || typeof parsed !== "object") return { entries: [], cleaned: text, status: "none" };
   if (parsed.status === "malformed") {
     const reason = typeof parsed.reason === "string" && parsed.reason ? parsed.reason : "unparseable tool call";
@@ -377,15 +461,17 @@ function parseToolEntries(text) {
   const args = parsed.args && typeof parsed.args === "object" && !Array.isArray(parsed.args) ? parsed.args : {};
   const span = parsedSpan(parsed, text);
   const cleaned = span ? stripSpans(text, [expandToolSpan(text, span)]) : text;
+  const tool = parsed.tool === "codeterm-tool" ? "codeterm" : parsed.tool;
   return {
-    entries: [{ call: { tool: parsed.tool, args } }],
+    entries: [{ call: { tool, args } }],
     cleaned,
     status: "ok"
   };
 }
 function toolContent(call) {
   if (call.tool === "exec" && typeof call.args.cmd === "string") return call.args.cmd;
-  if (call.tool === "codeterm" && typeof call.args.args === "string") return `codeterm ${call.args.args}`;
+  const codetermArgs = call.tool === "codeterm" ? codetermArgsString(call.args) : "";
+  if (codetermArgs) return `codeterm ${codetermArgs}`;
   return JSON.stringify(call.args);
 }
 function emitToolCall(s, call) {
@@ -527,6 +613,9 @@ function startLmStudioCall(s, input) {
     stream: true,
     ...s.params
   };
+  const responseFormat = body.responseFormat;
+  if (responseFormat !== void 0 && body.response_format === void 0) body.response_format = responseFormat;
+  delete body.responseFormat;
   if (s.previousResponseId) body.previous_response_id = s.previousResponseId;
   const started = startFetchStream({
     url: `${baseUrl()}/api/v1/chat`,
@@ -595,11 +684,11 @@ function advanceTools(s) {
   while (s.pendingTools && s.pendingTools.length) {
     const entry = s.pendingTools.shift();
     const call = entry.call;
-    if (s.toolRounds >= MAX_TOOL_ROUNDS) {
+    if (s.toolRounds >= s.maxToolRounds) {
       s.pendingInputs = [];
       s.pendingTools = null;
       if (!s.capReached) {
-        append(s, "system", `Tool round cap (${MAX_TOOL_ROUNDS}) reached; stopping this turn.`);
+        append(s, "system", `Tool round cap (${s.maxToolRounds}) reached; stopping this turn.`);
         s.capReached = true;
       }
       s.done = true;
@@ -720,7 +809,9 @@ function resolveSession(ctx) {
   const generalSystemPrompt = (boundPreset ? presetSystemPrompt || defaultSystemPrompt(allPresets) : ctx.systemPrompt || presetSystemPrompt) || defaultSystemPrompt(allPresets) || "";
   const authoredPrompts = readAuthoredPrompts();
   const systemPrompt = model && authoredPrompts[model] || systemPromptForModel(generalSystemPrompt, model);
-  const params = { ...s.params || {}, ...preset && preset.params || {} };
+  const params = buildParams(s.params, preset && preset.params || {});
+  const responseFormat = configuredResponseFormat(preset);
+  if (responseFormat !== void 0) params.response_format = responseFormat;
   return {
     messages: [],
     seq: 0,
@@ -732,6 +823,7 @@ function resolveSession(ctx) {
     stream: null,
     done: true,
     toolRounds: 0,
+    maxToolRounds: maxToolRoundsForPreset(preset),
     capReached: false,
     malformedRetries: 0,
     pendingTools: null,

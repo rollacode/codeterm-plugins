@@ -17,6 +17,13 @@
         "label": "Model fallback",
         "placeholder": "leave blank to use the loaded model",
         "description": "Fallback model id. A spawn-time model overrides this; matching preset model bindings select prompts and params."
+      },
+      {
+        "kind": "text",
+        "key": "maxToolRounds",
+        "label": "Max tool rounds",
+        "placeholder": "8",
+        "description": "Maximum tool calls per user turn before the shell stops the loop. Range: 1-64. Higher values are useful for watcher/probe presets."
       }
     ]
   },
@@ -36,7 +43,20 @@
         "kind": "info",
         "level": "info",
         "title": "Preset objects",
-        "body": "Edit config.yaml for the presets array. Shape: presets: [{ id, name, systemPrompt?, model?, params? }]. A preset with model binds to that exact model id and wins at session init; if it has no systemPrompt, the default preset prompt is used."
+        "body": "Edit config.yaml for the presets array. Shape: presets: [{ id, name, systemPrompt?, model?, params? }]. A preset with model binds to that exact model id and wins at session init; if it has no systemPrompt, the default preset prompt is used. Preset params may include LM Studio request fields such as response_format plus plugin controls such as maxToolRounds."
+      }
+    ]
+  },
+  {
+    "kind": "section",
+    "title": "Structured output",
+    "description": "Optional native response_format payload passed through to LM Studio /api/v1/chat.",
+    "fields": [
+      {
+        "kind": "info",
+        "level": "info",
+        "title": "responseFormat",
+        "body": "Set responseFormat in config.yaml to pass a structured-output response_format object to LM Studio. Example: responseFormat: { type: json_schema, json_schema: { name: watcher_report, schema: { type: object, properties: { state: { type: string } }, required: [state] } } }"
       }
     ]
   }

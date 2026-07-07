@@ -504,6 +504,108 @@ test("codeterm-tool exec block runs host.exec, appends tool_result, then continu
   assert(assistants[assistants.length - 1] === "You have pane-1 and pane-2.", "final answer");
 });
 
+test("codeterm tool supports env object for dev daemon probes", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "codeterm-env", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("codeterm-env", "plan list");
+
+  const answer =
+    '```codeterm-tool\n{"tool":"codeterm","args":{"args":"plan list --json","env":{"CODETERM_API_PORT":7686}}}\n```';
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-env")], done: true, status: 200 }]);
+  plugin.pump("codeterm-env");
+
+  assert(execCalls.length === 1, "codeterm env tool executed once");
+  const shellArg = execCalls[0].args.join(" ");
+  assert(shellArg.includes("CODETERM_API_PORT='7686'"), "env prefix included: " + shellArg);
+  assert(shellArg.includes('"$CODETERM_BIN" plan list --json'), "codeterm args preserved: " + shellArg);
+});
+
+test("codeterm tool supports raw shell mode for advanced probes", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "codeterm-shell", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("codeterm-shell", "plan coverage");
+
+  const answer =
+    '```codeterm-tool\n{"tool":"codeterm","args":{"args":"CODETERM_API_PORT=7686 codeterm plan coverage pl_x","shell":true}}\n```';
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-shell")], done: true, status: 200 }]);
+  plugin.pump("codeterm-shell");
+
+  assert(execCalls.length === 1, "codeterm shell tool executed once");
+  const shellArg = execCalls[0].args.join(" ");
+  assert(
+    shellArg.includes("CODETERM_API_PORT=7686 codeterm plan coverage pl_x"),
+    "raw shell command preserved: " + shellArg,
+  );
+});
+
+test("codeterm tool auto-detects env-prefixed shell commands", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "codeterm-auto-shell", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("codeterm-auto-shell", "plan coverage");
+
+  const answer =
+    '```codeterm-tool\n{"tool":"codeterm","args":{"args":"env -u CODETERM_API_TOKEN CODETERM_API_PORT=7686 /opt/homebrew/bin/codeterm plan coverage pl_x"}}\n```';
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-auto-shell")], done: true, status: 200 }]);
+  plugin.pump("codeterm-auto-shell");
+
+  assert(execCalls.length === 1, "auto shell command executed once");
+  const shellArg = execCalls[0].args.join(" ");
+  assert(
+    shellArg.includes("env -u CODETERM_API_TOKEN CODETERM_API_PORT=7686 /opt/homebrew/bin/codeterm plan coverage pl_x"),
+    "env-prefixed command preserved as raw shell: " + shellArg,
+  );
+  assert(!shellArg.includes('"$CODETERM_BIN" env -u'), "raw shell was not prefixed with codeterm resolver: " + shellArg);
+});
+
+test("native codeterm-tool alias is normalized to codeterm", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "native-codeterm-tool", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("native-codeterm-tool", "status");
+
+  const answer = '<|tool_call>call:codeterm-tool{"args":"pane status --pane abc123"}<tool_call|>';
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-native-codeterm-tool")], done: true, status: 200 }]);
+  plugin.pump("native-codeterm-tool");
+
+  assert(execCalls.length === 1, "native codeterm-tool alias executed once");
+  const shellArg = execCalls[0].args.join(" ");
+  assert(shellArg.includes('"$CODETERM_BIN" pane status --pane abc123'), "alias normalized to codeterm: " + shellArg);
+  const p = plugin.poll("native-codeterm-tool", null);
+  const toolCalls = p.messages.filter((m) => m.type === "tool_call");
+  assert(toolCalls[0].toolName === "codeterm", "displayed tool is normalized to codeterm");
+});
+
+test("native codeterm call tolerates colon separator before args JSON", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "native-codeterm-colon-json", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("native-codeterm-colon-json", "status");
+
+  const answer = '<|tool_call>call:codeterm:{"args":"pane status --pane abc123"}<tool_call|>';
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-native-codeterm-colon-json")], done: true, status: 200 }]);
+  plugin.pump("native-codeterm-colon-json");
+
+  assert(execCalls.length === 1, "colon-separated native codeterm call executed once");
+  const shellArg = execCalls[0].args.join(" ");
+  assert(shellArg.includes('"$CODETERM_BIN" pane status --pane abc123'), "colon separator normalized: " + shellArg);
+  assert(toolParseCalls.length >= 2, "parser retried with normalized native call");
+});
+
+test("codeterm tool normalizes nested args object from native tool calls", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "nested-codeterm-args", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("nested-codeterm-args", "status");
+
+  const answer = '```codeterm-tool\n{"tool":"codeterm","args":{"args":{"args":"pane status --pane abc123"}}}\n```';
+  enqueueStream(0, [{ chunks: [turn(answer, "resp-nested-codeterm-args")], done: true, status: 200 }]);
+  plugin.pump("nested-codeterm-args");
+
+  assert(execCalls.length === 1, "nested codeterm args executed once");
+  const shellArg = execCalls[0].args.join(" ");
+  assert(shellArg.includes('"$CODETERM_BIN" pane status --pane abc123'), "nested args normalized: " + shellArg);
+  const p = plugin.poll("nested-codeterm-args", null);
+  const toolCalls = p.messages.filter((m) => m.type === "tool_call");
+  assert(toolCalls[0].content === "codeterm pane status --pane abc123", "tool display uses nested args");
+});
+
 test("exec tool runs async via host.exec.start/poll: pump polls until done, then tool_result + continuation", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({ paneId: "async-exec", config: {}, systemPrompt: "sys" });
@@ -555,6 +657,23 @@ test("iteration cap stops after 8 tool rounds", () => {
   assert(p.done === true, "session marked done at cap");
   const systems = contents(p.messages, "system");
   assert(systems.some((m) => /tool round cap/i.test(m)), "cap system message present");
+});
+
+test("iteration cap is configurable", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", maxToolRounds: 3, presets: [] });
+  plugin.openSession({ paneId: "cap-config", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("cap-config", "loop");
+
+  const fence = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo loop"}}\n```';
+  for (let i = 0; i < 4; i += 1) {
+    enqueueStream(i, [{ chunks: [turn(fence, `resp-config-${i}`)], done: true, status: 200 }]);
+    plugin.pump("cap-config");
+  }
+
+  const p = plugin.poll("cap-config", null);
+  assert(execCalls.length === 3, "exec capped at configured 3, got " + execCalls.length);
+  const systems = contents(p.messages, "system");
+  assert(systems.some((m) => /Tool round cap \(3\)/.test(m)), "configured cap system message present");
 });
 
 test("iteration cap clears queued continuations and emits one cap message", () => {
@@ -933,6 +1052,48 @@ test("model-bound preset resolves prompt and params for the chosen model", () =>
   assert(body.temperature === 0.2, "bound preset temperature overrides defaults");
   assert(body.top_p === 0.8, "bound preset params are included");
   assert(body.max_tokens === 512, "global params are retained");
+});
+
+test("structured output responseFormat is passed as native response_format", () => {
+  reset({
+    baseUrl: "http://localhost:1234",
+    model: "llama",
+    responseFormat: '{"type":"json_schema","json_schema":{"name":"watcher","schema":{"type":"object"}}}',
+    presets: [],
+  });
+
+  const body = openAndStartBody({ paneId: "structured-global", config: {}, systemPrompt: "sys" });
+  assert(body.response_format.type === "json_schema", "global responseFormat parsed into response_format");
+  assert(body.response_format.json_schema.name === "watcher", "json schema name preserved");
+  assert(body.responseFormat === undefined, "camelCase responseFormat is not sent");
+});
+
+test("preset params may override responseFormat and maxToolRounds", () => {
+  reset({
+    baseUrl: "http://localhost:1234",
+    model: "watcher-model",
+    maxToolRounds: 2,
+    responseFormat: { type: "json_object" },
+    presets: [
+      {
+        id: "watcher",
+        name: "Watcher",
+        model: "watcher-model",
+        systemPrompt: "watch",
+        params: {
+          maxToolRounds: 5,
+          responseFormat: { type: "json_schema", json_schema: { name: "watcher_report", schema: { type: "object" } } },
+          temperature: 0,
+        },
+      },
+    ],
+  });
+
+  const body = openAndStartBody({ paneId: "structured-preset", config: {} });
+  assert(body.response_format.type === "json_schema", "preset responseFormat overrides global");
+  assert(body.response_format.json_schema.name === "watcher_report", "preset schema used");
+  assert(body.temperature === 0, "normal preset params are retained");
+  assert(body.maxToolRounds === undefined, "plugin maxToolRounds control is not sent to LM Studio");
 });
 
 test("unbound model falls back to defaultPreset", () => {
