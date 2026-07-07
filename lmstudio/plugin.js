@@ -24,6 +24,64 @@ __export(plugin_exports, {
   describeModelSwitch: () => describeModelSwitch
 });
 module.exports = __toCommonJS(plugin_exports);
+
+// ../codeterm-canvas/packages/chat-engine/src/index.ts
+var VERDICT_CONTRACT = [
+  "Respond ONLY with a JSON object of this exact shape (no markdown fences, no surrounding prose):",
+  "{",
+  '  "status": "ok" | "attention" | "stalled",',
+  '  "summary": "<one-line assessment>",',
+  '  "state": <updated state object>,',
+  '  "actions": [{ "kind": "nudge" | "notify" | "report", "pane": "<optional pane id>", "message": "<text>" }]',
+  "}"
+].join("\n");
+function assembleChat(history, window) {
+  const maxMessages = window?.maxMessages;
+  if (maxMessages === void 0) {
+    return history;
+  }
+  const leadingSystem = history[0]?.role === "system" ? history[0] : void 0;
+  const nonSystem = history.filter((m) => m.role !== "system");
+  const tail = nonSystem.slice(-maxMessages);
+  return leadingSystem ? [leadingSystem, ...tail] : tail;
+}
+function assembleMachine(charter, state, input) {
+  return [
+    {
+      role: "system",
+      content: `${charter}
+
+${VERDICT_CONTRACT}`
+    },
+    {
+      role: "user",
+      content: JSON.stringify({ state, input })
+    }
+  ];
+}
+
+// lmstudio/prompts/watcher-orchestration.md
+var watcher_orchestration_default = '# Orchestration health watcher\n\nYou observe a **read-only snapshot** of an orchestration group (orchestrator + its managers and workers). Decide whether work is **progressing** or **stalled**. When stalled, you may request a **nudge** to the stuck pane.\n\nYou may investigate with tools when observations are insufficient, then you must finish with **ONLY the verdict JSON** as the final assistant message (no markdown fences, no prose before or after, and no tool block in the final message).\n\n## Tools\n\n**Tool discipline:** call at most ONE tool per tick, only when the snapshot is\ninsufficient. After a `tool_result` arrives, your NEXT message MUST be the\nverdict JSON \u2014 never another tool call for the same question.\n\n\nWhen the snapshot is ambiguous or missing key evidence, use at most the tools needed to clarify it. Available curated tools:\n\n- `exec`: run a shell command.\n- `read_file`: read a file.\n- `write_file`: write a file.\n- `codeterm`: run a CodeTerm command, such as `codeterm plan get` or `codeterm pane status --pane <id>`.\n- `mem_search`: search memory.\n- `spawn_agent`: start an agent only if explicitly needed for investigation.\n\nTool calls use fenced `codeterm-tool` JSON blocks. After each tool result, continue reasoning internally and either call another needed tool or finish with the verdict JSON. Use tools for facts you cannot infer reliably from `observations`, for example checking a pane\'s status or the current plan. Do not include a tool block in the final verdict message.\n\n## Input you receive each tick\n\nThe user message is JSON: `{ "state": <your prior state>, "input": { "tick", "nowMs", "state", "observations" } }`.\n\n`observations` is the host-assembled snapshot. Typical shape:\n\n```json\n{\n  "orchestrator_id": "abc123",\n  "panes": [\n    {\n      "pane_id": "abc123",\n      "title": "Orchestrator",\n      "role": "Orchestrator",\n      "status": "Working",\n      "last_activity_ms": 1700000000000\n    },\n    {\n      "pane_id": "def456",\n      "title": "Worker Alpha",\n      "role": "Worker",\n      "role_profile": null,\n      "status": "Working",\n      "last_activity_ms": 1700000005000,\n      "chatTail": [\n        { "id": "m1", "kind": "user", "content": "finish the task" },\n        { "id": "m2", "kind": "assistant", "content": "working on it\u2026" }\n      ]\n    }\n  ],\n  "reports": [\n    {\n      "id": "r1",\n      "from_pane_id": "def456",\n      "from_title": "Worker Alpha",\n      "message": "Completed step 1",\n      "timestamp": 1700000006000,\n      "status": "Done"\n    }\n  ]\n}\n```\n\nFields you care about on each pane:\n\n| Field | Meaning |\n|---|---|\n| `pane_id` | Target for nudge actions |\n| `title` | Human label |\n| `role` | `Orchestrator`, `Manager`, or `Worker` (may be absent) |\n| `role_profile` | Manager specialization (`planner`, `watcher`, \u2026) or null |\n| `status` | `Working`, `Waiting`, `Idle`, `Dead`, or `Unknown` |\n| `last_activity_ms` | Host clock when the pane last did something meaningful |\n| `chatTail` | Optional: last N parsed chat messages as `{id, kind, content}` objects |\n\nTop-level `orchestrator_id` identifies the orchestrator; the orchestrator also appears as a row in `panes[]`. `reports` is optional (when observation config enables it).\n\n## Progressing vs stalled\n\n**Progressing (`status: "ok"`)** \u2014 recent activity and forward motion:\n\n- `last_activity_ms` on key panes is within ~3 minutes of `nowMs`, **or**\n- worker/manager `status` values are advancing (e.g. `Waiting` \u2192 `Working`, `Working` with fresh `chatTail`), **or**\n- new agent reports arrive at the orchestrator with concrete progress.\n\n**Attention (`status: "attention"`)** \u2014 ambiguous or early warning:\n\n- activity is slowing but not clearly stuck yet, **or**\n- you lack enough data to judge (empty snapshot, missing tails).\n\n**Stalled (`status: "stalled"`)** \u2014 the group needs a kick:\n\n- no meaningful activity on workers for ~5+ minutes while tasks should be active, **or**\n- a worker sits on the same status with no `chatTail` movement, **or**\n- the orchestrator is `Idle` while workers are `Waiting`/`Idle` with no progress, **or**\n- unread reports pile up at the orchestrator with no follow-up.\n\nWhen stalled, emit **at most one nudge** to the most stuck pane. Nudges must be:\n\n- **Short** (1\u20132 sentences)\n- **Evidence-based** (cite what you saw: idle time, status, last `chatTail` line)\n- **Addressed to that pane** (use its `pane_id` in the action)\n\nDo not nudge watchers or the orchestrator unless the orchestrator itself is clearly idle with pending work.\n\n## State\n\nUse `state` to remember lightweight notes across ticks (e.g. `{ "last_nudged": { "def456": 1700000000000 } }`). Keep it small.\n\n## Worked example 1 \u2014 progressing (ok)\n\nObservation (abbreviated):\n\n```json\n{\n  "tick": 2,\n  "nowMs": 1700000120000,\n  "observations": {\n    "orchestrator_id": "o1",\n    "panes": [\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000110000 },\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "role_profile": null, "status": "Working", "last_activity_ms": 1700000118000 }\n    ],\n    "reports": [\n      { "id": "r1", "from_pane_id": "w1", "from_title": "Worker", "message": "Implemented tests", "timestamp": 1700000119000, "status": "Partial" }\n    ]\n  }\n}\n```\n\nYour verdict:\n\n```json\n{"status":"ok","summary":"Worker active in last minute with a progress report.","state":{"seen_ticks":2},"actions":[]}\n```\n\n## Worked example 2 \u2014 stalled worker (one nudge)\n\nObservation (abbreviated):\n\n```json\n{\n  "tick": 5,\n  "nowMs": 1700000420000,\n  "observations": {\n    "orchestrator_id": "o1",\n    "panes": [\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Idle", "last_activity_ms": 1700000200000 },\n      {\n        "pane_id": "w1",\n        "title": "Worker",\n        "role": "Worker",\n        "role_profile": null,\n        "status": "Waiting",\n        "last_activity_ms": 1700000000000,\n        "chatTail": [\n          { "id": "m1", "kind": "user", "content": "run the tests" },\n          { "id": "m2", "kind": "assistant", "content": "I\'ll get to it\u2026" }\n        ]\n      }\n    ]\n  }\n}\n```\n\nWorker `w1` has been silent ~7 minutes (`nowMs - last_activity_ms` = 420000 ms) with `status: Waiting` and no new `chatTail`.\n\nYour verdict:\n\n```json\n{"status":"stalled","summary":"Worker w1 Waiting with no activity for 7+ minutes.","state":{"seen_ticks":5,"last_nudged":{"w1":1700000420000}},"actions":[{"kind":"nudge","pane":"w1","message":"Stalled ~7m on \'run the tests\' \u2014 status Waiting, no new chat since \'I\'ll get to it\u2026\'. Please run tests and report STATUS."}]}\n```\n\n## Worked example 3 \u2014 investigate with a codeterm tool, then verdict\n\nObservation (abbreviated):\n\n```json\n{\n  "tick": 8,\n  "nowMs": 1700000600000,\n  "observations": {\n    "orchestrator_id": "o1",\n    "panes": [\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000580000 },\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "status": "Unknown", "last_activity_ms": 1700000200000 }\n    ]\n  }\n}\n```\n\nThe worker looks stale, but `status: Unknown` and missing `chatTail` are insufficient evidence. First check the pane:\n\n```codeterm-tool\n{"tool":"codeterm","args":{"args":"pane status --pane w1"}}\n```\n\nTool result (abbreviated): `{"status":"Working","last_activity_ms":1700000590000,"prompt":"running focused tests"}`\n\nYour final message:\n\n```json\n{"status":"ok","summary":"Worker w1 is active after status check and is running focused tests.","state":{"seen_ticks":8},"actions":[]}\n```\n';
+
+// lmstudio/src/plugin.ts
+var CHARTER_REF_PREFIX = "charter:";
+var SHIPPED_CHARTERS = {
+  "watcher-orchestration": watcher_orchestration_default.replace(/\s+$/, "")
+};
+function resolveCharterRef(ref) {
+  if (!ref.startsWith(CHARTER_REF_PREFIX)) return { charter: ref };
+  const id = ref.slice(CHARTER_REF_PREFIX.length).trim();
+  if (!id) return { charter: "", error: "charter reference is missing an id" };
+  const shipped = SHIPPED_CHARTERS[id];
+  if (shipped) return { charter: shipped };
+  const settings = readSettings();
+  const raw = settings.charters;
+  const body = raw && typeof raw === "object" && !Array.isArray(raw) ? raw[id] : void 0;
+  if (typeof body === "string" && body.trim() && !body.trim().endsWith(".md")) {
+    return { charter: body.trim() };
+  }
+  return { charter: "", error: `unknown charter id: ${id}` };
+}
 var DEFAULT_BASE_URL = "http://localhost:1234";
 var LAST_MODEL_PATH = ".codeterm/plugins/lmstudio/last-model.json";
 var AUTHORED_PROMPTS_PATH = ".codeterm/plugins/lmstudio/authored-prompts.json";
@@ -508,7 +566,23 @@ function assembledContext(s) {
   }
   return prior.map((m) => m.line).join("\n\n");
 }
-function startLmStudioCall(s, input) {
+function messagesAsEngineHistory(s) {
+  const history = [];
+  if (s.systemPrompt) history.push({ role: "system", content: s.systemPrompt });
+  for (const m of s.messages) {
+    if (m.type === "user") {
+      if (m.content.indexOf(SYSTEM_PROMPT_MARKER) === 0) continue;
+      history.push({ role: "user", content: m.content });
+    } else if (m.type === "assistant") {
+      history.push({ role: "assistant", content: m.content });
+    }
+  }
+  return history;
+}
+function requestInputFromMessages(messages) {
+  return messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
+}
+function startLmStudioCall(s, input, opts) {
   if (!s.model) {
     const resolved = resolveModelId();
     if (!resolved) {
@@ -520,14 +594,22 @@ function startLmStudioCall(s, input) {
     rememberLastModel(resolved);
   }
   const needsFallbackContext = !s.previousResponseId && s.messages.some((m) => m.type === "assistant" || m.type === "tool_result");
+  let requestInput = input;
+  if (opts?.messages) {
+    requestInput = requestInputFromMessages(opts.messages);
+  } else if (s.engine && s.engine.kind === "chat" && s.engine.window?.maxMessages !== void 0) {
+    requestInput = requestInputFromMessages(assembleChat(messagesAsEngineHistory(s), s.engine.window));
+  } else if (needsFallbackContext) {
+    requestInput = assembledContext(s);
+  }
   const body = {
     model: s.model,
     system_prompt: s.systemPrompt,
-    input: needsFallbackContext ? assembledContext(s) : input,
+    input: requestInput,
     stream: true,
     ...s.params
   };
-  if (s.previousResponseId) body.previous_response_id = s.previousResponseId;
+  if (!opts?.messages && s.previousResponseId) body.previous_response_id = s.previousResponseId;
   const started = startFetchStream({
     url: `${baseUrl()}/api/v1/chat`,
     method: "POST",
@@ -548,15 +630,35 @@ function startLmStudioCall(s, input) {
     buffer: "",
     responseId: null
   };
+  s.currentRun = opts?.watcher || s.mode === "watcher" ? "watcher" : "interactive";
   s.done = false;
 }
 function startNextIfIdle(s) {
   if (!s.stream && s.pendingInputs.length) {
-    startLmStudioCall(s, s.pendingInputs.shift() || "");
+    const next = s.pendingInputs.shift() || "";
+    const queued = parseJson(next, null);
+    if (queued && Array.isArray(queued.watcherMessages)) {
+      startLmStudioCall(s, "", { messages: queued.watcherMessages, watcher: true });
+    } else if (queued && Array.isArray(queued.machineMessages)) {
+      startLmStudioCall(s, "", { messages: queued.machineMessages });
+    } else {
+      startLmStudioCall(s, next);
+    }
   }
 }
 function finishAssistantMessage(s, content, responseId, messageId) {
-  if (responseId) s.previousResponseId = responseId;
+  if (s.currentRun === "watcher") {
+    finishLoopAssistantMessage(s, content, responseId, messageId);
+    return;
+  }
+  if (responseId && !(s.engine && s.engine.kind === "machine")) s.previousResponseId = responseId;
+  finishLoopAssistantMessage(s, content, responseId, messageId);
+}
+function finishLoopAssistantMessage(s, content, responseId, messageId) {
+  if (s.currentRun === "watcher") {
+    s.watcherLastAssistant = content;
+    if (responseId) s.previousResponseId = responseId;
+  }
   const { entries, cleaned, status, reason } = parseToolEntries(content);
   if (status === "malformed") {
     if (s.malformedRetries < MAX_MALFORMED_RETRIES) {
@@ -567,16 +669,25 @@ ERROR: your codeterm-tool JSON was invalid (${reason || "unparseable tool call"}
       );
       return;
     }
-    append(
-      s,
-      "system",
-      `Could not parse a valid tool call after ${MAX_MALFORMED_RETRIES} retries; treating the reply as a normal message.`
-    );
-    s.done = true;
+    if (s.currentRun === "watcher") {
+      append(s, "system", `Could not parse a valid tool call after ${MAX_MALFORMED_RETRIES} retries; ending this watcher tick.`);
+      completeWatcherTick(s, content);
+    } else {
+      append(
+        s,
+        "system",
+        `Could not parse a valid tool call after ${MAX_MALFORMED_RETRIES} retries; treating the reply as a normal message.`
+      );
+      s.done = true;
+    }
     return;
   }
   if (!entries.length) {
-    s.done = true;
+    if (s.currentRun === "watcher") completeWatcherTick(s, content);
+    else {
+      if (s.engine && s.engine.kind === "machine") s.machineState = extractVerdictState(content, s.machineState);
+      s.done = true;
+    }
     return;
   }
   if (cleaned !== content) {
@@ -590,6 +701,34 @@ ERROR: your codeterm-tool JSON was invalid (${reason || "unparseable tool call"}
   s.pendingTools = entries.slice();
   advanceTools(s);
 }
+function watcherFallbackVerdict() {
+  return JSON.stringify({
+    status: "attention",
+    summary: "tool loop ended without a verdict",
+    actions: []
+  });
+}
+function completeWatcherTick(s, verdict) {
+  if (!s.watcherVerdictEmitted) {
+    const text = verdict && verdict.trim() ? verdict : watcherFallbackVerdict();
+    append(s, "watcher_verdict", text);
+    s.watcherVerdictEmitted = true;
+  }
+  s.done = true;
+}
+function extractVerdictState(text, prior) {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const raw = fenced ? fenced[1] : trimmed;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && Object.prototype.hasOwnProperty.call(parsed, "state")) {
+      return parsed.state;
+    }
+  } catch {
+  }
+  return prior;
+}
 function advanceTools(s) {
   if (s.pendingExec) return;
   while (s.pendingTools && s.pendingTools.length) {
@@ -602,7 +741,8 @@ function advanceTools(s) {
         append(s, "system", `Tool round cap (${MAX_TOOL_ROUNDS}) reached; stopping this turn.`);
         s.capReached = true;
       }
-      s.done = true;
+      if (s.currentRun === "watcher") completeWatcherTick(s, null);
+      else s.done = true;
       return;
     }
     s.toolRounds += 1;
@@ -721,10 +861,32 @@ function resolveSession(ctx) {
   const authoredPrompts = readAuthoredPrompts();
   const systemPrompt = model && authoredPrompts[model] || systemPromptForModel(generalSystemPrompt, model);
   const params = { ...s.params || {}, ...preset && preset.params || {} };
+  const mode = ctx.mode === "watcher" ? "watcher" : "interactive";
+  const engine = ctx.engine && typeof ctx.engine === "object" ? ctx.engine : null;
+  let charter = "";
+  let charterError;
+  if (engine && engine.kind === "machine") {
+    const resolved = resolveCharterRef(engine.charter);
+    charter = resolved.charter;
+    charterError = resolved.error;
+  }
+  if (mode === "watcher" && !charter && !charterError) {
+    charter = SHIPPED_CHARTERS["watcher-orchestration"] ?? "";
+    if (!charter) charterError = "no charter provided and no shipped default";
+  }
+  const effectiveSystemPrompt = mode === "watcher" ? "" : systemPrompt;
   return {
     messages: [],
     seq: 0,
-    systemPrompt,
+    systemPrompt: effectiveSystemPrompt,
+    mode,
+    engine,
+    charter,
+    machineState: {},
+    currentRun: "interactive",
+    watcherTicks: 0,
+    watcherVerdictEmitted: false,
+    watcherLastAssistant: "",
     model,
     params,
     previousResponseId: null,
@@ -736,14 +898,23 @@ function resolveSession(ctx) {
     malformedRetries: 0,
     pendingTools: null,
     pendingExec: null,
-    pendingAuthor: null
+    pendingAuthor: null,
+    charterError
   };
 }
 var plugin = {
   openSession(ctx) {
     const sid = ctx.paneId;
     const s = resolveSession(ctx);
-    if (s.systemPrompt) append(s, "user", markSystemPrompt(s.systemPrompt), "system-prompt");
+    if (s.charterError) {
+      host.log("error", `openSession failed for ${sid}: ${s.charterError}`);
+      return { error: s.charterError };
+    }
+    if (s.mode === "watcher") {
+      if (s.charter) append(s, "user", markSystemPrompt(s.charter), "system-prompt");
+    } else if (s.systemPrompt) {
+      append(s, "user", markSystemPrompt(s.systemPrompt), "system-prompt");
+    }
     sessions.set(sid, s);
     rememberLastModel(s.model);
     return { sessionId: sid };
@@ -751,12 +922,43 @@ var plugin = {
   sendMessage(sid, text) {
     const s = sessions.get(sid);
     if (!s) return;
+    if (s.mode === "watcher") {
+      host.log("warn", `sendMessage ignored for watcher session ${sid}`);
+      return;
+    }
     append(s, "user", text);
     s.toolRounds = 0;
     s.capReached = false;
     s.malformedRetries = 0;
     s.done = false;
-    s.pendingInputs.push(text);
+    if (s.engine && s.engine.kind === "machine") {
+      const messages = assembleMachine(s.charter, s.machineState, { query: text });
+      s.pendingInputs.push(JSON.stringify({ machineMessages: messages }));
+    } else {
+      s.pendingInputs.push(text);
+    }
+    startNextIfIdle(s);
+  },
+  watcherTick(sid, input) {
+    const s = sessions.get(sid);
+    if (!s || s.mode !== "watcher") return;
+    const tickInput = input;
+    const messages = assembleMachine(s.charter, tickInput.state, tickInput);
+    s.watcherTicks += 1;
+    append(s, "context_request", JSON.stringify(messages));
+    s.currentRun = "watcher";
+    s.previousResponseId = null;
+    s.pendingInputs = [];
+    s.pendingTools = null;
+    s.pendingExec = null;
+    s.stream = null;
+    s.toolRounds = 0;
+    s.capReached = false;
+    s.malformedRetries = 0;
+    s.watcherVerdictEmitted = false;
+    s.watcherLastAssistant = "";
+    s.done = false;
+    s.pendingInputs.push(JSON.stringify({ watcherMessages: messages }));
     startNextIfIdle(s);
   },
   pump(sid) {

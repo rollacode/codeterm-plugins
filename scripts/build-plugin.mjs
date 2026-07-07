@@ -49,6 +49,7 @@ async function buildLogic() {
     format: "cjs",
     platform: "neutral",
     target: "es2020",
+    loader: { ".md": "text" },
     write: false,
     logLevel: "warning",
   });

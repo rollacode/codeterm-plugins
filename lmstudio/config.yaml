@@ -67,3 +67,9 @@ presets:
       | `spawn_agent` | `provider`, `task`, optional `workspace` |
 
       Use one tool call at a time. Stop after the result is enough to answer.
+
+
+# Named watcher charters — use --charter charter:<id>. Bodies ship in prompts/*.md
+# and are bundled into plugin.js at build time (not duplicated here).
+charters:
+  watcher-orchestration: prompts/watcher-orchestration.md

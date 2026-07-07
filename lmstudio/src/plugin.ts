@@ -5,12 +5,17 @@
 import type {
   ChatBackend,
   ChatBackendOpenSessionCtx,
+  ContextEngineConfig,
   ChatSessionInfo,
   FetchResult,
   Model,
   NormalizedChatMessage,
   PresetInfo,
+  SessionMode,
+  WatcherTickInput,
 } from "@codeterm/plugin-sdk";
+import { assembleChat, assembleMachine, type EngineMessage } from "@codeterm/chat-engine";
+import watcherOrchestrationCharter from "../prompts/watcher-orchestration.md";
 
 interface Preset {
   id: string;
@@ -27,6 +32,29 @@ interface LmStudioSettings {
   defaultPreset?: string;
   presets?: Preset[];
   params?: Record<string, unknown>;
+  charters?: Record<string, string>;
+}
+
+const CHARTER_REF_PREFIX = "charter:";
+
+/** Shipped watcher charters (prompts/*.md bundled at build). */
+const SHIPPED_CHARTERS: Record<string, string> = {
+  "watcher-orchestration": watcherOrchestrationCharter.replace(/\s+$/, ""),
+};
+
+function resolveCharterRef(ref: string): { charter: string; error?: string } {
+  if (!ref.startsWith(CHARTER_REF_PREFIX)) return { charter: ref };
+  const id = ref.slice(CHARTER_REF_PREFIX.length).trim();
+  if (!id) return { charter: "", error: "charter reference is missing an id" };
+  const shipped = SHIPPED_CHARTERS[id];
+  if (shipped) return { charter: shipped };
+  const settings = readSettings();
+  const raw = settings.charters;
+  const body = raw && typeof raw === "object" && !Array.isArray(raw) ? raw[id] : undefined;
+  if (typeof body === "string" && body.trim() && !body.trim().endsWith(".md")) {
+    return { charter: body.trim() };
+  }
+  return { charter: "", error: `unknown charter id: ${id}` };
 }
 
 interface LastModelState {
@@ -52,6 +80,14 @@ interface Session {
   messages: NormalizedChatMessage[];
   seq: number;
   systemPrompt: string;
+  mode: SessionMode;
+  engine: ContextEngineConfig | null;
+  charter: string;
+  machineState: unknown;
+  currentRun: "interactive" | "watcher";
+  watcherTicks: number;
+  watcherVerdictEmitted: boolean;
+  watcherLastAssistant: string;
   model: string;
   params: Record<string, unknown>;
   previousResponseId: string | null;
@@ -73,6 +109,7 @@ interface Session {
   // tuned system prompt; drainAuthor polls its ticket across pumps and writes
   // the reply back via applyAuthoredPrompt. Null when no hand-off is active.
   pendingAuthor: PendingAuthor | null;
+  charterError?: string;
 }
 
 interface ToolCall {
@@ -754,7 +791,25 @@ function assembledContext(s: Session): string {
   return prior.map((m) => m.line).join("\n\n");
 }
 
-function startLmStudioCall(s: Session, input: string): void {
+function messagesAsEngineHistory(s: Session): EngineMessage[] {
+  const history: EngineMessage[] = [];
+  if (s.systemPrompt) history.push({ role: "system", content: s.systemPrompt });
+  for (const m of s.messages) {
+    if (m.type === "user") {
+      if (m.content.indexOf(SYSTEM_PROMPT_MARKER) === 0) continue;
+      history.push({ role: "user", content: m.content });
+    } else if (m.type === "assistant") {
+      history.push({ role: "assistant", content: m.content });
+    }
+  }
+  return history;
+}
+
+function requestInputFromMessages(messages: EngineMessage[]): string {
+  return messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
+}
+
+function startLmStudioCall(s: Session, input: string, opts?: { messages?: EngineMessage[]; watcher?: boolean }): void {
   if (!s.model) {
     const resolved = resolveModelId();
     if (!resolved) {
@@ -768,14 +823,22 @@ function startLmStudioCall(s: Session, input: string): void {
 
   const needsFallbackContext =
     !s.previousResponseId && s.messages.some((m) => m.type === "assistant" || m.type === "tool_result");
+  let requestInput: unknown = input;
+  if (opts?.messages) {
+    requestInput = requestInputFromMessages(opts.messages);
+  } else if (s.engine && s.engine.kind === "chat" && s.engine.window?.maxMessages !== undefined) {
+    requestInput = requestInputFromMessages(assembleChat(messagesAsEngineHistory(s), s.engine.window));
+  } else if (needsFallbackContext) {
+    requestInput = assembledContext(s);
+  }
   const body: Record<string, unknown> = {
     model: s.model,
     system_prompt: s.systemPrompt,
-    input: needsFallbackContext ? assembledContext(s) : input,
+    input: requestInput,
     stream: true,
     ...s.params,
   };
-  if (s.previousResponseId) body.previous_response_id = s.previousResponseId;
+  if (!opts?.messages && s.previousResponseId) body.previous_response_id = s.previousResponseId;
 
   const started = startFetchStream({
     url: `${baseUrl()}/api/v1/chat`,
@@ -797,12 +860,21 @@ function startLmStudioCall(s: Session, input: string): void {
     buffer: "",
     responseId: null,
   };
+  s.currentRun = opts?.watcher || s.mode === "watcher" ? "watcher" : "interactive";
   s.done = false;
 }
 
 function startNextIfIdle(s: Session): void {
   if (!s.stream && s.pendingInputs.length) {
-    startLmStudioCall(s, s.pendingInputs.shift() || "");
+    const next = s.pendingInputs.shift() || "";
+    const queued = parseJson<{ watcherMessages?: EngineMessage[]; machineMessages?: EngineMessage[] } | null>(next, null);
+    if (queued && Array.isArray(queued.watcherMessages)) {
+      startLmStudioCall(s, "", { messages: queued.watcherMessages, watcher: true });
+    } else if (queued && Array.isArray(queued.machineMessages)) {
+      startLmStudioCall(s, "", { messages: queued.machineMessages });
+    } else {
+      startLmStudioCall(s, next);
+    }
   }
 }
 
@@ -812,8 +884,25 @@ function finishAssistantMessage(
   responseId: string | null,
   messageId: string,
 ): void {
-  if (responseId) s.previousResponseId = responseId;
+  if (s.currentRun === "watcher") {
+    finishLoopAssistantMessage(s, content, responseId, messageId);
+    return;
+  }
 
+  if (responseId && !(s.engine && s.engine.kind === "machine")) s.previousResponseId = responseId;
+  finishLoopAssistantMessage(s, content, responseId, messageId);
+}
+
+function finishLoopAssistantMessage(
+  s: Session,
+  content: string,
+  responseId: string | null,
+  messageId: string,
+): void {
+  if (s.currentRun === "watcher") {
+    s.watcherLastAssistant = content;
+    if (responseId) s.previousResponseId = responseId;
+  }
   const { entries, cleaned, status, reason } = parseToolEntries(content);
   // A tool-call-shaped block that failed parse+repair: don't drop it silently
   // (the live Gemma bug — the model never learns and the reply never arrives).
@@ -829,16 +918,25 @@ function finishAssistantMessage(
       // Leave s.done false: startNextIfIdle will start the retry continuation.
       return;
     }
-    append(
-      s,
-      "system",
-      `Could not parse a valid tool call after ${MAX_MALFORMED_RETRIES} retries; treating the reply as a normal message.`,
-    );
-    s.done = true;
+    if (s.currentRun === "watcher") {
+      append(s, "system", `Could not parse a valid tool call after ${MAX_MALFORMED_RETRIES} retries; ending this watcher tick.`);
+      completeWatcherTick(s, content);
+    } else {
+      append(
+        s,
+        "system",
+        `Could not parse a valid tool call after ${MAX_MALFORMED_RETRIES} retries; treating the reply as a normal message.`,
+      );
+      s.done = true;
+    }
     return;
   }
   if (!entries.length) {
-    s.done = true;
+    if (s.currentRun === "watcher") completeWatcherTick(s, content);
+    else {
+      if (s.engine && s.engine.kind === "machine") s.machineState = extractVerdictState(content, s.machineState);
+      s.done = true;
+    }
     return;
   }
   // Strip the executed tool-call syntax from the displayed assistant bubble so
@@ -860,6 +958,40 @@ function finishAssistantMessage(
   advanceTools(s);
 }
 
+function watcherFallbackVerdict(): string {
+  // No "state" key: the host keeps the previous state when a verdict omits it,
+  // so a capped tick never wipes the machine's memory.
+  return JSON.stringify({
+    status: "attention",
+    summary: "tool loop ended without a verdict",
+    actions: [],
+  });
+}
+
+function completeWatcherTick(s: Session, verdict: string | null): void {
+  if (!s.watcherVerdictEmitted) {
+    const text = verdict && verdict.trim() ? verdict : watcherFallbackVerdict();
+    append(s, "watcher_verdict", text);
+    s.watcherVerdictEmitted = true;
+  }
+  s.done = true;
+}
+
+function extractVerdictState(text: string, prior: unknown): unknown {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const raw = fenced ? fenced[1] : trimmed;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && Object.prototype.hasOwnProperty.call(parsed, "state")) {
+      return (parsed as { state?: unknown }).state;
+    }
+  } catch {
+    // Keep prior state when the model returns prose or malformed JSON.
+  }
+  return prior;
+}
+
 // Walk the pending tool queue. Sync tools run inline; exec/codeterm start an
 // async job (host.exec.start) and return immediately, parking the queue on
 // s.pendingExec until drainExec resumes it. The VM lock is therefore held only
@@ -876,7 +1008,8 @@ function advanceTools(s: Session): void {
         append(s, "system", `Tool round cap (${MAX_TOOL_ROUNDS}) reached; stopping this turn.`);
         s.capReached = true;
       }
-      s.done = true;
+      if (s.currentRun === "watcher") completeWatcherTick(s, null);
+      else s.done = true;
       return;
     }
     s.toolRounds += 1;
@@ -1018,10 +1151,34 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
   const authoredPrompts = readAuthoredPrompts();
   const systemPrompt = (model && authoredPrompts[model]) || systemPromptForModel(generalSystemPrompt, model);
   const params = { ...(s.params || {}), ...((preset && preset.params) || {}) };
+  const mode: SessionMode = ctx.mode === "watcher" ? "watcher" : "interactive";
+  const engine = ctx.engine && typeof ctx.engine === "object" ? ctx.engine : null;
+  let charter = "";
+  let charterError: string | undefined;
+  if (engine && engine.kind === "machine") {
+    const resolved = resolveCharterRef(engine.charter);
+    charter = resolved.charter;
+    charterError = resolved.error;
+  }
+  // A watcher spawned bare (no engine/charter) runs the shipped orchestration
+  // health charter — the out-of-the-box "attach a watcher to my orchestrator".
+  if (mode === "watcher" && !charter && !charterError) {
+    charter = SHIPPED_CHARTERS["watcher-orchestration"] ?? "";
+    if (!charter) charterError = "no charter provided and no shipped default";
+  }
+  const effectiveSystemPrompt = mode === "watcher" ? "" : systemPrompt;
   return {
     messages: [],
     seq: 0,
-    systemPrompt,
+    systemPrompt: effectiveSystemPrompt,
+    mode,
+    engine,
+    charter,
+    machineState: {},
+    currentRun: "interactive",
+    watcherTicks: 0,
+    watcherVerdictEmitted: false,
+    watcherLastAssistant: "",
     model,
     params,
     previousResponseId: null,
@@ -1034,6 +1191,7 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
     pendingTools: null,
     pendingExec: null,
     pendingAuthor: null,
+    charterError,
   };
 }
 
@@ -1050,7 +1208,15 @@ const plugin: ChatBackend & {
   openSession(ctx) {
     const sid = ctx.paneId;
     const s = resolveSession(ctx);
-    if (s.systemPrompt) append(s, "user", markSystemPrompt(s.systemPrompt), "system-prompt");
+    if (s.charterError) {
+      host.log("error", `openSession failed for ${sid}: ${s.charterError}`);
+      return { error: s.charterError } as unknown as { sessionId: string };
+    }
+    if (s.mode === "watcher") {
+      if (s.charter) append(s, "user", markSystemPrompt(s.charter), "system-prompt");
+    } else if (s.systemPrompt) {
+      append(s, "user", markSystemPrompt(s.systemPrompt), "system-prompt");
+    }
     sessions.set(sid, s);
     rememberLastModel(s.model);
     return { sessionId: sid };
@@ -1059,12 +1225,44 @@ const plugin: ChatBackend & {
   sendMessage(sid, text) {
     const s = sessions.get(sid);
     if (!s) return;
+    if (s.mode === "watcher") {
+      host.log("warn", `sendMessage ignored for watcher session ${sid}`);
+      return;
+    }
     append(s, "user", text);
     s.toolRounds = 0;
     s.capReached = false;
     s.malformedRetries = 0;
     s.done = false;
-    s.pendingInputs.push(text);
+    if (s.engine && s.engine.kind === "machine") {
+      const messages = assembleMachine(s.charter, s.machineState, { query: text });
+      s.pendingInputs.push(JSON.stringify({ machineMessages: messages }));
+    } else {
+      s.pendingInputs.push(text);
+    }
+    startNextIfIdle(s);
+  },
+
+  watcherTick(sid, input) {
+    const s = sessions.get(sid);
+    if (!s || s.mode !== "watcher") return;
+    const tickInput = input as WatcherTickInput;
+    const messages = assembleMachine(s.charter, tickInput.state, tickInput);
+    s.watcherTicks += 1;
+    append(s, "context_request", JSON.stringify(messages));
+    s.currentRun = "watcher";
+    s.previousResponseId = null;
+    s.pendingInputs = [];
+    s.pendingTools = null;
+    s.pendingExec = null;
+    s.stream = null;
+    s.toolRounds = 0;
+    s.capReached = false;
+    s.malformedRetries = 0;
+    s.watcherVerdictEmitted = false;
+    s.watcherLastAssistant = "";
+    s.done = false;
+    s.pendingInputs.push(JSON.stringify({ watcherMessages: messages }));
     startNextIfIdle(s);
   },
 

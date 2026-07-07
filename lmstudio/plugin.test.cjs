@@ -264,6 +264,37 @@ function contents(messages, type) {
   return messages.filter((m) => m.type === type).map((m) => m.content);
 }
 
+function assertJsonEqual(actual, expected, msg) {
+  const a = JSON.stringify(actual);
+  const e = JSON.stringify(expected);
+  assert(a === e, `${msg}\nactual: ${a}\nexpected: ${e}`);
+}
+
+function expectedMachineMessages(charter, state, input) {
+  return [
+    {
+      role: "system",
+      content:
+        charter +
+        "\n\n" +
+        [
+          "Respond ONLY with a JSON object of this exact shape (no markdown fences, no surrounding prose):",
+          "{",
+          '  "status": "ok" | "attention" | "stalled",',
+          '  "summary": "<one-line assessment>",',
+          '  "state": <updated state object>,',
+          '  "actions": [{ "kind": "nudge" | "notify" | "report", "pane": "<optional pane id>", "message": "<text>" }]',
+          "}",
+        ].join("\n"),
+    },
+    { role: "user", content: JSON.stringify({ state, input }) },
+  ];
+}
+
+function renderEngineMessages(messages) {
+  return messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
+}
+
 function openAndStartBody(ctx) {
   plugin.openSession(ctx);
   plugin.sendMessage(ctx.paneId, "hello");
@@ -607,6 +638,288 @@ test("fallback assembled context includes one final assistant entry per turn", (
   assert(assistantEntries.length === 1, "one assistant entry, got " + assistantEntries.length + "\n" + body.input);
   assert(body.input.includes("assistant: Hello"), "final assistant content included");
   assert(!body.input.includes("assistant: Hel\n"), "partial assistant content omitted");
+});
+
+test("watcher openSession emits the charter card and not the default preset prompt", () => {
+  reset({
+    baseUrl: "http://localhost:1234",
+    model: "llama",
+    defaultPreset: "codeterm",
+    presets: [{ id: "codeterm", name: "CodeTerm", systemPrompt: "DEFAULT PRESET" }],
+  });
+  plugin.openSession({
+    paneId: "watch-open",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "WATCH CHARTER" },
+  });
+
+  const p = plugin.poll("watch-open", null);
+  assert(p.messages.length === 1, "one watcher charter card");
+  assert(p.messages[0].type === "user", "charter is rendered through system-prompt marker");
+  assert(p.messages[0].content.includes("WATCH CHARTER"), "charter card contains charter");
+  assert(!p.messages[0].content.includes("DEFAULT PRESET"), "watcher does not emit preset prompt");
+});
+
+test("watcherTick request body has no previous_response_id and renders assembleMachine messages as a string", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  const tick = { tick: 1, nowMs: 123, state: { seen: 0 }, observations: { panes: ["a"] } };
+  plugin.openSession({
+    paneId: "watch-body",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "CHECK PROGRESS" },
+  });
+  plugin.watcherTick("watch-body", tick);
+
+  assert(streamCalls.length === 1, "watcherTick starts one stream");
+  const body = JSON.parse(streamCalls[0].body);
+  assert(!Object.prototype.hasOwnProperty.call(body, "previous_response_id"), "watcher tick does not chain previous_response_id");
+  assert(typeof body.input === "string", "watcher tick transport input is a string");
+  assert(body.input === renderEngineMessages(expectedMachineMessages("CHECK PROGRESS", tick.state, tick)), "watcher body input renders assembleMachine");
+});
+
+test("two watcher ticks do not grow context from transcript history", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({
+    paneId: "watch-two",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "WATCH" },
+  });
+  plugin.watcherTick("watch-two", { tick: 1, nowMs: 1, state: { n: 1 }, observations: { a: 1 } });
+  enqueueStream(0, [{ chunks: [turn('{"status":"ok","summary":"one","state":{"n":2},"actions":[]}', "r1")], done: true, status: 200 }]);
+  pumpUntilDone("watch-two");
+  plugin.watcherTick("watch-two", { tick: 2, nowMs: 2, state: { n: 2 }, observations: { a: 2 } });
+
+  assert(streamCalls.length === 2, "second watcher stream started");
+  const first = JSON.parse(streamCalls[0].body).input;
+  const second = JSON.parse(streamCalls[1].body).input;
+  assert(typeof first === "string" && typeof second === "string", "each tick sends string transport input");
+  assert(!second.includes('"summary":"one"'), "second tick excludes prior assistant/verdict transcript");
+  assert(!Object.prototype.hasOwnProperty.call(JSON.parse(streamCalls[1].body), "previous_response_id"), "second tick still does not chain");
+});
+
+test("watcher machine system contract is byte-identical across ticks", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({
+    paneId: "watch-contract",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "IMMUTABLE" },
+  });
+  plugin.watcherTick("watch-contract", { tick: 1, nowMs: 1, state: { n: 1 }, observations: {} });
+  enqueueStream(0, [{ chunks: [turn('{"status":"ok","summary":"done","state":{"n":2},"actions":[]}', "r1")], done: true, status: 200 }]);
+  pumpUntilDone("watch-contract");
+  plugin.watcherTick("watch-contract", { tick: 2, nowMs: 2, state: { n: 2 }, observations: {} });
+
+  const p = plugin.poll("watch-contract", null);
+  const contexts = contents(p.messages, "context_request").map((raw) => JSON.parse(raw));
+  assert(contexts.length === 2, "two context cards emitted");
+  assert(contexts[0][0].content === contexts[1][0].content, "system machine contract is byte-identical across ticks");
+});
+
+test("watcherTick emits context_request and watcher_verdict transcript messages", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  const tick = { tick: 7, nowMs: 77, state: {}, observations: { reports: [] } };
+  plugin.openSession({
+    paneId: "watch-transcript",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "OBSERVE" },
+  });
+  plugin.watcherTick("watch-transcript", tick);
+  enqueueStream(0, [{ chunks: [turn('{"status":"attention","summary":"check","state":{},"actions":[]}', "resp-watch")], done: true, status: 200 }]);
+  const p = pumpUntilDone("watch-transcript");
+
+  const contexts = contents(p.messages, "context_request");
+  const verdicts = contents(p.messages, "watcher_verdict");
+  assert(contexts.length === 1, "one context_request emitted");
+  assertJsonEqual(JSON.parse(contexts[0]), expectedMachineMessages("OBSERVE", tick.state, tick), "context_request contains assembled messages");
+  assert(verdicts.length === 1, "one watcher_verdict emitted");
+  assert(verdicts[0] === '{"status":"attention","summary":"check","state":{},"actions":[]}', "verdict is final text verbatim");
+});
+
+test("watcherTick executes a tool block and uses the next clean round as watcher_verdict", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({
+    paneId: "watch-tool",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "WATCH" },
+  });
+  plugin.watcherTick("watch-tool", { tick: 1, nowMs: 1, state: {}, observations: {} });
+  const tool = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo watcher"}}\n```';
+  enqueueStream(0, [{ chunks: [turn(tool, "resp-tool-watch")], done: true, status: 200 }]);
+  plugin.pump("watch-tool");
+
+  assert(execCalls.length === 1, "watcher executed the tool call");
+  assert(toolParseCalls.length >= 1, "watcher parsed the tool call");
+  assert(streamCalls.length === 2, "watcher started a tool continuation");
+  const continuation = JSON.parse(streamCalls[1].body);
+  assert(continuation.previous_response_id === "resp-tool-watch", "watcher chains previous_response_id within the tick");
+  assert(/tool_result/.test(continuation.input), "watcher continuation receives the tool result");
+
+  enqueueStream(1, [{ chunks: [turn('{"status":"ok","summary":"checked via tool","state":{},"actions":[]}', "resp-watch-final")], done: true, status: 200 }]);
+  const p = pumpUntilDone("watch-tool");
+  const verdicts = contents(p.messages, "watcher_verdict");
+  assert(verdicts.length === 1, "one watcher_verdict emitted");
+  assert(verdicts[0] === '{"status":"ok","summary":"checked via tool","state":{},"actions":[]}', "clean continuation text becomes verdict");
+});
+
+test("watcherTick emits tool_call and tool_result before the watcher_verdict", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({
+    paneId: "watch-transcript-tools",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "WATCH" },
+  });
+  plugin.watcherTick("watch-transcript-tools", { tick: 1, nowMs: 1, state: {}, observations: {} });
+  const tool = 'Investigating.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo watcher"}}\n```';
+  enqueueStream(0, [{ chunks: [turn(tool, "resp-tool-watch-order")], done: true, status: 200 }]);
+  plugin.pump("watch-transcript-tools");
+  enqueueStream(1, [{ chunks: [turn('{"status":"ok","summary":"done","state":{},"actions":[]}', "resp-watch-order-final")], done: true, status: 200 }]);
+  const p = pumpUntilDone("watch-transcript-tools");
+
+  const types = p.messages.map((m) => m.type);
+  const callIdx = types.indexOf("tool_call");
+  const resultIdx = types.indexOf("tool_result");
+  const verdictIdx = types.indexOf("watcher_verdict");
+  assert(callIdx >= 0, "tool_call emitted");
+  assert(resultIdx >= 0, "tool_result emitted");
+  assert(verdictIdx >= 0, "watcher_verdict emitted");
+  assert(callIdx < verdictIdx, "tool_call appears before verdict");
+  assert(resultIdx < verdictIdx, "tool_result appears before verdict");
+});
+
+test("watcherTick round cap still yields exactly one fallback watcher_verdict", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({
+    paneId: "watch-cap",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "WATCH" },
+  });
+  plugin.watcherTick("watch-cap", { tick: 1, nowMs: 1, state: {}, observations: {} });
+  const fence = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo loop"}}\n```';
+  for (let i = 0; i < 9; i += 1) {
+    enqueueStream(i, [{ chunks: [turn(fence, `resp-watch-cap-${i}`)], done: true, status: 200 }]);
+    plugin.pump("watch-cap");
+  }
+
+  const p = plugin.poll("watch-cap", null);
+  const verdicts = contents(p.messages, "watcher_verdict");
+  assert(execCalls.length === 8, "watcher exec capped at 8, got " + execCalls.length);
+  assert(verdicts.length === 1, "exactly one watcher_verdict at cap");
+  const fallback = JSON.parse(verdicts[0]);
+  assertJsonEqual(fallback, {
+    status: "attention",
+    summary: "tool loop ended without a verdict",
+    actions: [],
+  }, "cap fallback verdict shape");
+  assert(!("state" in fallback), "fallback omits state so the host keeps the previous blob");
+  assert(p.done === true, "watcher session done after cap");
+});
+
+test("watcherTick after a tool loop starts from assembleMachine only", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({
+    paneId: "watch-tool-isolation",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "WATCH" },
+  });
+  const tick1 = { tick: 1, nowMs: 1, state: { n: 1 }, observations: { a: 1 } };
+  plugin.watcherTick("watch-tool-isolation", tick1);
+  const tool = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo watcher"}}\n```';
+  enqueueStream(0, [{ chunks: [turn(tool, "resp-watch-iso-tool")], done: true, status: 200 }]);
+  plugin.pump("watch-tool-isolation");
+  enqueueStream(1, [{ chunks: [turn('{"status":"ok","summary":"tool done","state":{"n":2},"actions":[]}', "resp-watch-iso-final")], done: true, status: 200 }]);
+  pumpUntilDone("watch-tool-isolation");
+
+  const tick2 = { tick: 2, nowMs: 2, state: { n: 2 }, observations: { a: 2 } };
+  plugin.watcherTick("watch-tool-isolation", tick2);
+  assert(streamCalls.length === 3, "second tick starts one fresh stream after first tick's tool continuation");
+  const body = JSON.parse(streamCalls[2].body);
+  assert(!Object.prototype.hasOwnProperty.call(body, "previous_response_id"), "second tick does not inherit previous_response_id");
+  assert(body.input === renderEngineMessages(expectedMachineMessages("WATCH", tick2.state, tick2)), "second tick input is exactly assembleMachine output");
+  assert(!body.input.includes("tool_result"), "second tick excludes tick-1 tool result");
+  assert(!body.input.includes("tool done"), "second tick excludes tick-1 verdict");
+});
+
+test("sendMessage is a no-op on watcher sessions", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  const logs = [];
+  const oldLog = host.log;
+  host.log = (level, message) => logs.push({ level, message });
+  try {
+    plugin.openSession({
+      paneId: "watch-noop",
+      config: {},
+      mode: "watcher",
+      engine: { kind: "machine", charter: "WATCH" },
+    });
+    plugin.sendMessage("watch-noop", "user text");
+  } finally {
+    host.log = oldLog;
+  }
+
+  assert(streamCalls.length === 0, "watcher sendMessage starts no request");
+  const p = plugin.poll("watch-noop", null);
+  assert(!contents(p.messages, "user").some((m) => m === "user text"), "watcher sendMessage appends no user message");
+  assert(logs.some((l) => l.level === "warn" && /ignored for watcher/.test(l.message)), "watcher no-op logs a warning");
+});
+
+test("chat engine window caps fallback history while default sessions remain unchanged", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({
+    paneId: "chat-window",
+    config: {},
+    systemPrompt: "sys",
+    engine: { kind: "chat", window: { maxMessages: 2, policy: "top" } },
+  });
+  plugin.sendMessage("chat-window", "first");
+  enqueueStream(0, [{ chunks: [turn("one", null)], done: true, status: 200 }]);
+  pumpUntilDone("chat-window");
+  plugin.sendMessage("chat-window", "second");
+
+  const capped = JSON.parse(streamCalls[1].body).input;
+  assert(capped.includes("system: sys"), "chat window keeps system prompt");
+  assert(!capped.includes("user: first"), "chat window evicts older history");
+  assert(capped.includes("assistant: one"), "chat window keeps recent assistant message");
+  assert(capped.includes("user: second"), "chat window keeps current user message");
+
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({ paneId: "default-history", config: {}, systemPrompt: "sys" });
+  plugin.sendMessage("default-history", "first");
+  enqueueStream(0, [{ chunks: [turn("one", null)], done: true, status: 200 }]);
+  pumpUntilDone("default-history");
+  plugin.sendMessage("default-history", "second");
+  const defaultInput = JSON.parse(streamCalls[1].body).input;
+  assert(/^user: first/.test(defaultInput), "default fallback format remains assembled transcript");
+  assert(defaultInput.includes("assistant: one"), "default fallback includes prior assistant reply");
+  assert(defaultInput.includes("user: second"), "default fallback includes latest user turn");
+  assert(!defaultInput.includes("system: sys"), "default fallback does not switch to chat-engine format");
+});
+
+test("interactive machine sendMessage uses assembleMachine and advances parsed verdict state", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({
+    paneId: "machine-interactive",
+    config: {},
+    engine: { kind: "machine", charter: "STATEFUL" },
+  });
+  plugin.sendMessage("machine-interactive", "first?");
+  let body = JSON.parse(streamCalls[0].body);
+  assert(body.input === renderEngineMessages(expectedMachineMessages("STATEFUL", {}, { query: "first?" })), "first machine input renders initial state");
+  enqueueStream(0, [{ chunks: [turn('{"status":"ok","summary":"ok","state":{"step":1},"actions":[]}', null)], done: true, status: 200 }]);
+  pumpUntilDone("machine-interactive");
+
+  plugin.sendMessage("machine-interactive", "second?");
+  body = JSON.parse(streamCalls[1].body);
+  assert(body.input === renderEngineMessages(expectedMachineMessages("STATEFUL", { step: 1 }, { query: "second?" })), "second machine input renders parsed verdict state");
+  assert(!Object.prototype.hasOwnProperty.call(body, "previous_response_id"), "interactive machine request does not chain previous_response_id");
 });
 
 test("host parser receives the full assistant text and executes the validated call it returns", () => {
@@ -1098,6 +1411,74 @@ test("setModel surfaces a JIT-load VRAM failure from chat as a clean system mess
   );
 });
 
+test("charter: id resolves shipped prompts/watcher-orchestration.md in openSession", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  const md = readFileSync(join(__dirname, "prompts", "watcher-orchestration.md"), "utf8").replace(/\s+$/, "");
+  const r = plugin.openSession({
+    paneId: "charter-ref",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "charter:watcher-orchestration" },
+  });
+  assert(r.sessionId === "charter-ref", "openSession succeeds, got " + JSON.stringify(r));
+
+  const p = plugin.poll("charter-ref", null);
+  assert(p.messages.length === 1, "charter card emitted");
+  const card = p.messages[0].content.replace("-=-codeterm:system_prompt-=-", "").trim();
+  assert(card === md, "shipped charter matches prompts/watcher-orchestration.md byte-for-byte (trailing ws normalized)");
+});
+
+test("charter: id accepts inline config override for custom charters", () => {
+  reset({
+    baseUrl: "http://localhost:1234",
+    model: "llama",
+    presets: [],
+    charters: { custom: "INLINE CHARTER BODY" },
+  });
+  plugin.openSession({
+    paneId: "charter-inline",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "charter:custom" },
+  });
+  const card = plugin.poll("charter-inline", null).messages[0].content;
+  assert(card.includes("INLINE CHARTER BODY"), "inline config charter used for unknown shipped id");
+});
+
+test("unknown charter: id fails openSession with an error", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [], charters: {} });
+  const r = plugin.openSession({
+    paneId: "charter-missing",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "charter:does-not-exist" },
+  });
+  assert(r.error === "unknown charter id: does-not-exist", "openSession returns error, got " + JSON.stringify(r));
+  assert(!r.sessionId, "no sessionId on failure");
+});
+
+test("charter ref resolves before watcherTick uses assembleMachine", () => {
+  reset({
+    baseUrl: "http://localhost:1234",
+    model: "llama",
+    presets: [],
+    charters: { health: "HEALTH CHARTER" },
+  });
+  plugin.openSession({
+    paneId: "charter-tick",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "charter:health" },
+  });
+  const tick = { tick: 1, nowMs: 99, state: {}, observations: {} };
+  plugin.watcherTick("charter-tick", tick);
+  const body = JSON.parse(streamCalls[0].body);
+  assert(
+    body.input === renderEngineMessages(expectedMachineMessages("HEALTH CHARTER", tick.state, tick)),
+    "watcherTick uses resolved charter text",
+  );
+});
+
 test("settings schema and config expose presets/defaultPreset", () => {
   const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));
   const schemaText = JSON.stringify(schema);
@@ -1108,6 +1489,14 @@ test("settings schema and config expose presets/defaultPreset", () => {
   const config = readFileSync(join(__dirname, "config.yaml"), "utf8");
   assert(/defaultPreset:\s*codeterm/.test(config), "config has defaultPreset");
   assert(/systemPrompt:\s*\|/.test(config), "config seeds block systemPrompt");
+  assert(/charters:/.test(config), "config exposes charters map");
+  assert(/watcher-orchestration:\s*prompts\/watcher-orchestration\.md/.test(config), "config references shipped charter path");
+
+  const watcherCharter = readFileSync(join(__dirname, "prompts", "watcher-orchestration.md"), "utf8").replace(/\s+$/, "");
+  assert(watcherCharter.includes("orchestrator_id"), "watcher charter documents orchestrator_id + panes[] shape");
+  assert(watcherCharter.includes("chatTail"), "watcher charter documents per-pane chatTail objects");
+  assert(watcherCharter.includes("from_pane_id"), "watcher charter documents report field names");
+  assert(watcherCharter.includes("7+ minutes"), "stalled example aligns with ~5+ min threshold");
 
   const prompt = readFileSync(join(__dirname, "prompts", "codeterm-default.md"), "utf8");
   const replyExample = '{"tool":"codeterm","args":{"args":"send \\"Hi, I got your message.\\" --pane 36b00886"}}';
