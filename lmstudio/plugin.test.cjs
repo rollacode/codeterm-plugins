@@ -812,12 +812,13 @@ test("watcherTick round cap still yields exactly one fallback watcher_verdict", 
   const verdicts = contents(p.messages, "watcher_verdict");
   assert(execCalls.length === 8, "watcher exec capped at 8, got " + execCalls.length);
   assert(verdicts.length === 1, "exactly one watcher_verdict at cap");
-  assertJsonEqual(JSON.parse(verdicts[0]), {
+  const fallback = JSON.parse(verdicts[0]);
+  assertJsonEqual(fallback, {
     status: "attention",
     summary: "tool loop ended without a verdict",
-    state: {},
     actions: [],
   }, "cap fallback verdict shape");
+  assert(!("state" in fallback), "fallback omits state so the host keeps the previous blob");
   assert(p.done === true, "watcher session done after cap");
 });
 
