@@ -86,6 +86,8 @@ interface Session {
   machineState: unknown;
   currentRun: "interactive" | "watcher";
   watcherTicks: number;
+  watcherVerdictEmitted: boolean;
+  watcherLastAssistant: string;
   model: string;
   params: Record<string, unknown>;
   previousResponseId: string | null;
@@ -858,7 +860,7 @@ function startLmStudioCall(s: Session, input: string, opts?: { messages?: Engine
     buffer: "",
     responseId: null,
   };
-  s.currentRun = opts?.watcher ? "watcher" : "interactive";
+  s.currentRun = opts?.watcher || s.mode === "watcher" ? "watcher" : "interactive";
   s.done = false;
 }
 
@@ -883,13 +885,24 @@ function finishAssistantMessage(
   messageId: string,
 ): void {
   if (s.currentRun === "watcher") {
-    append(s, "watcher_verdict", content);
-    s.done = true;
+    finishLoopAssistantMessage(s, content, responseId, messageId);
     return;
   }
 
   if (responseId && !(s.engine && s.engine.kind === "machine")) s.previousResponseId = responseId;
+  finishLoopAssistantMessage(s, content, responseId, messageId);
+}
 
+function finishLoopAssistantMessage(
+  s: Session,
+  content: string,
+  responseId: string | null,
+  messageId: string,
+): void {
+  if (s.currentRun === "watcher") {
+    s.watcherLastAssistant = content;
+    if (responseId) s.previousResponseId = responseId;
+  }
   const { entries, cleaned, status, reason } = parseToolEntries(content);
   // A tool-call-shaped block that failed parse+repair: don't drop it silently
   // (the live Gemma bug — the model never learns and the reply never arrives).
@@ -905,17 +918,25 @@ function finishAssistantMessage(
       // Leave s.done false: startNextIfIdle will start the retry continuation.
       return;
     }
-    append(
-      s,
-      "system",
-      `Could not parse a valid tool call after ${MAX_MALFORMED_RETRIES} retries; treating the reply as a normal message.`,
-    );
-    s.done = true;
+    if (s.currentRun === "watcher") {
+      append(s, "system", `Could not parse a valid tool call after ${MAX_MALFORMED_RETRIES} retries; ending this watcher tick.`);
+      completeWatcherTick(s, content);
+    } else {
+      append(
+        s,
+        "system",
+        `Could not parse a valid tool call after ${MAX_MALFORMED_RETRIES} retries; treating the reply as a normal message.`,
+      );
+      s.done = true;
+    }
     return;
   }
   if (!entries.length) {
-    if (s.engine && s.engine.kind === "machine") s.machineState = extractVerdictState(content, s.machineState);
-    s.done = true;
+    if (s.currentRun === "watcher") completeWatcherTick(s, content);
+    else {
+      if (s.engine && s.engine.kind === "machine") s.machineState = extractVerdictState(content, s.machineState);
+      s.done = true;
+    }
     return;
   }
   // Strip the executed tool-call syntax from the displayed assistant bubble so
@@ -935,6 +956,24 @@ function finishAssistantMessage(
   // starts an async job and parks the queue until drainExec sees it finish.
   s.pendingTools = entries.slice();
   advanceTools(s);
+}
+
+function watcherFallbackVerdict(): string {
+  return JSON.stringify({
+    status: "attention",
+    summary: "tool loop ended without a verdict",
+    state: {},
+    actions: [],
+  });
+}
+
+function completeWatcherTick(s: Session, verdict: string | null): void {
+  if (!s.watcherVerdictEmitted) {
+    const text = verdict && verdict.trim() ? verdict : watcherFallbackVerdict();
+    append(s, "watcher_verdict", text);
+    s.watcherVerdictEmitted = true;
+  }
+  s.done = true;
 }
 
 function extractVerdictState(text: string, prior: unknown): unknown {
@@ -968,7 +1007,8 @@ function advanceTools(s: Session): void {
         append(s, "system", `Tool round cap (${MAX_TOOL_ROUNDS}) reached; stopping this turn.`);
         s.capReached = true;
       }
-      s.done = true;
+      if (s.currentRun === "watcher") completeWatcherTick(s, null);
+      else s.done = true;
       return;
     }
     s.toolRounds += 1;
@@ -1119,6 +1159,12 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
     charter = resolved.charter;
     charterError = resolved.error;
   }
+  // A watcher spawned bare (no engine/charter) runs the shipped orchestration
+  // health charter — the out-of-the-box "attach a watcher to my orchestrator".
+  if (mode === "watcher" && !charter && !charterError) {
+    charter = SHIPPED_CHARTERS["watcher-orchestration"] ?? "";
+    if (!charter) charterError = "no charter provided and no shipped default";
+  }
   const effectiveSystemPrompt = mode === "watcher" ? "" : systemPrompt;
   return {
     messages: [],
@@ -1130,6 +1176,8 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
     machineState: {},
     currentRun: "interactive",
     watcherTicks: 0,
+    watcherVerdictEmitted: false,
+    watcherLastAssistant: "",
     model,
     params,
     previousResponseId: null,
@@ -1161,7 +1209,7 @@ const plugin: ChatBackend & {
     const s = resolveSession(ctx);
     if (s.charterError) {
       host.log("error", `openSession failed for ${sid}: ${s.charterError}`);
-      return { error: s.charterError };
+      return { error: s.charterError } as unknown as { sessionId: string };
     }
     if (s.mode === "watcher") {
       if (s.charter) append(s, "user", markSystemPrompt(s.charter), "system-prompt");
@@ -1201,6 +1249,17 @@ const plugin: ChatBackend & {
     const messages = assembleMachine(s.charter, tickInput.state, tickInput);
     s.watcherTicks += 1;
     append(s, "context_request", JSON.stringify(messages));
+    s.currentRun = "watcher";
+    s.previousResponseId = null;
+    s.pendingInputs = [];
+    s.pendingTools = null;
+    s.pendingExec = null;
+    s.stream = null;
+    s.toolRounds = 0;
+    s.capReached = false;
+    s.malformedRetries = 0;
+    s.watcherVerdictEmitted = false;
+    s.watcherLastAssistant = "";
     s.done = false;
     s.pendingInputs.push(JSON.stringify({ watcherMessages: messages }));
     startNextIfIdle(s);

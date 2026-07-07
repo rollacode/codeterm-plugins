@@ -740,7 +740,7 @@ test("watcherTick emits context_request and watcher_verdict transcript messages"
   assert(verdicts[0] === '{"status":"attention","summary":"check","state":{},"actions":[]}', "verdict is final text verbatim");
 });
 
-test("watcher mode ignores codeterm-tool blocks instead of entering the tool loop", () => {
+test("watcherTick executes a tool block and uses the next clean round as watcher_verdict", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
     paneId: "watch-tool",
@@ -749,14 +749,102 @@ test("watcher mode ignores codeterm-tool blocks instead of entering the tool loo
     engine: { kind: "machine", charter: "WATCH" },
   });
   plugin.watcherTick("watch-tool", { tick: 1, nowMs: 1, state: {}, observations: {} });
-  const tool = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo should-not-run"}}\n```';
+  const tool = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo watcher"}}\n```';
   enqueueStream(0, [{ chunks: [turn(tool, "resp-tool-watch")], done: true, status: 200 }]);
-  const p = pumpUntilDone("watch-tool");
+  plugin.pump("watch-tool");
 
-  assert(execCalls.length === 0, "watcher did not execute tool call");
-  assert(toolParseCalls.length === 0, "watcher did not parse tool call");
-  assert(streamCalls.length === 1, "watcher did not start a tool continuation");
-  assert(contents(p.messages, "watcher_verdict")[0] === tool, "raw tool block is captured as verdict text");
+  assert(execCalls.length === 1, "watcher executed the tool call");
+  assert(toolParseCalls.length >= 1, "watcher parsed the tool call");
+  assert(streamCalls.length === 2, "watcher started a tool continuation");
+  const continuation = JSON.parse(streamCalls[1].body);
+  assert(continuation.previous_response_id === "resp-tool-watch", "watcher chains previous_response_id within the tick");
+  assert(/tool_result/.test(continuation.input), "watcher continuation receives the tool result");
+
+  enqueueStream(1, [{ chunks: [turn('{"status":"ok","summary":"checked via tool","state":{},"actions":[]}', "resp-watch-final")], done: true, status: 200 }]);
+  const p = pumpUntilDone("watch-tool");
+  const verdicts = contents(p.messages, "watcher_verdict");
+  assert(verdicts.length === 1, "one watcher_verdict emitted");
+  assert(verdicts[0] === '{"status":"ok","summary":"checked via tool","state":{},"actions":[]}', "clean continuation text becomes verdict");
+});
+
+test("watcherTick emits tool_call and tool_result before the watcher_verdict", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({
+    paneId: "watch-transcript-tools",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "WATCH" },
+  });
+  plugin.watcherTick("watch-transcript-tools", { tick: 1, nowMs: 1, state: {}, observations: {} });
+  const tool = 'Investigating.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo watcher"}}\n```';
+  enqueueStream(0, [{ chunks: [turn(tool, "resp-tool-watch-order")], done: true, status: 200 }]);
+  plugin.pump("watch-transcript-tools");
+  enqueueStream(1, [{ chunks: [turn('{"status":"ok","summary":"done","state":{},"actions":[]}', "resp-watch-order-final")], done: true, status: 200 }]);
+  const p = pumpUntilDone("watch-transcript-tools");
+
+  const types = p.messages.map((m) => m.type);
+  const callIdx = types.indexOf("tool_call");
+  const resultIdx = types.indexOf("tool_result");
+  const verdictIdx = types.indexOf("watcher_verdict");
+  assert(callIdx >= 0, "tool_call emitted");
+  assert(resultIdx >= 0, "tool_result emitted");
+  assert(verdictIdx >= 0, "watcher_verdict emitted");
+  assert(callIdx < verdictIdx, "tool_call appears before verdict");
+  assert(resultIdx < verdictIdx, "tool_result appears before verdict");
+});
+
+test("watcherTick round cap still yields exactly one fallback watcher_verdict", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({
+    paneId: "watch-cap",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "WATCH" },
+  });
+  plugin.watcherTick("watch-cap", { tick: 1, nowMs: 1, state: {}, observations: {} });
+  const fence = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo loop"}}\n```';
+  for (let i = 0; i < 9; i += 1) {
+    enqueueStream(i, [{ chunks: [turn(fence, `resp-watch-cap-${i}`)], done: true, status: 200 }]);
+    plugin.pump("watch-cap");
+  }
+
+  const p = plugin.poll("watch-cap", null);
+  const verdicts = contents(p.messages, "watcher_verdict");
+  assert(execCalls.length === 8, "watcher exec capped at 8, got " + execCalls.length);
+  assert(verdicts.length === 1, "exactly one watcher_verdict at cap");
+  assertJsonEqual(JSON.parse(verdicts[0]), {
+    status: "attention",
+    summary: "tool loop ended without a verdict",
+    state: {},
+    actions: [],
+  }, "cap fallback verdict shape");
+  assert(p.done === true, "watcher session done after cap");
+});
+
+test("watcherTick after a tool loop starts from assembleMachine only", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
+  plugin.openSession({
+    paneId: "watch-tool-isolation",
+    config: {},
+    mode: "watcher",
+    engine: { kind: "machine", charter: "WATCH" },
+  });
+  const tick1 = { tick: 1, nowMs: 1, state: { n: 1 }, observations: { a: 1 } };
+  plugin.watcherTick("watch-tool-isolation", tick1);
+  const tool = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo watcher"}}\n```';
+  enqueueStream(0, [{ chunks: [turn(tool, "resp-watch-iso-tool")], done: true, status: 200 }]);
+  plugin.pump("watch-tool-isolation");
+  enqueueStream(1, [{ chunks: [turn('{"status":"ok","summary":"tool done","state":{"n":2},"actions":[]}', "resp-watch-iso-final")], done: true, status: 200 }]);
+  pumpUntilDone("watch-tool-isolation");
+
+  const tick2 = { tick: 2, nowMs: 2, state: { n: 2 }, observations: { a: 2 } };
+  plugin.watcherTick("watch-tool-isolation", tick2);
+  assert(streamCalls.length === 3, "second tick starts one fresh stream after first tick's tool continuation");
+  const body = JSON.parse(streamCalls[2].body);
+  assert(!Object.prototype.hasOwnProperty.call(body, "previous_response_id"), "second tick does not inherit previous_response_id");
+  assert(body.input === renderEngineMessages(expectedMachineMessages("WATCH", tick2.state, tick2)), "second tick input is exactly assembleMachine output");
+  assert(!body.input.includes("tool_result"), "second tick excludes tick-1 tool result");
+  assert(!body.input.includes("tool done"), "second tick excludes tick-1 verdict");
 });
 
 test("sendMessage is a no-op on watcher sessions", () => {
