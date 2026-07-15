@@ -67,7 +67,17 @@ function computeBubble(cwd) {
   const directBranch = branchOf(cwd);
   const repos = directBranch ? [] : gitRepos(cwd);
   const selectedPath = selectedRepoByCwd[cwd];
-  const selected = repos.find((repo) => repo.path === selectedPath) || repos[0];
+  let selected = repos.find((repo) => repo.path === selectedPath);
+  if (!selected && selectedPath) {
+    for (const repo of repos) {
+      const worktree = gitWorktrees(repo.path).find((candidate) => candidate.path === selectedPath);
+      if (worktree) {
+        selected = { path: worktree.path, name: baseName(worktree.path), branch: worktree.branch };
+        break;
+      }
+    }
+  }
+  selected || (selected = repos[0]);
   const repoCwd = selected?.path || cwd;
   const branch = directBranch || selected?.branch;
   if (!branch) return null;
@@ -417,9 +427,33 @@ function gitRepos(cwd) {
   }
   return out;
 }
+function parseWorktrees(out) {
+  return (out || "").trim().split(/\r?\n\r?\n/).map((record) => {
+    const fields = {};
+    for (const line of record.split(/\r?\n/)) {
+      const split = line.indexOf(" ");
+      fields[split === -1 ? line : line.slice(0, split)] = split === -1 ? "" : line.slice(split + 1);
+    }
+    if (!fields.worktree) return null;
+    return {
+      path: fields.worktree,
+      head: fields.HEAD || null,
+      branch: fields.branch?.replace(/^refs\/heads\//, "") || null,
+      bare: "bare" in fields,
+      detached: "detached" in fields,
+      locked: "locked" in fields ? fields.locked || "locked" : null,
+      prunable: "prunable" in fields ? fields.prunable || "prunable" : null
+    };
+  }).filter((worktree) => worktree !== null);
+}
+function gitWorktrees(cwd) {
+  const result = git(cwd, ["worktree", "list", "--porcelain"]);
+  return ok(result) ? parseWorktrees(result.stdout) : [];
+}
 function selectRepo(cwd, path) {
   const repos = gitRepos(cwd);
-  if (!repos.some((repo) => repo.path === path)) return { error: "repository is outside this workspace" };
+  const allowed = repos.some((repo) => repo.path === path) || repos.some((repo) => gitWorktrees(repo.path).some((worktree) => worktree.path === path));
+  if (!allowed) return { error: "repository is outside this workspace" };
   selectedRepoByCwd[cwd] = path;
   delete bubbleCache[cwd];
   return { selected: true };
@@ -492,6 +526,8 @@ function viewCall(method, args) {
         return gitRevert(opCwd, args.path);
       case "gitRepos":
         return gitRepos(cwd);
+      case "gitWorktrees":
+        return gitWorktrees(cwd);
       case "gitSelectRepo":
         return selectRepo(cwd, args.path);
       default:
@@ -516,6 +552,7 @@ var plugin = {
   __test_parseNumstatCounts: parseNumstatCounts,
   __test_mergeWorkdirFiles: mergeWorkdirFiles,
   __test_classifyPorcelain: classifyPorcelain,
-  __test_pathWithinRepo: pathWithinRepo
+  __test_pathWithinRepo: pathWithinRepo,
+  __test_parseWorktrees: parseWorktrees
 };
 var plugin_default = plugin;

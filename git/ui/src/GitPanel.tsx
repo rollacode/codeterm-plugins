@@ -5,12 +5,14 @@ import type { ApiConfig } from "./types";
 import {
   fetchGraph,
   fetchRepos,
+  fetchWorktrees,
   selectRepo,
   NotARepoError,
   WORKDIR_SHA,
   type GitCommit,
   type GitGraphResponse,
   type RepoEntry,
+  type WorktreeEntry,
 } from "./gitApi";
 import { GraphView } from "./GraphView";
 import {
@@ -48,6 +50,7 @@ export function GitPanel({ api, cwd, initialRepos = EMPTY_REPOS, onClose }: GitP
   const narrow = mode === "narrow";
 
   const [repos, setRepos] = useState<RepoEntry[]>([]);
+  const [worktrees, setWorktrees] = useState<WorktreeEntry[]>([]);
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
 
   const [graph, setGraph] = useState<GitGraphResponse | null>(null);
@@ -102,6 +105,24 @@ export function GitPanel({ api, cwd, initialRepos = EMPTY_REPOS, onClose }: GitP
     },
     [api],
   );
+
+  useEffect(() => {
+    if (!activeCwd) {
+      setWorktrees([]);
+      return;
+    }
+    let active = true;
+    fetchWorktrees(api, activeCwd)
+      .then((items) => {
+        if (active) setWorktrees(items);
+      })
+      .catch(() => {
+        if (active) setWorktrees([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeCwd, api]);
 
   const load = useCallback(
     async (signal?: AbortSignal) => {
@@ -269,10 +290,10 @@ export function GitPanel({ api, cwd, initialRepos = EMPTY_REPOS, onClose }: GitP
         ) : (
           <strong className="shrink-0">Git</strong>
         )}
-        {repos.length > 1 && (
-          <RepoSwitcher repos={repos} activePath={activeCwd ?? ""} onSelect={chooseRepo} />
+        {(repos.length > 1 || worktrees.length > 1) && (
+          <RepoSwitcher repos={repos} worktrees={worktrees} activePath={activeCwd ?? ""} onSelect={chooseRepo} />
         )}
-        {graph?.branch && repos.length <= 1 && (
+        {graph?.branch && repos.length <= 1 && worktrees.length <= 1 && (
           <span className="text-[11px] text-[var(--ct-green)] shrink-0">{graph.branch}</span>
         )}
         {graph?.dirty && (

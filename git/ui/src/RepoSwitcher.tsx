@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDown } from "lucide-react";
-import type { RepoEntry } from "./gitApi";
+import type { RepoEntry, WorktreeEntry } from "./gitApi";
 
 interface RepoSwitcherProps {
   repos: RepoEntry[];
+  worktrees: WorktreeEntry[];
   activePath: string;
   onSelect: (path: string) => void;
 }
@@ -18,12 +19,14 @@ interface MenuPos {
 
 // Compact repo dropdown (name + dimmed branch) shown when cwd holds >1 repo.
 // Menu renders through a portal so the toolbar's overflow-x:auto can't clip it.
-export function RepoSwitcher({ repos, activePath, onSelect }: RepoSwitcherProps) {
+export function RepoSwitcher({ repos, worktrees, activePath, onSelect }: RepoSwitcherProps) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<MenuPos | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const active = repos.find((r) => r.path === activePath) ?? repos[0];
+  const activeRepo = repos.find((repo) => repo.path === activePath);
+  const activeWorktree = worktrees.find((worktree) => worktree.path === activePath);
+  const active = activeRepo ?? activeWorktree ?? repos[0] ?? worktrees[0];
 
   const place = useCallback(() => {
     const el = triggerRef.current;
@@ -66,6 +69,8 @@ export function RepoSwitcher({ repos, activePath, onSelect }: RepoSwitcherProps)
     };
   }, [open]);
 
+  if (!active) return null;
+
   return (
     <div className="ct-git-repos shrink-0">
       <button
@@ -75,8 +80,9 @@ export function RepoSwitcher({ repos, activePath, onSelect }: RepoSwitcherProps)
         onClick={() => setOpen((v) => !v)}
         title="Switch repository"
       >
-        <span className="name">{active.name}</span>
+        <span className="name">{"name" in active ? active.name : baseName(active.path)}</span>
         {active.branch && <span className="branch">{active.branch}</span>}
+        {worktrees.length > 1 && <span className="count">{worktrees.length} worktrees</span>}
         <ChevronDown size={12} className="opacity-60" />
       </button>
       {open &&
@@ -87,11 +93,12 @@ export function RepoSwitcher({ repos, activePath, onSelect }: RepoSwitcherProps)
             className="ct-git-repos-menu"
             style={{ top: pos.top, left: pos.left, minWidth: pos.minWidth, maxWidth: pos.maxWidth }}
           >
-            {repos.map((r) => (
+            {repos.length > 1 && <div className="ct-git-repos-section">Repositories</div>}
+            {repos.length > 1 && repos.map((r) => (
               <button
                 key={r.path}
                 type="button"
-                className={`ct-git-repos-item${r.path === active.path ? " is-active" : ""}`}
+                className={`ct-git-repos-item${r.path === activePath ? " is-active" : ""}`}
                 onClick={() => {
                   setOpen(false);
                   if (r.path !== activePath) onSelect(r.path);
@@ -101,9 +108,33 @@ export function RepoSwitcher({ repos, activePath, onSelect }: RepoSwitcherProps)
                 {r.branch && <span className="branch">{r.branch}</span>}
               </button>
             ))}
+            {worktrees.length > 0 && <div className="ct-git-repos-section">Worktrees</div>}
+            {worktrees.map((worktree) => (
+              <button
+                key={worktree.path}
+                type="button"
+                className={`ct-git-repos-item ct-git-worktree-item${worktree.path === activePath ? " is-active" : ""}`}
+                onClick={() => {
+                  setOpen(false);
+                  if (worktree.path !== activePath) onSelect(worktree.path);
+                }}
+              >
+                <span className="ct-git-worktree-main">
+                  <span className="name">{baseName(worktree.path)}</span>
+                  <span className="branch">{worktree.branch ?? (worktree.detached ? "detached" : "bare")}</span>
+                  {worktree.locked && <span className="state">locked</span>}
+                  {worktree.prunable && <span className="state warn">prunable</span>}
+                </span>
+                <span className="path">{worktree.path}</span>
+              </button>
+            ))}
           </div>,
           document.body,
         )}
     </div>
   );
+}
+
+function baseName(path: string): string {
+  return path.replace(/[\\/]$/, "").split(/[\\/]/).pop() || path;
 }

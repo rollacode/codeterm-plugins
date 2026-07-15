@@ -541,11 +541,12 @@ body {
 .ct-git-repos-item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; }
 .ct-git-repos-trigger .branch,
 .ct-git-repos-item .branch { font-size: 10.5px; color: var(--ct-muted-fg, #8b949e); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100px; }
+.ct-git-repos-trigger .count { font-size: 9px; color: var(--ct-cyan, #67e8f9); white-space: nowrap; }
 .ct-git-repos-menu {
   position: fixed;
   z-index: 120;
   min-width: 200px;
-  max-height: 320px;
+  max-height: min(420px, calc(100vh - 16px));
   overflow: auto;
   padding: 4px;
   border-radius: 8px;
@@ -553,6 +554,14 @@ body {
   background: color-mix(in srgb, var(--ct-titlebar-bg, #161b22) 92%, transparent);
   backdrop-filter: blur(12px) saturate(140%);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+.ct-git-repos-section {
+  padding: 6px 9px 4px;
+  color: var(--ct-muted-fg, #8b949e);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 .ct-git-repos-item {
   display: flex;
@@ -570,6 +579,11 @@ body {
 }
 .ct-git-repos-item:hover { background: color-mix(in srgb, var(--ct-fg, #c9d1d9) 6%, transparent); }
 .ct-git-repos-item.is-active { background: color-mix(in srgb, var(--ct-accent, #6366f1) 16%, transparent); }
+.ct-git-worktree-item { align-items: stretch; flex-direction: column; gap: 2px; }
+.ct-git-worktree-main { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.ct-git-worktree-item .path { color: var(--ct-muted-fg, #8b949e); font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-git-worktree-item .state { color: var(--ct-yellow, #fbbf24); font-size: 9px; }
+.ct-git-worktree-item .state.warn { color: var(--ct-red, #f87171); }
 
 .ct-git-delta {
   display: inline-flex;

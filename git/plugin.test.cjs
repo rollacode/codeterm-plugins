@@ -138,6 +138,29 @@ test("multi-repo bubble summarizes and follows the selected repository", () => {
   assert(second.label === "feature/b +1", `selected repo branch, got ${second.label}`);
 });
 
+test("parseWorktrees preserves paths, branches, and exceptional states", () => {
+  const parsed = plugin.__test_parseWorktrees([
+    "worktree D:/Developer/repo",
+    "HEAD 1111111",
+    "branch refs/heads/main",
+    "",
+    "worktree D:/Developer/repo-review",
+    "HEAD 2222222",
+    "detached",
+    "locked review in progress",
+    "",
+    "worktree D:/Developer/repo-old",
+    "HEAD 3333333",
+    "branch refs/heads/old",
+    "prunable gitdir file points to non-existent location",
+    "",
+  ].join("\n"));
+  assert(parsed.length === 3, `three worktrees, got ${parsed.length}`);
+  assert(parsed[0].branch === "main" && parsed[0].detached === false, "normal branch parsed");
+  assert(parsed[1].detached === true && parsed[1].locked === "review in progress", "detached lock parsed");
+  assert(parsed[2].prunable.includes("non-existent"), "prunable reason retained");
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try { fn(); console.log(`✓ ${name}`); }

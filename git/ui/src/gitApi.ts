@@ -115,8 +115,22 @@ export async function fetchRepos(_api: unknown, cwd: string, _signal?: AbortSign
   }
 }
 
+export interface WorktreeEntry {
+  path: string;
+  head: string | null;
+  branch: string | null;
+  bare: boolean;
+  detached: boolean;
+  locked: string | null;
+  prunable: string | null;
+}
+
 export async function selectRepo(_api: unknown, path: string): Promise<void> {
   await call("gitSelectRepo", "", { path });
+}
+
+export async function fetchWorktrees(_api: unknown, cwd: string): Promise<WorktreeEntry[]> {
+  return call<WorktreeEntry[]>("gitWorktrees", cwd, {});
 }
 
 export async function fetchWorkdirFiles(
