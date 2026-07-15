@@ -316,8 +316,7 @@ const COLLAPSED_REF_LIMIT = 5;
 
 function RefList({ refs }: { refs: GitRef[] }) {
   const [expanded, setExpanded] = useState(false);
-  const visible = expanded ? refs : refs.slice(0, COLLAPSED_REF_LIMIT);
-  const hidden = refs.length - visible.length;
+  const { visible, hidden } = partitionRefs(refs, expanded);
   return (
     <>
       {visible.map((ref) => (
@@ -339,6 +338,11 @@ function RefList({ refs }: { refs: GitRef[] }) {
       )}
     </>
   );
+}
+
+export function partitionRefs(refs: GitRef[], expanded: boolean): { visible: GitRef[]; hidden: number } {
+  const visible = expanded ? refs : refs.slice(0, COLLAPSED_REF_LIMIT);
+  return { visible, hidden: refs.length - visible.length };
 }
 
 function relativeDate(iso: string): string {
