@@ -99,11 +99,12 @@ test("pathWithinRepo accepts repo-relative paths, rejects escapes", () => {
 
 // ── manifest (Track S) ──
 
-test("plugin.json carries a non-empty configHelp", () => {
+test("plugin.json does not advertise AI configuration without settings", () => {
   const { readFileSync } = require("node:fs");
   const { join } = require("node:path");
   const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
-  assert(typeof manifest.configHelp === "string" && manifest.configHelp.trim().length > 0, "configHelp is a non-empty string");
+  assert(manifest.settingsSchema == null, "Git should remain zero-configuration");
+  assert(manifest.configHelp == null, "Git should not expose Configure with AI");
 });
 
 let failed = 0;

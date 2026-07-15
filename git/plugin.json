@@ -1,6 +1,6 @@
 {
   "id": "git",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minCodeterm": "1.0.0",
   "hostApi": 2,
   "displayName": "Git",
@@ -18,6 +18,5 @@
       "allow": ["git"]
     }
   },
-  "configHelp": "Git shows live branch and working-tree status in each pane's footer (a status bubble), a glance popover with the same at-a-glance state, and a full Git view (status, log, graph, diffs). It reads whatever repository the pane's working directory belongs to using the local `git` binary — there is nothing to point it at. This plugin has NO configurable settings: it has no knobs and `codeterm plugin config git` exposes nothing to set. To use it, just open a pane inside a git repo and check the footer bubble or open the Git view.",
   "iconSvg": "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"6\" cy=\"6\" r=\"2.5\"/><circle cx=\"6\" cy=\"18\" r=\"2.5\"/><circle cx=\"18\" cy=\"8\" r=\"2.5\"/><path d=\"M6 8.5v7\"/><path d=\"M18 10.5c0 4-5 3-5 7\"/><path d=\"M13 17.5h-.01\"/></svg>"
 }
