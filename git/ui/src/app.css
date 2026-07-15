@@ -363,6 +363,19 @@ body {
 .ct-git-chip.kind-remote { background: color-mix(in srgb, var(--ct-blue, #6ea8fe) 14%, transparent); color: var(--ct-blue, #6ea8fe); border-color: color-mix(in srgb, var(--ct-blue, #6ea8fe) 36%, transparent); }
 .ct-git-chip.kind-tag { background: color-mix(in srgb, var(--ct-yellow, #fbbf24) 16%, transparent); color: var(--ct-yellow, #fbbf24); border-color: color-mix(in srgb, var(--ct-yellow, #fbbf24) 40%, transparent); }
 .ct-git-chip.kind-head { background: color-mix(in srgb, var(--ct-accent, #6366f1) 20%, transparent); color: var(--ct-fg, #c9d1d9); border-color: color-mix(in srgb, var(--ct-accent, #6366f1) 55%, transparent); }
+.ct-git-ref-overflow {
+  flex: 0 0 auto;
+  min-width: 26px;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--ct-border, #30363d);
+  border-radius: 6px;
+  background: var(--ct-hover, transparent);
+  color: var(--ct-muted-fg, #8b949e);
+  font-size: 10px;
+  cursor: pointer;
+}
+.ct-git-ref-overflow:hover { color: var(--ct-fg, #c9d1d9); border-color: var(--ct-accent, #6366f1); }
 
 .ct-git-diff,
 .ct-git-diff * { user-select: text; }

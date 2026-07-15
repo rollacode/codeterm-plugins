@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { type GitCommit, type GitRef, WORKDIR_SHA } from "./gitApi";
 import { assignLanes, laneColorVar, type GraphRow } from "./laneGraph";
 
@@ -228,9 +228,7 @@ function GraphRowView({
         />
       </svg>
       <div className="ct-git-meta">
-        {commit.refs.map((ref) => (
-          <RefChip key={`${ref.kind}-${ref.name}`} refItem={ref} />
-        ))}
+        <RefList refs={commit.refs} />
         <span className="ct-git-subject">{commit.subject}</span>
         <span className="ct-git-author">{commit.author}</span>
         <span className="ct-git-sha">{commit.sha.slice(0, 7)}</span>
@@ -293,9 +291,7 @@ function WorkdirRow({
         />
       </svg>
       <div className="ct-git-meta">
-        {refs.map((ref) => (
-          <RefChip key={`${ref.kind}-${ref.name}`} refItem={ref} />
-        ))}
+        <RefList refs={refs} />
         <span className="ct-git-subject ct-git-workdir-label">
           {dirty ? "Uncommitted changes" : "Working tree clean"}
         </span>
@@ -314,6 +310,35 @@ function workdirRefs(branch: string | null | undefined, headRefs: GitRef[]): Git
 function RefChip({ refItem }: { refItem: GitRef }) {
   const label = refItem.kind === "head" ? "HEAD" : refItem.name;
   return <span className={`ct-git-chip kind-${refItem.kind}`}>{label}</span>;
+}
+
+const COLLAPSED_REF_LIMIT = 5;
+
+function RefList({ refs }: { refs: GitRef[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? refs : refs.slice(0, COLLAPSED_REF_LIMIT);
+  const hidden = refs.length - visible.length;
+  return (
+    <>
+      {visible.map((ref) => (
+        <RefChip key={`${ref.kind}-${ref.name}`} refItem={ref} />
+      ))}
+      {refs.length > COLLAPSED_REF_LIMIT && (
+        <button
+          type="button"
+          className="ct-git-ref-overflow"
+          aria-expanded={expanded}
+          title={expanded ? "Collapse references" : `Show ${hidden} more references`}
+          onClick={(event) => {
+            event.stopPropagation();
+            setExpanded((value) => !value);
+          }}
+        >
+          {expanded ? "−" : `+${hidden}`}
+        </button>
+      )}
+    </>
+  );
 }
 
 function relativeDate(iso: string): string {

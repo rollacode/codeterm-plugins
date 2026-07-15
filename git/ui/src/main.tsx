@@ -11,6 +11,7 @@ import "./app.css";
 
 function Root() {
   const [cwd, setCwd] = useState<string | null>(null);
+  const [repos, setRepos] = useState<Awaited<ReturnType<typeof fetchRepos>>>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -18,6 +19,7 @@ function Root() {
     fetchRepos(null, "")
       .then((repos) => {
         if (!active) return;
+        setRepos(repos);
         setCwd(repos.length > 0 ? repos[0].path : "");
       })
       .catch((e) => {
@@ -42,7 +44,7 @@ function Root() {
       </div>
     );
   }
-  return <GitPanel api={null} cwd={cwd} onClose={() => window.ct?.close?.()} />;
+  return <GitPanel api={null} cwd={cwd} initialRepos={repos} onClose={() => window.ct?.close?.()} />;
 }
 
 const el = document.getElementById("ct-root");

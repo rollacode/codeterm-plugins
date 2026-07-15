@@ -13,6 +13,7 @@ interface MenuPos {
   top: number;
   left: number;
   minWidth: number;
+  maxWidth: number;
 }
 
 // Compact repo dropdown (name + dimmed branch) shown when cwd holds >1 repo.
@@ -28,7 +29,11 @@ export function RepoSwitcher({ repos, activePath, onSelect }: RepoSwitcherProps)
     const el = triggerRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    setPos({ top: rect.bottom + 4, left: rect.left, minWidth: rect.width });
+    const margin = 8;
+    const maxWidth = Math.max(180, window.innerWidth - margin * 2);
+    const width = Math.min(Math.max(rect.width, 240), maxWidth);
+    const left = Math.min(Math.max(margin, rect.left), window.innerWidth - width - margin);
+    setPos({ top: rect.bottom + 4, left, minWidth: Math.min(rect.width, width), maxWidth: width });
   }, []);
 
   useLayoutEffect(() => {
@@ -80,7 +85,7 @@ export function RepoSwitcher({ repos, activePath, onSelect }: RepoSwitcherProps)
           <div
             ref={menuRef}
             className="ct-git-repos-menu"
-            style={{ top: pos.top, left: pos.left, minWidth: pos.minWidth }}
+            style={{ top: pos.top, left: pos.left, minWidth: pos.minWidth, maxWidth: pos.maxWidth }}
           >
             {repos.map((r) => (
               <button

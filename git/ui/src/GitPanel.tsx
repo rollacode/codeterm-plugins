@@ -5,6 +5,7 @@ import type { ApiConfig } from "./types";
 import {
   fetchGraph,
   fetchRepos,
+  selectRepo,
   NotARepoError,
   WORKDIR_SHA,
   type GitCommit,
@@ -30,6 +31,7 @@ import { UI_BUTTON, UI_PANEL, UI_TEXT } from "./design";
 
 const PAGE = 300;
 const AUTO_REFRESH_MS = 10_000;
+const EMPTY_REPOS: RepoEntry[] = [];
 
 // Narrow drill-down levels: 1 commits → 2 files → 3 diff (DiffModal fullscreen).
 type NarrowLevel = 1 | 2 | 3;
@@ -37,10 +39,11 @@ type NarrowLevel = 1 | 2 | 3;
 interface GitPanelProps {
   api: ApiConfig;
   cwd: string | null;
+  initialRepos?: RepoEntry[];
   onClose: () => void;
 }
 
-export function GitPanel({ api, cwd, onClose }: GitPanelProps) {
+export function GitPanel({ api, cwd, initialRepos = EMPTY_REPOS, onClose }: GitPanelProps) {
   const { ref: rootRef, mode } = useGitLayout();
   const narrow = mode === "narrow";
 
@@ -68,6 +71,11 @@ export function GitPanel({ api, cwd, onClose }: GitPanelProps) {
       setRepos([]);
       return;
     }
+    if (initialRepos.length > 0) {
+      setRepos(initialRepos);
+      setActiveCwd(initialRepos.some((repo) => repo.path === cwd) ? cwd : initialRepos[0].path);
+      return;
+    }
     let active = true;
     const ctrl = new AbortController();
     fetchRepos(api, cwd, ctrl.signal)
@@ -85,7 +93,15 @@ export function GitPanel({ api, cwd, onClose }: GitPanelProps) {
       active = false;
       ctrl.abort();
     };
-  }, [api, cwd]);
+  }, [api, cwd, initialRepos]);
+
+  const chooseRepo = useCallback(
+    (path: string) => {
+      setActiveCwd(path);
+      void selectRepo(api, path);
+    },
+    [api],
+  );
 
   const load = useCallback(
     async (signal?: AbortSignal) => {
@@ -254,7 +270,7 @@ export function GitPanel({ api, cwd, onClose }: GitPanelProps) {
           <strong className="shrink-0">Git</strong>
         )}
         {repos.length > 1 && (
-          <RepoSwitcher repos={repos} activePath={activeCwd ?? ""} onSelect={setActiveCwd} />
+          <RepoSwitcher repos={repos} activePath={activeCwd ?? ""} onSelect={chooseRepo} />
         )}
         {graph?.branch && repos.length <= 1 && (
           <span className="text-[11px] text-[var(--ct-green)] shrink-0">{graph.branch}</span>

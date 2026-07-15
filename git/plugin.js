@@ -62,15 +62,23 @@ function branchOf(cwd) {
 var BUBBLE_TTL_MS = 4e3;
 var BUBBLE_CACHE_MAX = 64;
 var bubbleCache = {};
+var selectedRepoByCwd = {};
 function computeBubble(cwd) {
-  const branch = branchOf(cwd);
+  const directBranch = branchOf(cwd);
+  const repos = directBranch ? [] : gitRepos(cwd);
+  const selectedPath = selectedRepoByCwd[cwd];
+  const selected = repos.find((repo) => repo.path === selectedPath) || repos[0];
+  const repoCwd = selected?.path || cwd;
+  const branch = directBranch || selected?.branch;
   if (!branch) return null;
-  const d = parsePorcelain(git(cwd, ["status", "--porcelain"]).stdout);
+  const d = parsePorcelain(git(repoCwd, ["status", "--porcelain"]).stdout);
+  const extra = repos.length > 1 ? ` +${repos.length - 1}` : "";
+  const repoLabel = selected ? `${selected.name} \xB7 ` : "";
   return {
-    label: branch,
+    label: `${branch}${extra}`,
     tone: "default",
     icon: "git",
-    tooltip: d.total ? `${d.total} changed \u2014 open Git` : "clean \u2014 open Git",
+    tooltip: d.total ? `${repoLabel}${d.total} changed \u2014 open Git` : `${repoLabel}clean \u2014 open Git`,
     // Click opens the plugin's own Git view (its sandboxed iframe UI).
     action: "openPanel:view:git"
   };
@@ -409,6 +417,13 @@ function gitRepos(cwd) {
   }
   return out;
 }
+function selectRepo(cwd, path) {
+  const repos = gitRepos(cwd);
+  if (!repos.some((repo) => repo.path === path)) return { error: "repository is outside this workspace" };
+  selectedRepoByCwd[cwd] = path;
+  delete bubbleCache[cwd];
+  return { selected: true };
+}
 var MUTATING = {
   gitStage: true,
   gitUnstage: true,
@@ -477,6 +492,8 @@ function viewCall(method, args) {
         return gitRevert(opCwd, args.path);
       case "gitRepos":
         return gitRepos(cwd);
+      case "gitSelectRepo":
+        return selectRepo(cwd, args.path);
       default:
         return { error: `unknown method: ${method}` };
     }

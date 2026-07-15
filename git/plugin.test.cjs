@@ -107,6 +107,37 @@ test("plugin.json does not advertise AI configuration without settings", () => {
   assert(manifest.configHelp == null, "Git should not expose Configure with AI");
 });
 
+test("multi-repo bubble summarizes and follows the selected repository", () => {
+  const parent = "C:/workspace";
+  globalThis.host = {
+    unixNowMs: () => 10000,
+    platform: () => "windows",
+    fileExists: (path) => /repo-[ab]\/\.git$/.test(path.replace(/\\/g, "/")),
+    exec: (raw) => {
+      const opts = JSON.parse(raw);
+      if (opts.bin === "cmd") return JSON.stringify({ code: 0, stdout: "repo-a\r\nrepo-b\r\n", stderr: "" });
+      const cwd = opts.args[1];
+      const args = opts.args.slice(2);
+      if (args[0] === "rev-parse" && args[1] === "--show-toplevel") {
+        return JSON.stringify({ code: 1, stdout: "", stderr: "not a repository" });
+      }
+      if (args[0] === "rev-parse") {
+        if (cwd === parent) return JSON.stringify({ code: 1, stdout: "", stderr: "not a repository" });
+        const branch = cwd.endsWith("repo-b") ? "feature/b" : "main";
+        return JSON.stringify({ code: 0, stdout: `${branch}\n`, stderr: "" });
+      }
+      if (args[0] === "status") return JSON.stringify({ code: 0, stdout: "", stderr: "" });
+      throw new Error(`unexpected git call: ${cwd} ${args.join(" ")}`);
+    },
+  };
+  const first = plugin.statusBubble({ cwd: parent });
+  assert(first.label === "main +1", `first repo plus count, got ${first.label}`);
+  const selected = plugin.viewCall("gitSelectRepo", { cwd: parent, path: `${parent}/repo-b` });
+  assert(selected.selected === true, "selection accepted");
+  const second = plugin.statusBubble({ cwd: parent });
+  assert(second.label === "feature/b +1", `selected repo branch, got ${second.label}`);
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try { fn(); console.log(`✓ ${name}`); }

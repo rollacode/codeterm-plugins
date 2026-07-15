@@ -115,6 +115,10 @@ export async function fetchRepos(_api: unknown, cwd: string, _signal?: AbortSign
   }
 }
 
+export async function selectRepo(_api: unknown, path: string): Promise<void> {
+  await call("gitSelectRepo", "", { path });
+}
+
 export async function fetchWorkdirFiles(
   _api: unknown,
   cwd: string,

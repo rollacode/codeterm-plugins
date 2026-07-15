@@ -77,16 +77,24 @@ function branchOf(cwd: string): string | null {
 const BUBBLE_TTL_MS = 4000;
 const BUBBLE_CACHE_MAX = 64;
 const bubbleCache: Record<string, { bubble: StatusBubble | null; ts: number }> = {};
+const selectedRepoByCwd: Record<string, string> = {};
 
 function computeBubble(cwd: string): StatusBubble | null {
-  const branch = branchOf(cwd);
-  if (!branch) return null; // not a repo → no pill
-  const d = parsePorcelain(git(cwd, ["status", "--porcelain"]).stdout);
+  const directBranch = branchOf(cwd);
+  const repos = directBranch ? [] : gitRepos(cwd);
+  const selectedPath = selectedRepoByCwd[cwd];
+  const selected = repos.find((repo) => repo.path === selectedPath) || repos[0];
+  const repoCwd = selected?.path || cwd;
+  const branch = directBranch || selected?.branch;
+  if (!branch) return null;
+  const d = parsePorcelain(git(repoCwd, ["status", "--porcelain"]).stdout);
+  const extra = repos.length > 1 ? ` +${repos.length - 1}` : "";
+  const repoLabel = selected ? `${selected.name} · ` : "";
   return {
-    label: branch,
+    label: `${branch}${extra}`,
     tone: "default",
     icon: "git",
-    tooltip: d.total ? `${d.total} changed — open Git` : "clean — open Git",
+    tooltip: d.total ? `${repoLabel}${d.total} changed — open Git` : `${repoLabel}clean — open Git`,
     // Click opens the plugin's own Git view (its sandboxed iframe UI).
     action: "openPanel:view:git",
   };
@@ -543,6 +551,14 @@ interface ViewArgs {
   message?: string;
 }
 
+function selectRepo(cwd: string, path: string): { selected: true } | { error: string } {
+  const repos = gitRepos(cwd);
+  if (!repos.some((repo) => repo.path === path)) return { error: "repository is outside this workspace" };
+  selectedRepoByCwd[cwd] = path;
+  delete bubbleCache[cwd];
+  return { selected: true };
+}
+
 // Methods that mutate the working tree / index / remote. These are NOT allowed
 // to run against an arbitrary iframe-supplied cwd (path-authority): a compromised
 // view could otherwise point add/commit/push/revert at any directory on disk.
@@ -628,6 +644,8 @@ function viewCall(method: string, args: ViewArgs): unknown {
         return gitRevert(opCwd, args.path as string);
       case "gitRepos":
         return gitRepos(cwd);
+      case "gitSelectRepo":
+        return selectRepo(cwd, args.path as string);
       default:
         return { error: `unknown method: ${method}` };
     }
