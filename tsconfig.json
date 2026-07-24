@@ -14,7 +14,7 @@
     "paths": {
       "@codeterm/plugin-sdk": ["node_modules/@codeterm/plugin-sdk/src/index.ts"]
     },
-    "types": []
+    "types": ["node"]
   },
   "include": ["*/src/**/*.ts", "*/src/**/*.tsx", "*/ui/src/**/*.ts", "*/ui/src/**/*.tsx"]
 }
