@@ -55,7 +55,7 @@ function parseLog(out) {
   return (out || "").split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
 }
 function branchOf(cwd) {
-  const r = git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const r = git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
   if (r.error || r.code !== 0) return null;
   return (r.stdout || "").trim() || null;
 }
@@ -142,25 +142,29 @@ var FS = "";
 var RS = "";
 function parseRefs(s) {
   if (!s) return [];
-  return s.split(", ").map((raw) => {
+  const refs = [];
+  for (let raw of s.split(", ")) {
     raw = raw.trim();
-    if (!raw) return null;
+    if (!raw) continue;
     if (raw.indexOf("tag: ") === 0) {
       let t = raw.slice(5);
       if (t.indexOf("refs/tags/") === 0) t = t.slice(10);
-      return { name: t.replace(/\^\{\}$/, ""), kind: "tag" };
+      refs.push({ name: t.replace(/\^\{\}$/, ""), kind: "tag" });
+      continue;
     }
     if (raw.indexOf("HEAD -> ") === 0) {
       let h = raw.slice(8);
       if (h.indexOf("refs/heads/") === 0) h = h.slice(11);
-      return { name: h, kind: "head" };
+      refs.push({ name: "HEAD", kind: "head" }, { name: h, kind: "branch" });
+      continue;
     }
-    if (raw === "HEAD") return { name: "HEAD", kind: "head" };
-    if (raw.indexOf("refs/heads/") === 0) return { name: raw.slice(11), kind: "branch" };
-    if (raw.indexOf("refs/remotes/") === 0) return { name: raw.slice(13), kind: "remote" };
-    if (raw.indexOf("refs/tags/") === 0) return { name: raw.slice(10).replace(/\^\{\}$/, ""), kind: "tag" };
-    return { name: raw, kind: "branch" };
-  }).filter((r) => r !== null);
+    if (raw === "HEAD") refs.push({ name: "HEAD", kind: "head" });
+    else if (raw.indexOf("refs/heads/") === 0) refs.push({ name: raw.slice(11), kind: "branch" });
+    else if (raw.indexOf("refs/remotes/") === 0) refs.push({ name: raw.slice(13), kind: "remote" });
+    else if (raw.indexOf("refs/tags/") === 0) refs.push({ name: raw.slice(10).replace(/\^\{\}$/, ""), kind: "tag" });
+    else refs.push({ name: raw.replace(/^heads\//, ""), kind: "branch" });
+  }
+  return refs;
 }
 function parseGraph(out) {
   return (out || "").split(RS).map((rec) => rec.charAt(0) === "\n" ? rec.slice(1) : rec).filter((rec) => rec.indexOf(FS) !== -1).map((rec) => {

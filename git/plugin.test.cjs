@@ -40,10 +40,29 @@ test("parseGraph splits \\x1e records / \\x1f fields", () => {
   assert(c.length === 2, "two commits, got " + c.length);
   assert(c[0].sha === "aaa", "sha aaa");
   assert(c[0].parents.length === 2 && c[0].parents[0] === "bbb", "two parents");
-  assert(c[0].refs.some((r) => r.kind === "head" && r.name === "main"), "head main");
+  assert(c[0].refs.some((r) => r.kind === "head" && r.name === "HEAD"), "head marker");
+  assert(c[0].refs.some((r) => r.kind === "branch" && r.name === "main"), "local branch main");
   assert(c[0].refs.some((r) => r.kind === "tag" && r.name === "v1"), "tag v1");
   assert(c[1].refs[0].kind === "remote" && c[1].refs[0].name === "origin/main", "remote ref");
   assert(c[1].parents.length === 0, "root has no parents");
+});
+
+test("branch lookup uses symbolic-ref so a same-name tag cannot leak heads/", () => {
+  const calls = [];
+  globalThis.host = {
+    unixNowMs: () => 10000,
+    exec: (raw) => {
+      const opts = JSON.parse(raw);
+      calls.push(opts.args.slice(2));
+      const args = opts.args.slice(2);
+      if (args[0] === "symbolic-ref") return JSON.stringify({ code: 0, stdout: "release-1.7.8\n", stderr: "" });
+      if (args[0] === "status") return JSON.stringify({ code: 0, stdout: "", stderr: "" });
+      throw new Error(`unexpected git call: ${args.join(" ")}`);
+    },
+  };
+  const bubble = plugin.statusBubble({ cwd: "C:/same-name-tag" });
+  assert(bubble.label === "release-1.7.8", `plain branch label, got ${bubble.label}`);
+  assert(calls.some((args) => args.join(" ") === "symbolic-ref --quiet --short HEAD"), "symbolic-ref branch lookup");
 });
 
 test("splitRename handles plain and brace forms", () => {
@@ -118,13 +137,13 @@ test("multi-repo bubble summarizes and follows the selected repository", () => {
       if (opts.bin === "cmd") return JSON.stringify({ code: 0, stdout: "repo-a\r\nrepo-b\r\n", stderr: "" });
       const cwd = opts.args[1];
       const args = opts.args.slice(2);
-      if (args[0] === "rev-parse" && args[1] === "--show-toplevel") {
-        return JSON.stringify({ code: 1, stdout: "", stderr: "not a repository" });
-      }
-      if (args[0] === "rev-parse") {
+      if (args[0] === "symbolic-ref") {
         if (cwd === parent) return JSON.stringify({ code: 1, stdout: "", stderr: "not a repository" });
         const branch = cwd.endsWith("repo-b") ? "feature/b" : "main";
         return JSON.stringify({ code: 0, stdout: `${branch}\n`, stderr: "" });
+      }
+      if (args[0] === "rev-parse" && args[1] === "--show-toplevel") {
+        return JSON.stringify({ code: 1, stdout: "", stderr: "not a repository" });
       }
       if (args[0] === "status") return JSON.stringify({ code: 0, stdout: "", stderr: "" });
       throw new Error(`unexpected git call: ${cwd} ${args.join(" ")}`);
