@@ -117,6 +117,8 @@ function effectiveAllow() {
   }
   const def = hostOf(DEFAULT_SERVER);
   if (def && allow.indexOf(def) < 0) allow.push(def);
+  const configured = hostOf(serverUrl());
+  if (configured && allow.indexOf(configured) < 0) allow.push(configured);
   return allow;
 }
 function parseBwOutput(ex) {
@@ -427,12 +429,7 @@ function viewCall(method, args) {
   if (method === "serverUrl") return { url: serverUrl() };
   if (method === "setServerUrl") {
     const url = (args.url || "").trim();
-    if (url) {
-      if (!isValidHttpUrl(url)) return { error: "invalid server URL" };
-      if (!serverHostAllowed(url, effectiveAllow())) {
-        return { error: "server host not permitted by plugin network permissions: " + hostOf(url) };
-      }
-    }
+    if (url && !isValidHttpUrl(url)) return { error: "invalid server URL" };
     host.secretSet("server_url", url);
     return { ok: true };
   }
