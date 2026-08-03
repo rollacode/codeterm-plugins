@@ -27,6 +27,17 @@ function Badge({ tone, label }: { tone: Tone; label: string }) {
   );
 }
 
+function Spinner({ size = 14 }: { size?: number }) {
+  return (
+    <span style={{
+      display: "inline-block", width: size, height: size, flex: "none",
+      border: "2px solid color-mix(in srgb, var(--ct-fg, #eee) 22%, transparent)",
+      borderTopColor: "var(--ct-accent, #5b8cff)", borderRadius: "50%",
+      animation: "ctbw-spin 0.7s linear infinite",
+    }} />
+  );
+}
+
 const inputStyle: React.CSSProperties = {
   width: "100%", boxSizing: "border-box", background: "var(--ct-bg-elev, rgba(255,255,255,0.03))",
   border: "1px solid var(--ct-border-default, rgba(255,255,255,0.12))", borderRadius: 6,
@@ -51,6 +62,8 @@ function App() {
   const [master, setMaster] = useState("");
   const [twoFactor, setTwoFactor] = useState("");
   const [remember, setRemember] = useState(false);
+  const [apiClientId, setApiClientId] = useState("");
+  const [apiClientSecret, setApiClientSecret] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -102,8 +115,16 @@ function App() {
   }, [refreshServer, refreshStatus]);
 
   const st = status?.status;
-  const needsLogin = st !== "locked";
-  const canSubmit = !!master && (!needsLogin || !!email.trim());
+  const hasApiKey = !!apiClientId.trim() && !!apiClientSecret.trim();
+  const canSubmit = !!master && (!!email.trim() || hasApiKey || st === "locked");
+  const doUnlock = () => run(() => ct().invoke("unlock", {
+    masterPassword: master,
+    email: email.trim() || undefined,
+    twoFactorToken: twoFactor.trim() || undefined,
+    apiKeyClientId: apiClientId.trim() || undefined,
+    apiKeyClientSecret: apiClientSecret.trim() || undefined,
+    rememberMasterPassword: remember,
+  }), "unlock");
 
   const run = useCallback(async (fn: () => Promise<unknown>, errPrefix: string) => {
     setBusy(true);
@@ -121,6 +142,7 @@ function App() {
 
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", padding: 18, color: "var(--ct-fg, #eee)", background: "var(--ct-bg, #14141c)" }}>
+      <style>{"@keyframes ctbw-spin{to{transform:rotate(360deg)}}"}</style>
       <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--ct-muted, #9aa)", marginBottom: 8 }}>Server</div>
       <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
         <input style={inputStyle} value={serverUrl} placeholder="https://vault.bitwarden.com"
@@ -146,32 +168,36 @@ function App() {
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <Badge tone={needsLogin ? "danger" : "warn"} label={needsLogin ? "Not signed in" : "Locked"} />
+          <Badge tone={st === "locked" ? "warn" : "danger"} label={st === "locked" ? "Locked" : "Not signed in"} />
           <span style={{ color: COLOR.muted, fontSize: 11.5 }}>
-            {needsLogin ? "Enter your Bitwarden email and master password." : "Enter your master password to unlock."}
+            Enter your Bitwarden email + master password, or API-key credentials, to sign in and unlock.
           </span>
-          {needsLogin && (
-            <input style={inputStyle} type="email" autoComplete="username" placeholder="Bitwarden email"
-              value={email} onChange={(e) => setEmail(e.target.value)} />
-          )}
+          <input style={inputStyle} type="email" autoComplete="username" placeholder="Bitwarden email"
+            value={email} onChange={(e) => setEmail(e.target.value)} />
           <div style={{ display: "flex", gap: 8 }}>
             <input style={inputStyle} type="password" autoComplete="current-password" placeholder="Master password"
               value={master} onChange={(e) => setMaster(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && canSubmit && !busy) void run(() => ct().invoke("unlock", { masterPassword: master, email: email.trim() || undefined, twoFactorToken: twoFactor.trim() || undefined, rememberMasterPassword: remember }), "unlock"); }} />
-            <button style={btnStyle} disabled={busy || !canSubmit}
-              onClick={() => void run(() => ct().invoke("unlock", { masterPassword: master, email: email.trim() || undefined, twoFactorToken: twoFactor.trim() || undefined, rememberMasterPassword: remember }), "unlock")}>
-              {busy ? "Unlocking…" : needsLogin ? "Sign in" : "Unlock"}
+              onKeyDown={(e) => { if (e.key === "Enter" && canSubmit && !busy) void doUnlock(); }} />
+            <button style={btnStyle} disabled={busy || !canSubmit} onClick={() => void doUnlock()}>
+              {busy ? <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Spinner size={12} /> Signing in…</span> : st === "locked" ? "Unlock" : "Sign in"}
             </button>
           </div>
-          {needsLogin && (
-            <input style={inputStyle} inputMode="numeric" placeholder="2FA code (if enabled)"
-              value={twoFactor} onChange={(e) => setTwoFactor(e.target.value)} />
+          <input style={inputStyle} inputMode="numeric" placeholder="2FA code (if enabled)"
+            value={twoFactor} onChange={(e) => setTwoFactor(e.target.value)} />
+          <input style={inputStyle} autoComplete="off" placeholder="API key client_id (optional)"
+            value={apiClientId} onChange={(e) => setApiClientId(e.target.value)} />
+          <input style={inputStyle} type="password" autoComplete="off" placeholder="API key client_secret (optional)"
+            value={apiClientSecret} onChange={(e) => setApiClientSecret(e.target.value)} />
+          {busy && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+              <Spinner />
+              <span style={{ color: COLOR.muted, fontSize: 11.5 }}>Signing in to Bitwarden — this can take 20–30s for a self-hosted server…</span>
+            </div>
           )}
           <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11.5, color: COLOR.muted, cursor: "pointer" }}>
             <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
             Remember master password (auto-unlock)
           </label>
-          {busy && <span style={{ color: COLOR.muted, fontSize: 11 }}>Talking to the Bitwarden CLI — this can take 20–30s for self-hosted.</span>}
         </div>
       )}
       </div>

@@ -39,3 +39,21 @@ npm test                   # plugin-side parser tests (via tsx)
 `channel.json` is the manifest CodeTerm reads when the channel is added. Keep
 each entry's `version` in sync with the plugin's `plugin.json`. CodeTerm seeds
 this channel automatically (register-only) from `github.com/rollacode/codeterm-plugins`.
+
+### Releasing a plugin
+
+The production marketplace channel reads the repository's default `main`
+branch. A plugin committed only to a feature or lane branch is not released.
+
+1. Build the plugin with `node scripts/build-plugin.mjs <id>` and run its
+   focused tests plus `npm run typecheck`.
+2. Set the same new version in `<id>/package.json`, `<id>/plugin.json`, and the
+   matching `channel.json` entry. Commit the generated logic and UI bundles.
+3. Merge the reviewed lane into `main` with ancestry preserved, push `main`,
+   and verify the remote default-branch SHA. Do not publish from a side branch.
+4. Run `codeterm plugin channel refresh codeterm-plugins`, inspect
+   `codeterm plugin channel diff codeterm-plugins`, then install or update the
+   plugin. Verify the installed `.codeterm-install.json` and `plugin.json`
+   report the new version and the `codeterm-plugins` channel source.
+5. Delete an integrated lane only after its tip is proven to be an ancestor of
+   `main`. Do not leave release branches as alternate marketplace heads.
