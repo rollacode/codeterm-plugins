@@ -27,6 +27,17 @@ function Badge({ tone, label }: { tone: Tone; label: string }) {
   );
 }
 
+function Spinner({ size = 14 }: { size?: number }) {
+  return (
+    <span style={{
+      display: "inline-block", width: size, height: size, flex: "none",
+      border: "2px solid color-mix(in srgb, var(--ct-fg, #eee) 22%, transparent)",
+      borderTopColor: "var(--ct-accent, #5b8cff)", borderRadius: "50%",
+      animation: "ctbw-spin 0.7s linear infinite",
+    }} />
+  );
+}
+
 const inputStyle: React.CSSProperties = {
   width: "100%", boxSizing: "border-box", background: "var(--ct-bg-elev, rgba(255,255,255,0.03))",
   border: "1px solid var(--ct-border-default, rgba(255,255,255,0.12))", borderRadius: 6,
@@ -129,6 +140,7 @@ function App() {
 
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", padding: 18, color: "var(--ct-fg, #eee)", background: "var(--ct-bg, #14141c)" }}>
+      <style>{"@keyframes ctbw-spin{to{transform:rotate(360deg)}}"}</style>
       <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--ct-muted, #9aa)", marginBottom: 8 }}>Server</div>
       <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
         <input style={inputStyle} value={serverUrl} placeholder="https://vault.bitwarden.com"
@@ -165,7 +177,7 @@ function App() {
               value={master} onChange={(e) => setMaster(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter" && canSubmit && !busy) void doUnlock(); }} />
             <button style={btnStyle} disabled={busy || !canSubmit} onClick={() => void doUnlock()}>
-              {busy ? "Unlocking…" : st === "locked" ? "Unlock" : "Sign in"}
+              {busy ? <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Spinner size={12} /> Signing in…</span> : st === "locked" ? "Unlock" : "Sign in"}
             </button>
           </div>
           <input style={inputStyle} inputMode="numeric" placeholder="2FA code (if enabled)"
@@ -174,7 +186,12 @@ function App() {
             value={apiClientId} onChange={(e) => setApiClientId(e.target.value)} />
           <input style={inputStyle} type="password" autoComplete="off" placeholder="API key client_secret (optional)"
             value={apiClientSecret} onChange={(e) => setApiClientSecret(e.target.value)} />
-          {busy && <span style={{ color: COLOR.muted, fontSize: 11 }}>Talking to the Bitwarden CLI — this can take 20–30s for self-hosted.</span>}
+          {busy && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+              <Spinner />
+              <span style={{ color: COLOR.muted, fontSize: 11.5 }}>Signing in to Bitwarden — this can take 20–30s for a self-hosted server…</span>
+            </div>
+          )}
         </div>
       )}
       </div>
