@@ -145,46 +145,9 @@ test("auto-unlock: no session + persisted master password → op retries and ret
   }
 });
 
-// ── remember-master toggle OFF stays session-only (opt-in parity) ──
-// A successful unlock with the toggle off must NOT persist K_MASTER: a later
-// no-session op stays locked (no silent JIT re-unlock).
-
-test("remember off: unlock persists session only, K_MASTER never written", () => {
+test("successful unlock always persists the master password for auto-unlock", () => {
   const MASTER = "hunter2";
   const SESSION = "SESS-OFF";
-  const secrets = {};
-  const savedHost = globalThis.host;
-  globalThis.host = {
-    secretGet: (k) => (k in secrets ? secrets[k] : null),
-    secretSet: (k, v) => { secrets[k] = v; },
-    secretDelete: (k) => { delete secrets[k]; },
-    settingsJson: () => "{}", // remember OFF
-    manifest: () => ({ permissions: { network: { allow: [] } } }),
-    exec: (optsJson) => {
-      const o = JSON.parse(optsJson);
-      const args = o.args || [], env = o.env || {};
-      let body;
-      if (args.indexOf("status") >= 0) body = { success: true, data: { status: "locked", serverUrl: "https://vault.bitwarden.com" } };
-      else if (args.indexOf("unlock") >= 0) body = env.BW_PASSWORD === MASTER ? { success: true, data: { raw: SESSION } } : { success: false, message: "Invalid master password." };
-      else body = { success: true, data: {} };
-      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
-    },
-  };
-  try {
-    const r = plugin.secretUnlock({ masterPassword: MASTER, email: "a@b.c" });
-    assert("ok" in r, "expected unlock ok, got " + JSON.stringify(r));
-    assert(secrets.session === SESSION, "session must be persisted");
-    assert(!("master_password" in secrets), "K_MASTER must NOT be persisted when toggle is off");
-  } finally {
-    globalThis.host = savedHost;
-  }
-});
-
-// ── remember-master ON persists K_MASTER (via unlock-view flag) ──
-
-test("remember on: unlock persists K_MASTER", () => {
-  const MASTER = "hunter2";
-  const SESSION = "SESS-ON";
   const secrets = {};
   const savedHost = globalThis.host;
   globalThis.host = {
@@ -204,9 +167,10 @@ test("remember on: unlock persists K_MASTER", () => {
     },
   };
   try {
-    const r = plugin.secretUnlock({ masterPassword: MASTER, email: "a@b.c", rememberMasterPassword: true });
+    const r = plugin.secretUnlock({ masterPassword: MASTER, email: "a@b.c" });
     assert("ok" in r, "expected unlock ok, got " + JSON.stringify(r));
-    assert(secrets.master_password === MASTER, "K_MASTER must be persisted when toggle is on");
+    assert(secrets.session === SESSION, "session must be persisted");
+    assert(secrets.master_password === MASTER, "K_MASTER must always be persisted");
   } finally {
     globalThis.host = savedHost;
   }

@@ -61,7 +61,6 @@ function App() {
   const [email, setEmail] = useState("");
   const [master, setMaster] = useState("");
   const [twoFactor, setTwoFactor] = useState("");
-  const [remember, setRemember] = useState(false);
   const [apiClientId, setApiClientId] = useState("");
   const [apiClientSecret, setApiClientSecret] = useState("");
   const [busy, setBusy] = useState(false);
@@ -123,7 +122,6 @@ function App() {
     twoFactorToken: twoFactor.trim() || undefined,
     apiKeyClientId: apiClientId.trim() || undefined,
     apiKeyClientSecret: apiClientSecret.trim() || undefined,
-    rememberMasterPassword: remember,
   }), "unlock");
 
   const run = useCallback(async (fn: () => Promise<unknown>, errPrefix: string) => {
@@ -194,10 +192,6 @@ function App() {
               <span style={{ color: COLOR.muted, fontSize: 11.5 }}>Signing in to Bitwarden — this can take 20–30s for a self-hosted server…</span>
             </div>
           )}
-          <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11.5, color: COLOR.muted, cursor: "pointer" }}>
-            <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
-            Remember master password (auto-unlock)
-          </label>
         </div>
       )}
       </div>

@@ -348,9 +348,7 @@ function secretUnlock(creds) {
   const token = extractSessionToken(unlocked.data);
   if (!token) return { error: { kind: "backend", message: "bw unlock returned empty session" } };
   host.secretSet(K_SESSION, token);
-  const remember = settings().rememberMasterPassword === true || creds.rememberMasterPassword === true;
-  if (remember && hasPw) host.secretSet(K_MASTER, creds.masterPassword);
-  else host.secretDelete(K_MASTER);
+  host.secretSet(K_MASTER, creds.masterPassword);
   if (!creds.apiKeyClientId && creds.email) host.secretSet(K_EMAIL, creds.email);
   return { ok: true };
 }
@@ -549,8 +547,7 @@ function viewCall(method, args) {
       email: args.email,
       twoFactorToken: args.twoFactorToken,
       apiKeyClientId: args.apiKeyClientId,
-      apiKeyClientSecret: args.apiKeyClientSecret,
-      rememberMasterPassword: args.rememberMasterPassword
+      apiKeyClientSecret: args.apiKeyClientSecret
     });
   }
   if (method === "signout") return secretLogout();

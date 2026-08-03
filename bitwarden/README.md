@@ -30,19 +30,18 @@ Use a [Bitwarden](https://bitwarden.com) vault as CodeTerm's secret store, so `c
 
 Turning the toggle off falls back to the built-in local file store; your vault is untouched.
 
-## Auto-unlock (Remember master password)
+## Auto-unlock
 
-By default only the short-lived `bw` **session token** is persisted: once it expires the vault is locked and you re-unlock via the view. This is the safest default — a long-lived master password on disk is the secret most worth protecting.
+Every successful unlock stores the master password in the plugin's secret bucket
+alongside the short-lived `bw` session token. There is no separate toggle.
 
-Opt in with the **Remember master password** toggle (settings pane, or the checkbox in the unlock view) to store the master password in the plugin's own secret bucket. When on:
+When the session expires:
 
 - Any operation that hits a locked vault performs one just-in-time re-unlock (`bw unlock --passwordenv`, password via env only — never argv or logs) and retries once.
 - `codeterm mem secret unlock` with no input re-unlocks from the remembered password.
 - Status reflects the truly reachable state (a locked vault with a remembered password shows as unlocked after a JIT unlock).
 
-Toggle it off and the master password is purged on the next unlock; behaviour returns to session-only.
-
-> API-key credentials (`BW_CLIENTID`/`BW_CLIENTSECRET`) can re-establish login headlessly, but `bw unlock` still requires a master password — so API-key-only setups cannot auto-unlock without **Remember master password** enabled.
+> API-key credentials (`BW_CLIENTID`/`BW_CLIENTSECRET`) can re-establish login headlessly, but `bw unlock` still requires the master password entered during unlock.
 
 ## Status detail
 

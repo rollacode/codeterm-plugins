@@ -260,9 +260,8 @@ function extractSessionToken(data: unknown): string {
 // Re-entrancy guard: one auto-unlock in flight at a time, never recursive.
 let autoUnlocking = false;
 
-// Re-establish a BW_SESSION headlessly from persisted credentials. Primary path
-// is a remembered master password (opt-in, K_MASTER); secrets pass via env only,
-// never argv, and are never logged. Returns true iff a fresh session was stored.
+// Re-establish a BW_SESSION headlessly from the persisted master password.
+// Secrets pass through the environment only and are never logged.
 function tryAutoUnlock(): boolean {
   if (autoUnlocking) return false;
   autoUnlocking = true;
@@ -276,10 +275,7 @@ function tryAutoUnlock(): boolean {
       host.secretSet(K_SESSION, token);
       return true;
     }
-    // API-key creds can re-login headlessly, but `bw unlock` still needs a master
-    // password we don't have when only api-key creds are persisted — so a silent
-    // unlock is impossible here. Documented limitation: enable remember-master to
-    // get JIT auto-unlock. Re-login without a usable unlock yields no session.
+    // API-key credentials can log in, but `bw unlock` still requires the master password.
     return false;
   } finally {
     autoUnlocking = false;
@@ -318,7 +314,6 @@ function runWithSession(args: string[], stdin?: string): Envelope {
 
 interface BitwardenSettings {
   serverUrl?: string;
-  rememberMasterPassword?: boolean;
 }
 
 function settings(): BitwardenSettings {
@@ -462,16 +457,9 @@ function secretUnlock(creds: SecretCreds): Envelope<true> {
   const token = extractSessionToken(unlocked.data);
   if (!token) return { error: { kind: "backend", message: "bw unlock returned empty session" } };
 
-  // Persist the short-lived session token. The master password is persisted ONLY
-  // when remember-master-password is opted in (settings toggle or the unlock
-  // view's checkbox) — that copy on disk is what enables JIT background
-  // re-unlock. Off by default: no K_MASTER, session-only, as before. Email
-  // (non-secret) is kept for unlock-form prefill convenience.
+  // Persist both values so every successful unlock enables headless auto-unlock.
   host.secretSet(K_SESSION, token);
-  const remember = settings().rememberMasterPassword === true ||
-    (creds as SecretCreds & { rememberMasterPassword?: boolean }).rememberMasterPassword === true;
-  if (remember && hasPw) host.secretSet(K_MASTER, creds.masterPassword as string);
-  else host.secretDelete(K_MASTER);
+  host.secretSet(K_MASTER, creds.masterPassword as string);
   if (!creds.apiKeyClientId && creds.email) host.secretSet(K_EMAIL, creds.email);
   return { ok: true };
 }
@@ -689,7 +677,6 @@ interface ViewArgs {
   apiKeyClientId?: string;
   apiKeyClientSecret?: string;
   organization?: string;
-  rememberMasterPassword?: boolean;
   jobId?: string;
 }
 
@@ -716,7 +703,6 @@ function viewCall(method: string, args: ViewArgs): unknown {
       twoFactorToken: args.twoFactorToken,
       apiKeyClientId: args.apiKeyClientId,
       apiKeyClientSecret: args.apiKeyClientSecret,
-      rememberMasterPassword: args.rememberMasterPassword,
     } as SecretCreds);
   }
   if (method === "signout") return secretLogout();
