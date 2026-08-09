@@ -472,11 +472,33 @@ function secretLock(): Envelope<true> {
 
 function secretLogout(): Envelope<true> {
   bw(["logout"]);
+  clearStoredCredentials();
+  return { ok: true };
+}
+
+function clearStoredCredentials(): void {
   host.secretDelete(K_SESSION);
-  host.secretDelete(K_MASTER); // purge any master password left by an older build
+  host.secretDelete(K_MASTER);
   host.secretDelete(K_EMAIL);
   host.secretDelete(K_CLIENT_ID);
   host.secretDelete(K_CLIENT_SECRET);
+}
+
+function resetConnection(): Envelope<true> {
+  const server = serverUrl();
+  if (!isValidHttpUrl(server)) {
+    return { error: { kind: "bad_request", message: "invalid bitwarden server URL: " + server } };
+  }
+  if (!serverHostAllowed(server, effectiveAllow())) {
+    return { error: { kind: "bad_request", message: "server host not permitted by plugin network permissions: " + hostOf(server) } };
+  }
+
+  bw(["logout"]);
+  clearStoredCredentials();
+  const configured = bw(["config", "server", server]);
+  if (!configured.success) {
+    return { error: { kind: "backend", message: configured.message || "could not point bw at " + server } };
+  }
   return { ok: true };
 }
 
@@ -705,6 +727,7 @@ function viewCall(method: string, args: ViewArgs): unknown {
       apiKeyClientSecret: args.apiKeyClientSecret,
     } as SecretCreds);
   }
+  if (method === "resetConnection") return resetConnection();
   if (method === "signout") return secretLogout();
   if (method === "organizations") {
     const o = secretOrganizations();

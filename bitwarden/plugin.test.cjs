@@ -270,6 +270,41 @@ test("status cause: bw-level error passes the bw message through", () => {
   }
 });
 
+test("reset connection applies the configured server and clears stale credentials", () => {
+  const secrets = {
+    session: "stale-session",
+    master_password: "stale-master",
+    login_email: "old@example.com",
+    api_client_id: "old-id",
+    api_client_secret: "old-secret",
+  };
+  const calls = [];
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => JSON.stringify({ serverUrl: "https://vault.example.test" }),
+    manifest: () => ({ permissions: { network: { allow: ["vault.example.test"] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      const args = o.args || [];
+      calls.push(args);
+      return JSON.stringify({ stdout: JSON.stringify({ success: true, data: {} }), stderr: "", code: 0 });
+    },
+  };
+  try {
+    const result = plugin.viewCall("resetConnection", {});
+    assert("ok" in result, "expected reset to succeed, got " + JSON.stringify(result));
+    assert(calls.length === 2, "expected logout and config commands");
+    assert(calls[0].includes("logout"), "logout must run first");
+    assert(calls[1].join(" ").includes("config server https://vault.example.test"), "configured server must be applied");
+    assert(Object.keys(secrets).length === 0, "all stale auth credentials must be cleared");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try {

@@ -48,6 +48,12 @@ const btnStyle: React.CSSProperties = {
   border: "none", background: "var(--ct-accent, #5b8cff)", color: "#fff", cursor: "pointer", whiteSpace: "nowrap",
 };
 
+function conciseReason(reason: string | null | undefined): string {
+  if (!reason) return "The Bitwarden connection failed.";
+  const first = reason.split(/\n|\sat\sClientRequest|\sat\sTLSSocket/)[0].trim();
+  return first.length > 240 ? `${first.slice(0, 237)}…` : first;
+}
+
 interface Status {
   status: "unlocked" | "locked" | "logged_out" | "unavailable";
   user?: string | null;
@@ -162,7 +168,13 @@ function App() {
       ) : st === "unavailable" ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <Badge tone="danger" label="Unavailable" />
-          <span style={{ color: COLOR.muted, fontSize: 11.5 }}>{status.reason || "The Bitwarden CLI isn't available."}</span>
+          <span style={{ color: COLOR.muted, fontSize: 11.5 }}>{conciseReason(status.reason)}</span>
+          <div>
+            <button style={btnStyle} disabled={busy}
+              onClick={() => void run(() => ct().invoke("resetConnection"), "reset connection")}>
+              {busy ? "Resetting…" : "Sign in again"}
+            </button>
+          </div>
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
