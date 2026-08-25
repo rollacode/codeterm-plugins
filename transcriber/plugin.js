@@ -206,16 +206,63 @@ function dirOf(p) {
   const i = p.lastIndexOf("/");
   return i > 0 ? p.substring(0, i) : ".";
 }
+function brewPrefixes() {
+  const out = [];
+  for (const brew of ["/opt/homebrew/bin/brew", "/usr/local/bin/brew", "brew"]) {
+    const r = exec({ bin: brew, args: ["--prefix"], timeoutMs: 15e3 });
+    const prefix = ranOk(r) ? String(r.stdout || "").trim() : "";
+    if (prefix) {
+      out.push(prefix + "/bin");
+      break;
+    }
+  }
+  return out;
+}
+function unixBinCandidates(name) {
+  const home = host.homeDir && host.homeDir() || "";
+  const dirs = brewPrefixes().concat([
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    home ? home.replace(/\/+$/, "") + "/.local/bin" : ""
+  ]);
+  const seen = {};
+  const out = [];
+  for (const dir of dirs) {
+    if (!dir || seen[dir]) continue;
+    seen[dir] = true;
+    out.push(dir + "/" + name);
+  }
+  return out;
+}
+function resolveUnixBin(name) {
+  const local = findLocalBin(name);
+  if (local) return local;
+  for (const candidate of unixBinCandidates(name)) {
+    if (host.fileExists(candidate)) return candidate;
+  }
+  return null;
+}
+function lookedIn(name) {
+  return unixBinCandidates(name).concat([binDir() + "/" + name]).join(", ");
+}
 function ensureFfmpeg() {
   if (ranOk(exec({ bin: "ffmpeg", args: ["-version"] }))) return { bin: "ffmpeg" };
   const local = findLocalBin("ffmpeg");
   if (local) return { bin: local };
   const os = osKind();
   if (os === "macos") {
+    const found = resolveUnixBin("ffmpeg");
+    if (found) return { bin: found };
     progress({ label: "Installing ffmpeg\u2026" });
     const r = exec({ bin: "brew", args: ["install", "ffmpeg"], timeoutMs: 18e5 });
-    if (exitedOk(r) && ranOk(exec({ bin: "ffmpeg", args: ["-version"] }))) return { bin: "ffmpeg" };
-    return { error: "ffmpeg is required. Install it with `brew install ffmpeg`." };
+    if (exitedOk(r)) {
+      const installed2 = resolveUnixBin("ffmpeg");
+      if (installed2) return { bin: installed2 };
+      if (ranOk(exec({ bin: "ffmpeg", args: ["-version"] }))) return { bin: "ffmpeg" };
+    }
+    return { error: "ffmpeg is required. Install it with `brew install ffmpeg`. Looked in: " + lookedIn("ffmpeg") };
   }
   if (os === "windows") {
     progress({ label: "Installing ffmpeg\u2026" });
@@ -251,10 +298,16 @@ function ensureEngine() {
   if (local) return { bin: local };
   const os = osKind();
   if (os === "macos") {
+    const found = resolveUnixBin("whisper-cli");
+    if (found) return { bin: found };
     progress({ label: "Installing whisper.cpp\u2026" });
     const r = exec({ bin: "brew", args: ["install", "whisper-cpp"], timeoutMs: 18e5 });
-    if (exitedOk(r) && ranOk(exec({ bin: "whisper-cli", args: ["--help"] }))) return { bin: "whisper-cli" };
-    return { error: "whisper-cli is required. Install it with `brew install whisper-cpp`." };
+    if (exitedOk(r)) {
+      const installed2 = resolveUnixBin("whisper-cli");
+      if (installed2) return { bin: installed2 };
+      if (ranOk(exec({ bin: "whisper-cli", args: ["--help"] }))) return { bin: "whisper-cli" };
+    }
+    return { error: "whisper-cli is required. Install it with `brew install whisper-cpp`. Looked in: " + lookedIn("whisper-cli") };
   }
   progress({ label: "Installing whisper.cpp\u2026" });
   const asset = os === "windows" ? "whisper-bin-x64.zip" : "whisper-bin-Linux.zip";

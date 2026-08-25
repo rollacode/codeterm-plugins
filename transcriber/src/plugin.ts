@@ -288,6 +288,56 @@ function dirOf(p: string): string {
   return i > 0 ? p.substring(0, i) : ".";
 }
 
+// The plugin runtime does not inherit a login shell's PATH, so a Homebrew binary
+// the user can run in their terminal is invisible to `exec({ bin: "ffmpeg" })`.
+// Resolving to an ABSOLUTE path fixes both the lookup and the retry after
+// `brew install`, which otherwise re-checks the same empty PATH (#1).
+function brewPrefixes(): string[] {
+  const out: string[] = [];
+  // brew's own prefix is authoritative; ask it wherever brew itself can be found.
+  for (const brew of ["/opt/homebrew/bin/brew", "/usr/local/bin/brew", "brew"]) {
+    const r = exec({ bin: brew, args: ["--prefix"], timeoutMs: 15000 });
+    const prefix = ranOk(r) ? String((r as { stdout?: string }).stdout || "").trim() : "";
+    if (prefix) { out.push(prefix + "/bin"); break; }
+  }
+  return out;
+}
+
+function unixBinCandidates(name: string): string[] {
+  const home = (host.homeDir && host.homeDir()) || "";
+  const dirs = brewPrefixes().concat([
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    home ? home.replace(/\/+$/, "") + "/.local/bin" : "",
+  ]);
+  const seen: Record<string, boolean> = {};
+  const out: string[] = [];
+  for (const dir of dirs) {
+    if (!dir || seen[dir]) continue;
+    seen[dir] = true;
+    out.push(dir + "/" + name);
+  }
+  return out;
+}
+
+// Absolute path to `name`, or null. Checked in cost order: what we installed
+// ourselves, then the well-known prefixes.
+function resolveUnixBin(name: string): string | null {
+  const local = findLocalBin(name);
+  if (local) return local;
+  for (const candidate of unixBinCandidates(name)) {
+    if (host.fileExists(candidate)) return candidate;
+  }
+  return null;
+}
+
+// Where we looked, so a failure is diagnosable without log spelunking.
+function lookedIn(name: string): string {
+  return unixBinCandidates(name).concat([binDir() + "/" + name]).join(", ");
+}
+
 function ensureFfmpeg(): Resolved {
   if (ranOk(exec({ bin: "ffmpeg", args: ["-version"] }))) return { bin: "ffmpeg" };
   const local = findLocalBin("ffmpeg");
@@ -295,10 +345,18 @@ function ensureFfmpeg(): Resolved {
 
   const os = osKind();
   if (os === "macos") {
+    const found = resolveUnixBin("ffmpeg");
+    if (found) return { bin: found };
     progress({ label: "Installing ffmpeg…" });
     const r = exec({ bin: "brew", args: ["install", "ffmpeg"], timeoutMs: 1800000 });
-    if (exitedOk(r) && ranOk(exec({ bin: "ffmpeg", args: ["-version"] }))) return { bin: "ffmpeg" };
-    return { error: "ffmpeg is required. Install it with `brew install ffmpeg`." };
+    if (exitedOk(r)) {
+      // Absolute first, because the PATH probe already failed once; the probe
+      // stays as the fallback for a prefix these candidates do not cover.
+      const installed = resolveUnixBin("ffmpeg");
+      if (installed) return { bin: installed };
+      if (ranOk(exec({ bin: "ffmpeg", args: ["-version"] }))) return { bin: "ffmpeg" };
+    }
+    return { error: "ffmpeg is required. Install it with `brew install ffmpeg`. Looked in: " + lookedIn("ffmpeg") };
   }
   if (os === "windows") {
     progress({ label: "Installing ffmpeg…" });
@@ -341,10 +399,16 @@ function ensureEngine(): Resolved {
 
   const os = osKind();
   if (os === "macos") {
+    const found = resolveUnixBin("whisper-cli");
+    if (found) return { bin: found };
     progress({ label: "Installing whisper.cpp…" });
     const r = exec({ bin: "brew", args: ["install", "whisper-cpp"], timeoutMs: 1800000 });
-    if (exitedOk(r) && ranOk(exec({ bin: "whisper-cli", args: ["--help"] }))) return { bin: "whisper-cli" };
-    return { error: "whisper-cli is required. Install it with `brew install whisper-cpp`." };
+    if (exitedOk(r)) {
+      const installed = resolveUnixBin("whisper-cli");
+      if (installed) return { bin: installed };
+      if (ranOk(exec({ bin: "whisper-cli", args: ["--help"] }))) return { bin: "whisper-cli" };
+    }
+    return { error: "whisper-cli is required. Install it with `brew install whisper-cpp`. Looked in: " + lookedIn("whisper-cli") };
   }
   // Windows + Linux: prebuilt archives from the whisper.cpp GitHub release.
   progress({ label: "Installing whisper.cpp…" });
