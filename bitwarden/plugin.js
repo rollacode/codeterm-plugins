@@ -30,6 +30,16 @@ var K_EMAIL = "login_email";
 var K_CLIENT_ID = "api_client_id";
 var K_CLIENT_SECRET = "api_client_secret";
 var BW_TIMEOUT_MS = 3e4;
+var BW_STATUS_TIMEOUT_MS = 8e3;
+function canUnlockHeadlessly() {
+  const master = host.secretGet(K_MASTER);
+  return !!(master && master.length);
+}
+function isRejectedCredential(msg) {
+  const m = (msg || "").toLowerCase();
+  return m.indexOf("invalid master password") >= 0 || m.indexOf("username or password is incorrect") >= 0 || m.indexOf("invalid credentials") >= 0;
+}
+var LOCKED_HINT = "vault is locked and no master password is remembered \u2014 run `codeterm mem secret unlock` interactively";
 var B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 function base64Encode(str) {
   const bytes = [];
@@ -203,7 +213,10 @@ function tryAutoUnlock() {
     const master = host.secretGet(K_MASTER);
     if (master && master.length) {
       const unlocked = bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: master } });
-      if (!unlocked.success) return false;
+      if (!unlocked.success) {
+        if (isRejectedCredential(unlocked.message)) host.secretDelete(K_MASTER);
+        return false;
+      }
       const token = extractSessionToken(unlocked.data);
       if (!token) return false;
       host.secretSet(K_SESSION, token);
@@ -218,15 +231,16 @@ function runWithSession(args, stdin) {
   let session = host.secretGet(K_SESSION);
   let triedUnlock = false;
   if (!session) {
-    if (!tryAutoUnlock()) return { error: { kind: "locked" } };
+    if (!canUnlockHeadlessly()) return { error: { kind: "locked", message: LOCKED_HINT } };
+    if (!tryAutoUnlock()) return { error: { kind: "locked", message: LOCKED_HINT } };
     triedUnlock = true;
     session = host.secretGet(K_SESSION);
-    if (!session) return { error: { kind: "locked" } };
+    if (!session) return { error: { kind: "locked", message: LOCKED_HINT } };
   }
   let r = bw(args, { session, stdin });
   if (!r.success) {
     const err = mapBwError(r.message);
-    if (err.kind === "locked" && !triedUnlock && tryAutoUnlock()) {
+    if (err.kind === "locked" && !triedUnlock && canUnlockHeadlessly() && tryAutoUnlock()) {
       const fresh = host.secretGet(K_SESSION);
       if (fresh) {
         r = bw(args, { session: fresh, stdin });
@@ -268,7 +282,9 @@ function bwExecToStatusResult(ex) {
 }
 function bwStatus() {
   const session = host.secretGet(K_SESSION);
-  const raw = host.exec(bwExecOpts(["status"], { session: session || void 0 }));
+  const raw = host.exec(
+    bwExecOpts(["status"], { session: session || void 0, timeoutMs: BW_STATUS_TIMEOUT_MS })
+  );
   let ex;
   try {
     ex = JSON.parse(raw);
@@ -291,7 +307,10 @@ function statusFromBw(res) {
 }
 function secretStatus() {
   let st = statusFromBw(bwStatus());
-  if (st.status === "locked" && host.secretGet(K_MASTER) && tryAutoUnlock()) {
+  if (st.status === "locked" && !canUnlockHeadlessly()) {
+    return { status: "locked", endpoint: st.endpoint, reason: LOCKED_HINT };
+  }
+  if (st.status === "locked" && tryAutoUnlock()) {
     st = statusFromBw(bwStatus());
   }
   return st;
@@ -300,8 +319,11 @@ function secretUnlock(creds) {
   creds = creds || {};
   const hasPw = creds.masterPassword && creds.masterPassword.length;
   if (!hasPw && !creds.apiKeyClientId) {
-    if (tryAutoUnlock()) return { ok: true };
+    if (canUnlockHeadlessly() && tryAutoUnlock()) return { ok: true };
     return { error: { kind: "bad_request", message: "master password (or API-key creds) required" } };
+  }
+  if (!hasPw) {
+    return { error: { kind: "bad_request", message: "master password is required to unlock, even with API-key credentials" } };
   }
   const server = serverUrl();
   if (!isValidHttpUrl(server)) {
@@ -318,12 +340,15 @@ function secretUnlock(creds) {
     host.secretDelete(K_SESSION);
     loggedIn = false;
   }
-  if (currentServer !== server) {
+  const serverChanged = currentServer !== server;
+  if (serverChanged) {
     const cfg = bw(["config", "server", server]);
     if (!cfg.success) return { error: { kind: "backend", message: "could not point bw at " + server } };
   }
-  st = bwStatus().status;
-  loggedIn = !!st && st.status !== "unauthenticated";
+  if (serverChanged) {
+    st = bwStatus().status;
+    loggedIn = !!st && st.status !== "unauthenticated";
+  }
   if (!loggedIn) {
     let login;
     if (creds.apiKeyClientId && creds.apiKeyClientSecret) {

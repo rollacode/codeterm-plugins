@@ -27,6 +27,33 @@ const K_CLIENT_ID = "api_client_id";
 const K_CLIENT_SECRET = "api_client_secret";
 const BW_TIMEOUT_MS = 30_000;
 
+// `bw status` reads local state and answers promptly even against a self-hosted
+// server, so it does not deserve the full command budget. The host holds the
+// plugin VM's mutex for the whole synchronous call, so every second spent here
+// is a second every other secret call spends queued behind it (#4).
+const BW_STATUS_TIMEOUT_MS = 8_000;
+
+// A locked vault with nothing remembered can never be opened headlessly. Saying
+// so costs one local secret read; discovering it by running bw costs the budget
+// above, twice, for an answer that was already knowable.
+function canUnlockHeadlessly(): boolean {
+  const master = host.secretGet(K_MASTER);
+  return !!(master && master.length);
+}
+
+// bw's wording for "these credentials are wrong", as opposed to a network or
+// server failure. Only the former is worth forgetting a stored password over.
+function isRejectedCredential(msg: string | undefined): boolean {
+  const m = (msg || "").toLowerCase();
+  return (
+    m.indexOf("invalid master password") >= 0 ||
+    m.indexOf("username or password is incorrect") >= 0 ||
+    m.indexOf("invalid credentials") >= 0
+  );
+}
+
+const LOCKED_HINT = "vault is locked and no master password is remembered — run `codeterm mem secret unlock` interactively";
+
 type Envelope<T = unknown> = { ok: T } | { error: SecretError };
 
 // bw --response JSON envelope.
@@ -269,7 +296,14 @@ function tryAutoUnlock(): boolean {
     const master = host.secretGet(K_MASTER);
     if (master && master.length) {
       const unlocked = bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: master } });
-      if (!unlocked.success) return false;
+      if (!unlocked.success) {
+        // A rejected password never starts working. Kept, it makes every later
+        // call pay a doomed unlock before failing; forgotten, the next call
+        // fails immediately and says to unlock interactively. A transient
+        // failure is left alone so a flaky network does not wipe the credential.
+        if (isRejectedCredential(unlocked.message)) host.secretDelete(K_MASTER);
+        return false;
+      }
       const token = extractSessionToken(unlocked.data);
       if (!token) return false;
       host.secretSet(K_SESSION, token);
@@ -291,15 +325,16 @@ function runWithSession(args: string[], stdin?: string): Envelope {
   let session = host.secretGet(K_SESSION);
   let triedUnlock = false;
   if (!session) {
-    if (!tryAutoUnlock()) return { error: { kind: "locked" } };
+    if (!canUnlockHeadlessly()) return { error: { kind: "locked", message: LOCKED_HINT } };
+    if (!tryAutoUnlock()) return { error: { kind: "locked", message: LOCKED_HINT } };
     triedUnlock = true;
     session = host.secretGet(K_SESSION);
-    if (!session) return { error: { kind: "locked" } };
+    if (!session) return { error: { kind: "locked", message: LOCKED_HINT } };
   }
   let r = bw(args, { session: session, stdin: stdin });
   if (!r.success) {
     const err = mapBwError(r.message);
-    if (err.kind === "locked" && !triedUnlock && tryAutoUnlock()) {
+    if (err.kind === "locked" && !triedUnlock && canUnlockHeadlessly() && tryAutoUnlock()) {
       const fresh = host.secretGet(K_SESSION);
       if (fresh) {
         r = bw(args, { session: fresh, stdin: stdin });
@@ -365,7 +400,9 @@ function bwExecToStatusResult(ex: BwExec): StatusResult {
 
 function bwStatus(): StatusResult {
   const session = host.secretGet(K_SESSION);
-  const raw = host.exec(bwExecOpts(["status"], { session: session || undefined }));
+  const raw = host.exec(
+    bwExecOpts(["status"], { session: session || undefined, timeoutMs: BW_STATUS_TIMEOUT_MS }),
+  );
   let ex: BwExec;
   try { ex = JSON.parse(raw); } catch (e) { return { failure: { kind: "exec_error", message: "exec parse: " + e } }; }
   return bwExecToStatusResult(ex);
@@ -394,7 +431,12 @@ function statusFromBw(res: StatusResult): SecretStatus {
 // state. Loop-guarded (tryAutoUnlock is single-flight; unlocked is terminal).
 function secretStatus(): SecretStatus {
   let st = statusFromBw(bwStatus());
-  if (st.status === "locked" && host.secretGet(K_MASTER) && tryAutoUnlock()) {
+  // Locked with nothing to unlock from is a terminal answer, not a reason to
+  // spend two more bw invocations arriving at the same place.
+  if (st.status === "locked" && !canUnlockHeadlessly()) {
+    return { status: "locked", endpoint: st.endpoint, reason: LOCKED_HINT };
+  }
+  if (st.status === "locked" && tryAutoUnlock()) {
     st = statusFromBw(bwStatus());
   }
   return st;
@@ -406,8 +448,13 @@ function secretUnlock(creds: SecretCreds): Envelope<true> {
   if (!hasPw && !creds.apiKeyClientId) {
     // No input: honour the `mem secret unlock` no-arg contract by re-unlocking
     // from persisted creds. Only when nothing is persisted is it a bad request.
-    if (tryAutoUnlock()) return { ok: true };
+    if (canUnlockHeadlessly() && tryAutoUnlock()) return { ok: true };
     return { error: { kind: "bad_request", message: "master password (or API-key creds) required" } };
+  }
+  if (!hasPw) {
+    // API-key credentials can log in, but `bw unlock` still needs the master
+    // password — saying so beats a confusing backend error from bw.
+    return { error: { kind: "bad_request", message: "master password is required to unlock, even with API-key credentials" } };
   }
   const server = serverUrl();
   if (!isValidHttpUrl(server)) {
@@ -425,13 +472,16 @@ function secretUnlock(creds: SecretCreds): Envelope<true> {
     host.secretDelete(K_SESSION);
     loggedIn = false;
   }
-  if (currentServer !== server) {
+  const serverChanged = currentServer !== server;
+  if (serverChanged) {
     const cfg = bw(["config", "server", server]);
     if (!cfg.success) return { error: { kind: "backend", message: "could not point bw at " + server } };
   }
 
-  st = bwStatus().status;
-  loggedIn = !!st && st.status !== "unauthenticated";
+  if (serverChanged) {
+    st = bwStatus().status;
+    loggedIn = !!st && st.status !== "unauthenticated";
+  }
   if (!loggedIn) {
     let login: BwResponse;
     if (creds.apiKeyClientId && creds.apiKeyClientSecret) {

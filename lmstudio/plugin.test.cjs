@@ -270,25 +270,31 @@ function assertJsonEqual(actual, expected, msg) {
   assert(a === e, `${msg}\nactual: ${a}\nexpected: ${e}`);
 }
 
-function expectedMachineMessages(charter, state, input) {
-  return [
-    {
-      role: "system",
-      content:
-        charter +
-        "\n\n" +
-        [
-          "Respond ONLY with a JSON object of this exact shape (no markdown fences, no surrounding prose):",
-          "{",
-          '  "status": "ok" | "attention" | "stalled",',
-          '  "summary": "<one-line assessment>",',
-          '  "state": <updated state object>,',
-          '  "actions": [{ "kind": "nudge" | "notify" | "report", "pane": "<optional pane id>", "message": "<text>" }]',
-          "}",
-        ].join("\n"),
-    },
-    { role: "user", content: JSON.stringify({ state, input }) },
-  ];
+// The engine owns the verdict-contract wording; this plugin owns only the fact
+// that a machine turn renders assembleMachine's two messages as one string,
+// carrying THIS caller's charter and state. Copying the engine's prose here made
+// the suite fail on an engine rewrite while proving nothing about the plugin.
+function assertMachineInput(input, charter, state, tickInput, name) {
+  assert(typeof input === "string", name + ": transport input must be a string");
+  assert(
+    input.indexOf("system: " + charter + "\n\n") === 0,
+    name + ": the system message must open with the caller's charter",
+  );
+  const tail = "user: " + JSON.stringify({ state: state, input: tickInput });
+  assert(
+    input.length >= tail.length && input.substring(input.length - tail.length) === tail,
+    name + ": the user message must round-trip the caller's state and input",
+  );
+}
+
+function assertMachineMessages(messages, charter, state, tickInput, name) {
+  assert(Array.isArray(messages) && messages.length === 2, name + ": expected a system and a user message");
+  assert(messages[0].role === "system" && messages[1].role === "user", name + ": roles are system then user");
+  assert(
+    String(messages[0].content).indexOf(charter) === 0,
+    name + ": the system message must open with the caller's charter",
+  );
+  assertJsonEqual(JSON.parse(messages[1].content), { state: state, input: tickInput }, name + ": state and input round-trip");
 }
 
 function renderEngineMessages(messages) {
@@ -297,8 +303,8 @@ function renderEngineMessages(messages) {
 
 function openAndStartBody(ctx) {
   plugin.openSession(ctx);
-  plugin.sendMessage(ctx.paneId, "hello");
-  assert(streamCalls.length === 1, "stream started for " + ctx.paneId);
+  plugin.sendMessage(ctx.tabId, "hello");
+  assert(streamCalls.length === 1, "stream started for " + ctx.tabId);
   return JSON.parse(streamCalls[0].body);
 }
 
@@ -321,12 +327,12 @@ function turn(answer, responseId) {
 test("openSession seeds the system prompt as a user message carrying the system_prompt marker", () => {
   reset({ baseUrl: "http://localhost:1234", defaultPreset: "codeterm", presets: [] });
   const r = plugin.openSession({
-    paneId: "pane-system",
+    tabId: "pane-system",
     config: {},
     systemPrompt: "You answer only in rhymes.",
     model: "ctx-model",
   });
-  assert(r.sessionId === "pane-system", "sessionId echoes paneId");
+  assert(r.sessionId === "pane-system", "sessionId echoes tabId");
 
   const p = plugin.poll("pane-system", null);
   assert(p.messages.length === 1, "one seed message, got " + p.messages.length);
@@ -346,7 +352,7 @@ test("openSession seeds the system prompt as a user message carrying the system_
 
 test("sendMessage sends stream:true and streams a growing assistant message with one stable id", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "stream", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "stream", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("stream", "hello");
 
   assert(streamCalls.length === 1, "stream started");
@@ -395,7 +401,7 @@ test("sendMessage sends stream:true and streams a growing assistant message with
 
 test("reasoning is surfaced as a type:'thinking' message, never mixed into the answer", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "reason", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "reason", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("reason", "think then answer");
 
   enqueueStream(0, [
@@ -432,7 +438,7 @@ test("reasoning is surfaced as a type:'thinking' message, never mixed into the a
 
 test("append upserts by id: streaming reasoning+answer collapse to exactly one entry each", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "upsert", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "upsert", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("upsert", "go");
 
   // Reasoning and answer each arrive across multiple poll cycles. The buggy
@@ -475,7 +481,7 @@ test("empty model auto-resolves to first loaded model via /api/v1/models and cac
     return JSON.stringify({ error: "unexpected url " + opts.url });
   };
 
-  plugin.openSession({ paneId: "empty-model", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "empty-model", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("empty-model", "hi");
 
   assert(streamCalls.length === 1, "stream started after resolving model");
@@ -496,7 +502,7 @@ test("empty model auto-resolves to first loaded model via /api/v1/models and cac
 
 test("codeterm-tool exec block runs host.exec, appends tool_result, then continues to final answer", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "react", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "react", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("react", "list panes");
 
   const answer =
@@ -537,7 +543,7 @@ test("codeterm-tool exec block runs host.exec, appends tool_result, then continu
 
 test("exec tool runs async via host.exec.start/poll: pump polls until done, then tool_result + continuation", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "async-exec", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "async-exec", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("async-exec", "list panes");
 
   const answer = 'Checking.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"sleep 1 && echo done"}}\n```';
@@ -572,7 +578,7 @@ test("exec tool runs async via host.exec.start/poll: pump polls until done, then
 
 test("iteration cap stops after 8 tool rounds", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "cap", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "cap", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("cap", "loop");
 
   const fence = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo loop"}}\n```';
@@ -590,7 +596,7 @@ test("iteration cap stops after 8 tool rounds", () => {
 
 test("iteration cap clears queued continuations and emits one cap message", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "cap-clear", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "cap-clear", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("cap-clear", "loop");
 
   const fence = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo loop"}}\n```';
@@ -621,7 +627,7 @@ test("iteration cap clears queued continuations and emits one cap message", () =
 
 test("fallback assembled context includes one final assistant entry per turn", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "fallback-context", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "fallback-context", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("fallback-context", "first");
 
   enqueueStream(0, [
@@ -648,7 +654,7 @@ test("watcher openSession emits the charter card and not the default preset prom
     presets: [{ id: "codeterm", name: "CodeTerm", systemPrompt: "DEFAULT PRESET" }],
   });
   plugin.openSession({
-    paneId: "watch-open",
+    tabId: "watch-open",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "WATCH CHARTER" },
@@ -665,7 +671,7 @@ test("watcherTick request body has no previous_response_id and renders assembleM
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   const tick = { tick: 1, nowMs: 123, state: { seen: 0 }, observations: { panes: ["a"] } };
   plugin.openSession({
-    paneId: "watch-body",
+    tabId: "watch-body",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "CHECK PROGRESS" },
@@ -676,13 +682,13 @@ test("watcherTick request body has no previous_response_id and renders assembleM
   const body = JSON.parse(streamCalls[0].body);
   assert(!Object.prototype.hasOwnProperty.call(body, "previous_response_id"), "watcher tick does not chain previous_response_id");
   assert(typeof body.input === "string", "watcher tick transport input is a string");
-  assert(body.input === renderEngineMessages(expectedMachineMessages("CHECK PROGRESS", tick.state, tick)), "watcher body input renders assembleMachine");
+  assertMachineInput(body.input, "CHECK PROGRESS", tick.state, tick, "watcher body");
 });
 
 test("two watcher ticks do not grow context from transcript history", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "watch-two",
+    tabId: "watch-two",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "WATCH" },
@@ -703,7 +709,7 @@ test("two watcher ticks do not grow context from transcript history", () => {
 test("watcher machine system contract is byte-identical across ticks", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "watch-contract",
+    tabId: "watch-contract",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "IMMUTABLE" },
@@ -723,7 +729,7 @@ test("watcherTick emits context_request and watcher_verdict transcript messages"
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   const tick = { tick: 7, nowMs: 77, state: {}, observations: { reports: [] } };
   plugin.openSession({
-    paneId: "watch-transcript",
+    tabId: "watch-transcript",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "OBSERVE" },
@@ -735,7 +741,7 @@ test("watcherTick emits context_request and watcher_verdict transcript messages"
   const contexts = contents(p.messages, "context_request");
   const verdicts = contents(p.messages, "watcher_verdict");
   assert(contexts.length === 1, "one context_request emitted");
-  assertJsonEqual(JSON.parse(contexts[0]), expectedMachineMessages("OBSERVE", tick.state, tick), "context_request contains assembled messages");
+  assertMachineMessages(JSON.parse(contexts[0]), "OBSERVE", tick.state, tick, "context_request");
   assert(verdicts.length === 1, "one watcher_verdict emitted");
   assert(verdicts[0] === '{"status":"attention","summary":"check","state":{},"actions":[]}', "verdict is final text verbatim");
 });
@@ -743,7 +749,7 @@ test("watcherTick emits context_request and watcher_verdict transcript messages"
 test("watcherTick executes a tool block and uses the next clean round as watcher_verdict", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "watch-tool",
+    tabId: "watch-tool",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "WATCH" },
@@ -770,7 +776,7 @@ test("watcherTick executes a tool block and uses the next clean round as watcher
 test("watcherTick emits tool_call and tool_result before the watcher_verdict", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "watch-transcript-tools",
+    tabId: "watch-transcript-tools",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "WATCH" },
@@ -796,7 +802,7 @@ test("watcherTick emits tool_call and tool_result before the watcher_verdict", (
 test("watcherTick round cap still yields exactly one fallback watcher_verdict", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "watch-cap",
+    tabId: "watch-cap",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "WATCH" },
@@ -825,7 +831,7 @@ test("watcherTick round cap still yields exactly one fallback watcher_verdict", 
 test("watcherTick after a tool loop starts from assembleMachine only", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "watch-tool-isolation",
+    tabId: "watch-tool-isolation",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "WATCH" },
@@ -843,7 +849,7 @@ test("watcherTick after a tool loop starts from assembleMachine only", () => {
   assert(streamCalls.length === 3, "second tick starts one fresh stream after first tick's tool continuation");
   const body = JSON.parse(streamCalls[2].body);
   assert(!Object.prototype.hasOwnProperty.call(body, "previous_response_id"), "second tick does not inherit previous_response_id");
-  assert(body.input === renderEngineMessages(expectedMachineMessages("WATCH", tick2.state, tick2)), "second tick input is exactly assembleMachine output");
+  assertMachineInput(body.input, "WATCH", tick2.state, tick2, "second tick");
   assert(!body.input.includes("tool_result"), "second tick excludes tick-1 tool result");
   assert(!body.input.includes("tool done"), "second tick excludes tick-1 verdict");
 });
@@ -855,7 +861,7 @@ test("sendMessage is a no-op on watcher sessions", () => {
   host.log = (level, message) => logs.push({ level, message });
   try {
     plugin.openSession({
-      paneId: "watch-noop",
+      tabId: "watch-noop",
       config: {},
       mode: "watcher",
       engine: { kind: "machine", charter: "WATCH" },
@@ -874,7 +880,7 @@ test("sendMessage is a no-op on watcher sessions", () => {
 test("chat engine window caps fallback history while default sessions remain unchanged", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "chat-window",
+    tabId: "chat-window",
     config: {},
     systemPrompt: "sys",
     engine: { kind: "chat", window: { maxMessages: 2, policy: "top" } },
@@ -891,7 +897,7 @@ test("chat engine window caps fallback history while default sessions remain unc
   assert(capped.includes("user: second"), "chat window keeps current user message");
 
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "default-history", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "default-history", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("default-history", "first");
   enqueueStream(0, [{ chunks: [turn("one", null)], done: true, status: 200 }]);
   pumpUntilDone("default-history");
@@ -906,19 +912,19 @@ test("chat engine window caps fallback history while default sessions remain unc
 test("interactive machine sendMessage uses assembleMachine and advances parsed verdict state", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "machine-interactive",
+    tabId: "machine-interactive",
     config: {},
     engine: { kind: "machine", charter: "STATEFUL" },
   });
   plugin.sendMessage("machine-interactive", "first?");
   let body = JSON.parse(streamCalls[0].body);
-  assert(body.input === renderEngineMessages(expectedMachineMessages("STATEFUL", {}, { query: "first?" })), "first machine input renders initial state");
+  assertMachineInput(body.input, "STATEFUL", {}, { query: "first?" }, "first machine turn");
   enqueueStream(0, [{ chunks: [turn('{"status":"ok","summary":"ok","state":{"step":1},"actions":[]}', null)], done: true, status: 200 }]);
   pumpUntilDone("machine-interactive");
 
   plugin.sendMessage("machine-interactive", "second?");
   body = JSON.parse(streamCalls[1].body);
-  assert(body.input === renderEngineMessages(expectedMachineMessages("STATEFUL", { step: 1 }, { query: "second?" })), "second machine input renders parsed verdict state");
+  assertMachineInput(body.input, "STATEFUL", { step: 1 }, { query: "second?" }, "second machine turn");
   assert(!Object.prototype.hasOwnProperty.call(body, "previous_response_id"), "interactive machine request does not chain previous_response_id");
 });
 
@@ -926,7 +932,7 @@ test("host parser receives the full assistant text and executes the validated ca
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   // An earlier illustrative fence, separated from a later real fence by prose:
   // only the trailing fence is a tool call; the prose-separated one is not.
-  plugin.openSession({ paneId: "two-fences", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "two-fences", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("two-fences", "explain then run");
   const twoFences =
     'For example:\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo example"}}\n```\n' +
@@ -948,7 +954,7 @@ test("host parser receives the full assistant text and executes the validated ca
 
 test("a native <|tool_call|> exec wrapper is recognized and runs host.exec", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "native", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "native", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("native", "list panes");
   // gemma-style native tool call: <|tool_call>call:NAME{args}<tool_call|> with an
   // unquoted key and the `command` alias (mapped to exec's `cmd`).
@@ -970,7 +976,7 @@ test("a native <|tool_call|> exec wrapper is recognized and runs host.exec", () 
 
 test("a namespaced native tool-call header (call:default_api:exec) runs host.exec", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "ns-native", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "ns-native", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("ns-native", "list panes");
   // Live gemma shape: the tool name is the LAST colon segment of the call header,
   // with a `default_api:` namespace prefix and single-quoted loose args.
@@ -992,7 +998,7 @@ test("a namespaced native tool-call header (call:default_api:exec) runs host.exe
 
 test("an unknown namespaced native tool-call (call:unknownns:notatool) is ignored", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "ns-unknown", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "ns-unknown", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("ns-unknown", "go");
   const answer = "Trying.\n<|tool_call>call:unknownns:notatool{command: 'rm -rf /'}<tool_call|>";
   enqueueStream(0, [{ chunks: [turn(answer, "resp-unk")], done: true, status: 200 }]);
@@ -1007,7 +1013,7 @@ test("an unknown namespaced native tool-call (call:unknownns:notatool) is ignore
 
 test("a codeterm-tool fence followed by trailing prose still executes", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "fence-prose", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "fence-prose", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("fence-prose", "go");
   const answer =
     'Running it.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo hi"}}\n```\nThat should do it.';
@@ -1022,7 +1028,7 @@ test("a codeterm-tool fence followed by trailing prose still executes", () => {
 
 test("a trailing fence matching the old documented example now executes (no example-guard skip)", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "example", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "example", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("example", "list my panes");
   // The old isDocumentedExample guard skipped this exact call because it equals the
   // former system-prompt example ('codeterm pane list'). That guard is REMOVED: the
@@ -1051,7 +1057,7 @@ test("a trailing fence matching the old documented example now executes (no exam
 
 test("a fence-only assistant reply leaves no empty assistant bubble", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "fence-only", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "fence-only", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("fence-only", "list panes");
   // The whole reply is the fence — after stripping the executed fence, cleaned === ''.
   // That empty content must NOT be shown as a blank assistant bubble in the transcript.
@@ -1072,7 +1078,7 @@ test("a fence-only assistant reply leaves no empty assistant bubble", () => {
 
 test("an executed tool-call fence is stripped from the displayed assistant content", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "strip", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "strip", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("strip", "do it");
   const answer = 'On it.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo strip"}}\n```';
   enqueueStream(0, [{ chunks: [turn(answer, "resp-strip")], done: true, status: 200 }]);
@@ -1090,7 +1096,7 @@ test("an executed tool-call fence is stripped from the displayed assistant conte
 
 test("malformed trailing tool fence is a normal assistant message when host parser returns null", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "bad-json", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "bad-json", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("bad-json", "bad tool");
   const bad = '```codeterm-tool\n{"tool":"exec","args":\n```';
   enqueueStream(0, [{ chunks: [turn(bad, "resp-bad-json")], done: true, status: 200 }]);
@@ -1107,7 +1113,7 @@ test("malformed trailing tool fence is a normal assistant message when host pars
 // ── R8b: tri-state host.toolcall.parse (ok / none / malformed) ─────────────
 test("tri-state ok: a {status:'ok'} parse executes the validated call", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "tri-ok", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "tri-ok", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("tri-ok", "run it");
   const answer = 'Running.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo hi"}}\n```';
   forceParse = JSON.stringify({ status: "ok", tool: "exec", args: { cmd: "echo hi" }, confidence: 0.95, span: [9, answer.length] });
@@ -1122,7 +1128,7 @@ test("tri-state ok: a {status:'ok'} parse executes the validated call", () => {
 
 test("tri-state none: a {status:'none'} parse is a normal assistant message, no tool", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "tri-none", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "tri-none", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("tri-none", "just talk");
   forceParse = JSON.stringify({ status: "none" });
   enqueueStream(0, [{ chunks: [turn("Here is a plain answer.", "resp-tri-none")], done: true, status: 200 }]);
@@ -1138,7 +1144,7 @@ test("tri-state none: a {status:'none'} parse is a normal assistant message, no 
 
 test("tri-state malformed: a {status:'malformed'} parse injects a retry note instead of silently dropping", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "tri-malf", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "tri-malf", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("tri-malf", "do a thing");
   forceParse = JSON.stringify({ status: "malformed", reason: "unterminated args object", span: [0, 20] });
   const bad = '```codeterm-tool\n{"tool":"exec","args":\n```';
@@ -1157,7 +1163,7 @@ test("tri-state malformed: a {status:'malformed'} parse injects a retry note ins
 
 test("tri-state malformed retries are capped per turn so a stuck model cannot loop forever", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "tri-cap", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "tri-cap", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("tri-cap", "go");
   forceParse = JSON.stringify({ status: "malformed", reason: "still broken" });
   const bad = '```codeterm-tool\n{"tool":"exec"\n```';
@@ -1178,7 +1184,7 @@ test("tri-state malformed retries are capped per turn so a stuck model cannot lo
 
 test("tri-state: a thrown host.toolcall.parse is handled as a normal message, not a crash", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "tri-throw", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "tri-throw", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("tri-throw", "talk");
   forceParse = () => { throw new Error("native parser panic"); };
   enqueueStream(0, [{ chunks: [turn("A safe answer.", "resp-tri-throw")], done: true, status: 200 }]);
@@ -1235,7 +1241,7 @@ test("model-bound preset resolves prompt and params for the chosen model", () =>
     ],
   });
 
-  plugin.openSession({ paneId: "bound-model", config: {} });
+  plugin.openSession({ tabId: "bound-model", config: {} });
   let p = plugin.poll("bound-model", null);
   assert(p.messages[0].content.includes("simple prompt"), "seed uses bound preset prompt");
 
@@ -1260,7 +1266,7 @@ test("unbound model falls back to defaultPreset", () => {
     ],
   });
 
-  const body = openAndStartBody({ paneId: "unbound-model", config: {} });
+  const body = openAndStartBody({ tabId: "unbound-model", config: {} });
   assert(body.model === "unbound-model", "keeps unbound chosen model");
   assert(body.system_prompt === "default prompt", "falls back to default preset prompt");
   assert(body.temperature === 0.6, "default preset params override global defaults");
@@ -1278,7 +1284,7 @@ test("explicit preset request wins when the model has no binding", () => {
     ],
   });
 
-  const body = openAndStartBody({ paneId: "explicit-preset", config: {}, model: "unbound-model", preset: "creative" });
+  const body = openAndStartBody({ tabId: "explicit-preset", config: {}, model: "unbound-model", preset: "creative" });
   assert(body.model === "unbound-model", "keeps explicit unbound model");
   assert(body.system_prompt === "creative prompt", "uses explicit preset prompt");
   assert(body.temperature === 0.95, "uses explicit preset params");
@@ -1295,14 +1301,14 @@ test("model-bound preset without systemPrompt falls back to default prompt", () 
     ],
   });
 
-  const body = openAndStartBody({ paneId: "bound-without-prompt", config: {} });
+  const body = openAndStartBody({ tabId: "bound-without-prompt", config: {} });
   assert(body.system_prompt === "default prompt", "missing bound prompt falls back to default");
   assert(body.temperature === 0.2, "bound preset params still apply");
 });
 
 test("setModel persists the last-used model", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "persist-set-model", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "persist-set-model", config: {}, systemPrompt: "sys" });
 
   plugin.setModel("persist-set-model", "qwen-2.5");
 
@@ -1312,7 +1318,7 @@ test("setModel persists the last-used model", () => {
 
 test("describeModelSwitch asks for confirmation only when target differs from active model", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [] });
-  plugin.openSession({ paneId: "describe-switch", config: {}, systemPrompt: "sys", model: "llama-3" });
+  plugin.openSession({ tabId: "describe-switch", config: {}, systemPrompt: "sys", model: "llama-3" });
 
   let desc = plugin.describeModelSwitch("describe-switch", "llama-3");
   assert(desc.needsConfirm === false, "same model is a no-op");
@@ -1328,7 +1334,7 @@ test("openSession without explicit model or preset binding restores the persiste
   reset({ baseUrl: "http://localhost:1234", model: "default-model", presets: [] });
   fileStore[lastModelPath] = JSON.stringify({ lastModel: "remembered-model" });
 
-  const body = openAndStartBody({ paneId: "restore-last-model", config: {}, systemPrompt: "sys" });
+  const body = openAndStartBody({ tabId: "restore-last-model", config: {}, systemPrompt: "sys" });
 
   assert(body.model === "remembered-model", "restored persisted model, got " + body.model);
   const stored = JSON.parse(fileStore[lastModelPath] || "{}");
@@ -1347,32 +1353,32 @@ test("explicit model and preset-bound model win over the persisted last-used mod
   });
   fileStore[lastModelPath] = JSON.stringify({ lastModel: "remembered-model" });
 
-  let body = openAndStartBody({ paneId: "explicit-over-persisted", config: {}, model: "explicit-model" });
+  let body = openAndStartBody({ tabId: "explicit-over-persisted", config: {}, model: "explicit-model" });
   assert(body.model === "explicit-model", "explicit model wins, got " + body.model);
 
   streamCalls.length = 0;
   streamJobs.length = 0;
   fileStore[lastModelPath] = JSON.stringify({ lastModel: "remembered-model" });
-  body = openAndStartBody({ paneId: "preset-over-persisted", config: {}, preset: "tiny" });
+  body = openAndStartBody({ tabId: "preset-over-persisted", config: {}, preset: "tiny" });
   assert(body.model === "tiny-model", "preset-bound model wins, got " + body.model);
   assert(body.system_prompt === "tiny prompt", "preset-bound prompt used");
 });
 
 test("missing or corrupt persisted last-used model falls back to defaultModel without throwing", () => {
   reset({ baseUrl: "http://localhost:1234", model: "default-model", presets: [] });
-  let body = openAndStartBody({ paneId: "missing-last-model", config: {}, systemPrompt: "sys" });
+  let body = openAndStartBody({ tabId: "missing-last-model", config: {}, systemPrompt: "sys" });
   assert(body.model === "default-model", "missing persisted model falls back to default");
 
   streamCalls.length = 0;
   streamJobs.length = 0;
   fileStore[lastModelPath] = "{not-json";
-  body = openAndStartBody({ paneId: "corrupt-last-model", config: {}, systemPrompt: "sys" });
+  body = openAndStartBody({ tabId: "corrupt-last-model", config: {}, systemPrompt: "sys" });
   assert(body.model === "default-model", "corrupt persisted model falls back to default");
 });
 
 test("sessionInfo reports the session model and setModel switches it for the next turn", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [] });
-  plugin.openSession({ paneId: "switch", config: {}, systemPrompt: "sys", model: "llama-3" });
+  plugin.openSession({ tabId: "switch", config: {}, systemPrompt: "sys", model: "llama-3" });
 
   // sessionInfo surfaces the model the session opened with.
   assert(plugin.sessionInfo("switch").model === "llama-3", "sessionInfo returns opened model");
@@ -1390,7 +1396,7 @@ test("sessionInfo reports the session model and setModel switches it for the nex
 
 test("setModel surfaces a JIT-load VRAM failure from chat as a clean system message", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [] });
-  plugin.openSession({ paneId: "vram-switch", config: {}, systemPrompt: "sys", model: "llama-3" });
+  plugin.openSession({ tabId: "vram-switch", config: {}, systemPrompt: "sys", model: "llama-3" });
 
   plugin.setModel("vram-switch", "qwen-72b");
   plugin.sendMessage("vram-switch", "hello");
@@ -1415,7 +1421,7 @@ test("charter: id resolves shipped prompts/watcher-orchestration.md in openSessi
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   const md = readFileSync(join(__dirname, "prompts", "watcher-orchestration.md"), "utf8").replace(/\s+$/, "");
   const r = plugin.openSession({
-    paneId: "charter-ref",
+    tabId: "charter-ref",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "charter:watcher-orchestration" },
@@ -1436,7 +1442,7 @@ test("charter: id accepts inline config override for custom charters", () => {
     charters: { custom: "INLINE CHARTER BODY" },
   });
   plugin.openSession({
-    paneId: "charter-inline",
+    tabId: "charter-inline",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "charter:custom" },
@@ -1448,7 +1454,7 @@ test("charter: id accepts inline config override for custom charters", () => {
 test("unknown charter: id fails openSession with an error", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [], charters: {} });
   const r = plugin.openSession({
-    paneId: "charter-missing",
+    tabId: "charter-missing",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "charter:does-not-exist" },
@@ -1465,7 +1471,7 @@ test("charter ref resolves before watcherTick uses assembleMachine", () => {
     charters: { health: "HEALTH CHARTER" },
   });
   plugin.openSession({
-    paneId: "charter-tick",
+    tabId: "charter-tick",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "charter:health" },
@@ -1473,10 +1479,7 @@ test("charter ref resolves before watcherTick uses assembleMachine", () => {
   const tick = { tick: 1, nowMs: 99, state: {}, observations: {} };
   plugin.watcherTick("charter-tick", tick);
   const body = JSON.parse(streamCalls[0].body);
-  assert(
-    body.input === renderEngineMessages(expectedMachineMessages("HEALTH CHARTER", tick.state, tick)),
-    "watcherTick uses resolved charter text",
-  );
+  assertMachineInput(body.input, "HEALTH CHARTER", tick.state, tick, "charter ref");
 });
 
 test("settings schema and config expose presets/defaultPreset", () => {
@@ -1516,7 +1519,7 @@ test("sessionInfo returns model and systemPrompt so an external author can read 
     presets: [{ id: "p1", name: "P1", systemPrompt: "Base prompt text" }],
     defaultPreset: "p1",
   });
-  plugin.openSession({ paneId: "info-r6", config: {}, model: "gemma-3" });
+  plugin.openSession({ tabId: "info-r6", config: {}, model: "gemma-3" });
   const info = plugin.sessionInfo("info-r6");
   assert(info.model === "gemma-3", "sessionInfo.model matches opened model, got " + info.model);
   assert(info.systemPrompt === "Base prompt text", "sessionInfo.systemPrompt matches preset, got " + info.systemPrompt);
@@ -1524,7 +1527,7 @@ test("sessionInfo returns model and systemPrompt so an external author can read 
 
 test("authorSystemPrompt saves the drafted prompt for the session's model to the authored-prompts file", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "gemma-3" });
-  plugin.openSession({ paneId: "author-save-r6", config: {}, model: "gemma-3", systemPrompt: "original" });
+  plugin.openSession({ tabId: "author-save-r6", config: {}, model: "gemma-3", systemPrompt: "original" });
 
   plugin.authorSystemPrompt("author-save-r6", "My tuned prompt for gemma");
 
@@ -1534,7 +1537,7 @@ test("authorSystemPrompt saves the drafted prompt for the session's model to the
 
 test("authorSystemPrompt updates the live sessionInfo.systemPrompt immediately", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "qwen-2.5" });
-  plugin.openSession({ paneId: "author-live-r6", config: {}, model: "qwen-2.5", systemPrompt: "old" });
+  plugin.openSession({ tabId: "author-live-r6", config: {}, model: "qwen-2.5", systemPrompt: "old" });
 
   plugin.authorSystemPrompt("author-live-r6", "Tuned for qwen");
 
@@ -1552,7 +1555,7 @@ test("openSession for the same model picks up the authored prompt on subsequent 
   // Seed the authored prompt as if a prior authorSystemPrompt call had written it.
   fileStore[authoredPromptsPath] = JSON.stringify({ "gemma-3": "Tuned prompt from author" });
 
-  const body = openAndStartBody({ paneId: "authored-init-r6", config: {}, model: "gemma-3" });
+  const body = openAndStartBody({ tabId: "authored-init-r6", config: {}, model: "gemma-3" });
   assert(
     body.system_prompt === "Tuned prompt from author",
     "authored prompt wins over preset on session init, got " + body.system_prompt,
@@ -1568,8 +1571,8 @@ test("authorSystemPrompt on unknown session is a safe no-op that writes nothing"
 
 test("authorSystemPrompt persists across multiple models independently", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "m1" });
-  plugin.openSession({ paneId: "multi-a", config: {}, model: "model-a", systemPrompt: "orig-a" });
-  plugin.openSession({ paneId: "multi-b", config: {}, model: "model-b", systemPrompt: "orig-b" });
+  plugin.openSession({ tabId: "multi-a", config: {}, model: "model-a", systemPrompt: "orig-a" });
+  plugin.openSession({ tabId: "multi-b", config: {}, model: "model-b", systemPrompt: "orig-b" });
 
   plugin.authorSystemPrompt("multi-a", "Tuned for model-a");
   plugin.authorSystemPrompt("multi-b", "Tuned for model-b");
@@ -1583,7 +1586,7 @@ test("authorSystemPrompt persists across multiple models independently", () => {
 
 test("requestPromptAuthoring hands off to an agent pane: ensures a workspace, spawns, and sends the current model + prompt", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "gemma-3" });
-  plugin.openSession({ paneId: "author-handoff-r6", config: {}, model: "gemma-3", systemPrompt: "current prompt body" });
+  plugin.openSession({ tabId: "author-handoff-r6", config: {}, model: "gemma-3", systemPrompt: "current prompt body" });
 
   agentReply = "TUNED PROMPT FOR GEMMA";
   const res = plugin.requestPromptAuthoring("author-handoff-r6", "make it shorter and example-led");
@@ -1601,7 +1604,7 @@ test("requestPromptAuthoring hands off to an agent pane: ensures a workspace, sp
 
 test("requestPromptAuthoring round-trip writes the agent's reply back as the authored prompt and updates the live session", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "gemma-3" });
-  plugin.openSession({ paneId: "author-rt-r6", config: {}, model: "gemma-3", systemPrompt: "old" });
+  plugin.openSession({ tabId: "author-rt-r6", config: {}, model: "gemma-3", systemPrompt: "old" });
 
   agentReply = "TUNED PROMPT FOR GEMMA";
   plugin.requestPromptAuthoring("author-rt-r6", "tune it");
@@ -1623,7 +1626,7 @@ test("the prompt authored via the round-trip is used on the next session init", 
     presets: [{ id: "p1", name: "P1", systemPrompt: "Preset prompt", model: "gemma-3" }],
     defaultPreset: "p1",
   });
-  plugin.openSession({ paneId: "author-init-rt-r6", config: {}, model: "gemma-3", systemPrompt: "Preset prompt" });
+  plugin.openSession({ tabId: "author-init-rt-r6", config: {}, model: "gemma-3", systemPrompt: "Preset prompt" });
 
   agentReply = "ROUND-TRIP TUNED PROMPT";
   plugin.requestPromptAuthoring("author-init-rt-r6", "tune");
@@ -1632,7 +1635,7 @@ test("the prompt authored via the round-trip is used on the next session init", 
   // A fresh session for the same model must pick up the authored prompt.
   streamCalls.length = 0;
   streamJobs.length = 0;
-  const body = openAndStartBody({ paneId: "author-init-rt-r6b", config: {}, model: "gemma-3" });
+  const body = openAndStartBody({ tabId: "author-init-rt-r6b", config: {}, model: "gemma-3" });
   assert(
     body.system_prompt === "ROUND-TRIP TUNED PROMPT",
     "next init uses the round-trip authored prompt over the preset, got " + body.system_prompt,
@@ -1641,7 +1644,7 @@ test("the prompt authored via the round-trip is used on the next session init", 
 
 test("requestPromptAuthoring parks across pumps until the author agent's reply is ready", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "qwen-2.5" });
-  plugin.openSession({ paneId: "author-park-r6", config: {}, model: "qwen-2.5", systemPrompt: "p" });
+  plugin.openSession({ tabId: "author-park-r6", config: {}, model: "qwen-2.5", systemPrompt: "p" });
 
   enqueueAgentPoll([{ done: false }, { done: false }, { done: true, reply: "READY PROMPT" }]);
   plugin.requestPromptAuthoring("author-park-r6", "tune");
@@ -1658,7 +1661,7 @@ test("requestPromptAuthoring parks across pumps until the author agent's reply i
 
 test("requestPromptAuthoring strips a code fence the author agent wraps the prompt in", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "gemma-3" });
-  plugin.openSession({ paneId: "author-fence-r6", config: {}, model: "gemma-3", systemPrompt: "p" });
+  plugin.openSession({ tabId: "author-fence-r6", config: {}, model: "gemma-3", systemPrompt: "p" });
 
   agentReply = "```\nUNFENCED PROMPT\n```";
   plugin.requestPromptAuthoring("author-fence-r6", "tune");
@@ -1670,7 +1673,7 @@ test("requestPromptAuthoring strips a code fence the author agent wraps the prom
 
 test("requestPromptAuthoring surfaces an author-agent error as a system message and writes nothing", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "gemma-3" });
-  plugin.openSession({ paneId: "author-err-r6", config: {}, model: "gemma-3", systemPrompt: "keep me" });
+  plugin.openSession({ tabId: "author-err-r6", config: {}, model: "gemma-3", systemPrompt: "keep me" });
 
   enqueueAgentPoll([{ done: true, error: "author agent crashed" }]);
   plugin.requestPromptAuthoring("author-err-r6", "tune");
