@@ -270,6 +270,158 @@ test("status cause: bw-level error passes the bw message through", () => {
   }
 });
 
+test("locked with nothing remembered: status answers once and names the way out", () => {
+  const secrets = {};
+  const savedHost = globalThis.host;
+  let execs = 0;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: () => {
+      execs++;
+      return JSON.stringify({ stdout: JSON.stringify({ success: true, data: { status: "locked" } }), code: 0 });
+    },
+  };
+  try {
+    const s = plugin.secretStatus();
+    assert(s.status === "locked", "expected locked, got " + JSON.stringify(s));
+    assert(/unlock/i.test(s.reason || ""), "a terminal lock must name the way out, got " + s.reason);
+    assert(execs === 1, "one bw invocation is enough to know, ran " + execs);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("locked with nothing remembered: an operation fails structurally without running bw", () => {
+  const secrets = {};
+  const savedHost = globalThis.host;
+  let execs = 0;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: () => { execs++; return JSON.stringify({ stdout: "{}", code: 0 }); },
+  };
+  try {
+    const r = plugin.secretGetItem("example");
+    const err = r && r.error;
+    assert(err && err.kind === "locked", "expected a locked envelope, got " + JSON.stringify(r));
+    assert(/unlock/i.test(err.message || ""), "the error must name the way out, got " + err.message);
+    assert(execs === 0, "a headlessly-unopenable vault needs no bw call, ran " + execs);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("bw status runs on its own shorter budget than a full command", () => {
+  const secrets = {};
+  const savedHost = globalThis.host;
+  const budgets = [];
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      budgets.push(JSON.parse(optsJson).timeoutMs);
+      return JSON.stringify({ stdout: JSON.stringify({ success: true, data: { status: "locked" } }), code: 0 });
+    },
+  };
+  try {
+    plugin.secretStatus();
+    assert(budgets.length === 1, "expected one status call, got " + budgets.length);
+    assert(budgets[0] < 30000, "status must not book the full command budget, got " + budgets[0]);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("a rejected master password is forgotten, so the next call fails fast", () => {
+  const secrets = { master_password: "wrong" };
+  const savedHost = globalThis.host;
+  let unlocks = 0;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const args = JSON.parse(optsJson).args || [];
+      if (args.indexOf("unlock") >= 0) {
+        unlocks++;
+        return JSON.stringify({ stdout: JSON.stringify({ success: false, message: "Invalid master password." }), code: 1 });
+      }
+      return JSON.stringify({ stdout: JSON.stringify({ success: true, data: { status: "locked" } }), code: 0 });
+    },
+  };
+  try {
+    const first = plugin.secretGetItem("example");
+    assert(first && first.error && first.error.kind === "locked", "expected locked, got " + JSON.stringify(first));
+    assert(unlocks === 1, "the first call may try the remembered password once, tried " + unlocks);
+    assert(!("master_password" in secrets), "a rejected password must not be kept");
+
+    const second = plugin.secretGetItem("example");
+    assert(second && second.error && second.error.kind === "locked", "still locked");
+    assert(unlocks === 1, "the second call must not retry a password already rejected, tried " + unlocks);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("a transient unlock failure keeps the remembered password", () => {
+  const secrets = { master_password: "right" };
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const args = JSON.parse(optsJson).args || [];
+      if (args.indexOf("unlock") >= 0) {
+        return JSON.stringify({ stdout: JSON.stringify({ success: false, message: "Server is unreachable" }), code: 1 });
+      }
+      return JSON.stringify({ stdout: JSON.stringify({ success: true, data: { status: "locked" } }), code: 0 });
+    },
+  };
+  try {
+    plugin.secretGetItem("example");
+    assert(secrets.master_password === "right", "a network failure must not wipe a good credential");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("api-key creds without a master password are refused up front, not by bw", () => {
+  const secrets = {};
+  const savedHost = globalThis.host;
+  let execs = 0;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: () => { execs++; return JSON.stringify({ stdout: "{}", code: 0 }); },
+  };
+  try {
+    const r = plugin.secretUnlock({ apiKeyClientId: "id", apiKeyClientSecret: "secret" });
+    assert(r && r.error && r.error.kind === "bad_request", "expected bad_request, got " + JSON.stringify(r));
+    assert(/master password/i.test(r.error.message || ""), "the error must name what is missing, got " + r.error.message);
+    assert(execs === 0, "the requirement is knowable without running bw, ran " + execs);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
 test("reset connection applies the configured server and clears stale credentials", () => {
   const secrets = {
     session: "stale-session",
