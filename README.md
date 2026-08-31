@@ -25,6 +25,12 @@ npm run typecheck          # tsc --noEmit across all plugin sources
 npm test                   # plugin-side parser tests (via tsx)
 ```
 
+Local typechecking expects the canonical CodeTerm checkout beside this repository
+at `../codeterm`, which supplies `packages/plugin-sdk` and `packages/chat-engine`.
+If `tsc` cannot resolve either package, verify that sibling checkout and rerun
+`npm ci`; stale installs created against the retired `../codeterm-canvas` path
+must not be reused.
+
 `scripts/build-plugin.mjs` (esbuild) compiles each plugin in one pass:
 
 - **logic** → `<id>/plugin.js`: CJS, `target: es2020`, `platform: neutral` so it
