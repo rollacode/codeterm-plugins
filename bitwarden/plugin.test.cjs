@@ -121,7 +121,9 @@ test("auto-unlock: no session + persisted master password → op retries and ret
       const args = o.args || [];
       const env = o.env || {};
       let body;
-      if (args.indexOf("unlock") >= 0) {
+      if (args.indexOf("status") >= 0) {
+        body = { success: true, data: { status: "locked" } };
+      } else if (args.indexOf("unlock") >= 0) {
         unlockCalls += 1;
         body = env.BW_PASSWORD === MASTER
           ? { success: true, data: { object: "message", raw: SESSION } }
@@ -140,6 +142,209 @@ test("auto-unlock: no session + persisted master password → op retries and ret
     assert("ok" in r, "expected auto-unlock+retry to return the item, got " + JSON.stringify(r));
     assert(r.ok.value === "s3cr3t-value", "expected the decrypted secret value");
     assert(unlockCalls === 1, "expected exactly one auto-unlock attempt, got " + unlockCalls);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("auto-relogin: logged-out email account logs in, unlocks, and completes the operation once", () => {
+  const MASTER = "correct-horse-battery-staple";
+  const EMAIL = "owner@example.com";
+  const SESSION = "SESSION-AFTER-LOGIN";
+  const secrets = { master_password: MASTER, login_email: EMAIL };
+  const calls = [];
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      const args = o.args || [], env = o.env || {};
+      calls.push({ args, env });
+      let body;
+      if (args.includes("status")) body = { success: true, data: { status: "unauthenticated" } };
+      else if (args.includes("login")) body = env.BW_PASSWORD === MASTER ? { success: true, data: {} } : { success: false, message: "Invalid credentials" };
+      else if (args.includes("unlock")) body = env.BW_PASSWORD === MASTER ? { success: true, data: { raw: SESSION } } : { success: false, message: "Invalid master password" };
+      else body = env.BW_SESSION === SESSION
+        ? { success: true, data: { id: "id-1", type: 1, name: "publish-token", login: { password: "value" } } }
+        : { success: false, message: "You are not logged in." };
+      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+    },
+  };
+  try {
+    const r = plugin.secretGetItem("publish-token");
+    assert("ok" in r && r.ok.value === "value", "expected recovered operation, got " + JSON.stringify(r));
+    assert(calls.filter((c) => c.args.includes("login")).length === 1, "expected one login");
+    assert(calls.filter((c) => c.args.includes("unlock")).length === 1, "expected one unlock");
+    assert(calls.filter((c) => c.args.includes("get")).length === 1, "expected one operation attempt");
+    assert(calls.every((c) => !c.args.includes(MASTER)), "master password must never enter argv");
+    assert(secrets.session === SESSION, "fresh session must be persisted");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("auto-relogin: API-key account restores login without exposing credentials in argv", () => {
+  const MASTER = "master-password";
+  const CLIENT_ID = "client-id";
+  const CLIENT_SECRET = "client-secret";
+  const SESSION = "API-SESSION";
+  const secrets = {
+    master_password: MASTER,
+    api_client_id: CLIENT_ID,
+    api_client_secret: CLIENT_SECRET,
+  };
+  const calls = [];
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      const args = o.args || [], env = o.env || {};
+      calls.push({ args, env });
+      let body;
+      if (args.includes("status")) body = { success: true, data: { status: "unauthenticated" } };
+      else if (args.includes("login")) body = env.BW_CLIENTID === CLIENT_ID && env.BW_CLIENTSECRET === CLIENT_SECRET
+        ? { success: true, data: {} }
+        : { success: false, message: "Invalid credentials" };
+      else if (args.includes("unlock")) body = env.BW_PASSWORD === MASTER ? { success: true, data: { raw: SESSION } } : { success: false, message: "Invalid master password" };
+      else body = env.BW_SESSION === SESSION ? { success: true, data: [] } : { success: false, message: "You are not logged in." };
+      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+    },
+  };
+  try {
+    const r = plugin.secretList({});
+    assert("ok" in r, "expected API-key recovery, got " + JSON.stringify(r));
+    const login = calls.find((c) => c.args.includes("login"));
+    assert(login && login.args.includes("--apikey"), "expected API-key login");
+    assert(login.env.BW_CLIENTID === CLIENT_ID && login.env.BW_CLIENTSECRET === CLIENT_SECRET, "API credentials must be environment-only");
+    assert(calls.every((c) => !c.args.includes(CLIENT_ID) && !c.args.includes(CLIENT_SECRET) && !c.args.includes(MASTER)), "credentials must never enter argv");
+    assert(secrets.session === SESSION, "fresh API session must be persisted");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("auto-relogin: stale session receives one bounded login-unlock-retry cycle", () => {
+  const MASTER = "master-password";
+  const SESSION = "fresh-session";
+  const secrets = { session: "stale-session", master_password: MASTER, login_email: "owner@example.com" };
+  let operationCalls = 0;
+  let loginCalls = 0;
+  let unlockCalls = 0;
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      const args = o.args || [], env = o.env || {};
+      let body;
+      if (args.includes("status")) body = { success: true, data: { status: "unauthenticated" } };
+      else if (args.includes("login")) { loginCalls++; body = { success: true, data: {} }; }
+      else if (args.includes("unlock")) { unlockCalls++; body = { success: true, data: { raw: SESSION } }; }
+      else {
+        operationCalls++;
+        body = env.BW_SESSION === SESSION
+          ? { success: true, data: { id: "id-1", type: 1, name: "token", login: { password: "value" } } }
+          : { success: false, message: "You are not logged in." };
+      }
+      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+    },
+  };
+  try {
+    const r = plugin.secretGetItem("token");
+    assert("ok" in r, "expected stale-session recovery, got " + JSON.stringify(r));
+    assert(operationCalls === 2, "operation must run once before and once after recovery");
+    assert(loginCalls === 1 && unlockCalls === 1, "recovery must be exactly one login and one unlock");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("auto-relogin: server login failure is surfaced and keeps persisted credentials", () => {
+  const MASTER = "master-password";
+  const secrets = { master_password: MASTER, login_email: "owner@example.com" };
+  let loginCalls = 0;
+  let unlockCalls = 0;
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const args = JSON.parse(optsJson).args || [];
+      let body;
+      if (args.includes("status")) body = { success: true, data: { status: "unauthenticated" } };
+      else if (args.includes("login")) { loginCalls++; body = { success: false, message: "Error saving device" }; }
+      else if (args.includes("unlock")) { unlockCalls++; body = { success: true, data: { raw: "unexpected" } }; }
+      else body = { success: false, message: "You are not logged in." };
+      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+    },
+  };
+  try {
+    const r = plugin.secretGetItem("token");
+    assert("error" in r && r.error.kind === "backend" && r.error.message === "Error saving device", "expected server failure, got " + JSON.stringify(r));
+    assert(loginCalls === 1 && unlockCalls === 0, "failed login must stop before unlock");
+    assert(secrets.master_password === MASTER, "transient server failure must retain the password");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("async status: logged-out vault advances through login and unlock jobs", () => {
+  const MASTER = "master-password";
+  const SESSION = "async-session";
+  const secrets = { master_password: MASTER, login_email: "owner@example.com" };
+  const jobs = {};
+  const polled = [];
+  let nextJob = 1;
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    execStart: (optsJson) => {
+      const opts = JSON.parse(optsJson);
+      const id = "job-" + nextJob++;
+      jobs[id] = opts;
+      return JSON.stringify({ jobId: id });
+    },
+    execPoll: (id) => {
+      polled.push(id);
+      const opts = jobs[id];
+      const args = opts.args || [];
+      let body;
+      if (args.includes("status")) body = { success: true, data: { status: "unauthenticated" } };
+      else if (args.includes("login")) body = { success: true, data: {} };
+      else body = { success: true, data: { raw: SESSION } };
+      return JSON.stringify({ done: true, stdout: JSON.stringify(body), stderr: "", code: 0 });
+    },
+  };
+  try {
+    const started = plugin.viewCall("statusStart", {});
+    assert(started.jobId === "job-1", "expected stable flow id");
+    assert(plugin.viewCall("statusPoll", { jobId: started.jobId }).done === false, "status should advance to login");
+    assert(plugin.viewCall("statusPoll", { jobId: started.jobId }).done === false, "login should advance to unlock");
+    const done = plugin.viewCall("statusPoll", { jobId: started.jobId });
+    assert(done.done === true && done.status.status === "unlocked", "expected unlocked, got " + JSON.stringify(done));
+    assert(polled.join(",") === "job-1,job-2,job-3", "expected event-driven job chain, got " + polled.join(","));
+    assert(secrets.session === SESSION, "async unlock must persist the fresh session");
+    assert(Object.values(jobs).every((j) => !(j.args || []).includes(MASTER)), "master password must never enter argv");
   } finally {
     globalThis.host = savedHost;
   }
