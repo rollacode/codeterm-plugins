@@ -32,14 +32,17 @@ Turning the toggle off falls back to the built-in local file store; your vault i
 
 ## Auto-unlock
 
-Every successful unlock stores the master password in the plugin's secret bucket
-alongside the short-lived `bw` session token. There is no separate toggle.
+Every successful unlock stores the accepted credentials in CodeTerm's local
+`~/.codeterm/.secrets` file alongside the short-lived `bw` session token. The
+file is written atomically and restricted to the current user (`0600` on Unix,
+an owner-only ACL on Windows). There is no separate toggle.
 
 When the session expires:
 
 - Any operation that hits a locked vault performs one just-in-time re-unlock (`bw unlock --passwordenv`, password via env only — never argv or logs) and retries once.
+- If the CLI has become fully logged out, the plugin performs one bounded headless login, unlocks, stores the fresh session, and retries the operation once.
 - `codeterm mem secret unlock` with no input re-unlocks from the remembered password.
-- Status reflects the truly reachable state (a locked vault with a remembered password shows as unlocked after a JIT unlock).
+- Status reflects the truly reachable state: locked or logged-out vaults recover automatically whenever the persisted credentials are sufficient.
 
 > API-key credentials (`BW_CLIENTID`/`BW_CLIENTSECRET`) can re-establish login headlessly, but `bw unlock` still requires the master password entered during unlock.
 
