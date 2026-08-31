@@ -338,6 +338,7 @@ function tryAutoUnlock(): boolean {
         lastRecoveryError = { kind: "backend", message: status.failure.message };
         return false;
       }
+      rememberLoginIdentity(status);
       if (status.status && status.status.status === "unauthenticated" && !tryAutoLogin(master)) {
         return false;
       }
@@ -465,6 +466,11 @@ function bwStatus(): StatusResult {
   return bwExecToStatusResult(ex);
 }
 
+function rememberLoginIdentity(res: StatusResult): void {
+  const email = res.status && res.status.userEmail;
+  if (email) host.secretSet(K_EMAIL, email);
+}
+
 // --- SecretStore trait surface (called by JsSecretBackend) ---
 
 // Map a raw bw status result into the host's StoreStatus shape. Shared by the
@@ -475,8 +481,8 @@ function statusFromBw(res: StatusResult): SecretStatus {
   if (res.failure) return { status: "unavailable", reason: res.failure.message };
   const s = res.status;
   if (!s) return { status: "unavailable", reason: "bw status returned no data" };
+  rememberLoginIdentity(res);
   if (s.status === "unlocked") {
-    if (s.userEmail) host.secretSet(K_EMAIL, s.userEmail);
     return { status: "unlocked", user: s.userEmail || null, transient: false, endpoint: s.serverUrl || endpoint };
   }
   if (s.status === "locked") return { status: "locked", endpoint: endpoint };
@@ -525,7 +531,9 @@ function secretUnlock(creds: SecretCreds): Envelope<true> {
     return { error: { kind: "bad_request", message: "server host not permitted by plugin network permissions: " + hostOf(server) } };
   }
 
-  let st = bwStatus().status;
+  let statusResult = bwStatus();
+  rememberLoginIdentity(statusResult);
+  let st = statusResult.status;
   let loggedIn = !!st && st.status !== "unauthenticated";
   const currentServer = (st && st.serverUrl) || "";
   if (loggedIn && currentServer && currentServer !== server) {
@@ -540,7 +548,9 @@ function secretUnlock(creds: SecretCreds): Envelope<true> {
   }
 
   if (serverChanged) {
-    st = bwStatus().status;
+    statusResult = bwStatus();
+    rememberLoginIdentity(statusResult);
+    st = statusResult.status;
     loggedIn = !!st && st.status !== "unauthenticated";
   }
   if (!loggedIn) {

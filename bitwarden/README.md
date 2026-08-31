@@ -37,6 +37,9 @@ Every successful unlock stores the accepted credentials in CodeTerm's local
 file is written atomically and restricted to the current user (`0600` on Unix,
 an owner-only ACL on Windows). There is no separate toggle.
 
+The account identity exposed by `bw status` is retained while the CLI is locked,
+so a later full CLI logout can be recovered without another interactive sign-in.
+
 When the session expires:
 
 - Any operation that hits a locked vault performs one just-in-time re-unlock (`bw unlock --passwordenv`, password via env only — never argv or logs) and retries once.

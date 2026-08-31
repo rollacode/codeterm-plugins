@@ -381,6 +381,57 @@ test("successful unlock always persists the master password for auto-unlock", ()
   }
 });
 
+test("locked identity survives a later CLI logout for headless recovery", () => {
+  const MASTER = "master-password";
+  const EMAIL = "owner@example.com";
+  const SESSION_1 = "first-session";
+  const SESSION_2 = "recovered-session";
+  const secrets = {};
+  let state = "locked";
+  let unlocks = 0;
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      const args = o.args || [], env = o.env || {};
+      let body;
+      if (args.includes("status")) {
+        body = { success: true, data: { status: state, userEmail: state === "locked" ? EMAIL : undefined, serverUrl: "https://vault.bitwarden.com" } };
+      } else if (args.includes("login")) {
+        state = "locked";
+        body = env.BW_PASSWORD === MASTER ? { success: true, data: {} } : { success: false, message: "Invalid credentials" };
+      } else if (args.includes("unlock")) {
+        unlocks += 1;
+        state = "unlocked";
+        body = env.BW_PASSWORD === MASTER ? { success: true, data: { raw: unlocks === 1 ? SESSION_1 : SESSION_2 } } : { success: false, message: "Invalid master password" };
+      } else {
+        body = env.BW_SESSION === SESSION_2
+          ? { success: true, data: { id: "id-1", type: 1, name: "token", login: { password: "value" } } }
+          : { success: false, message: "You are not logged in." };
+      }
+      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+    },
+  };
+  try {
+    const unlocked = plugin.secretUnlock({ masterPassword: MASTER });
+    assert("ok" in unlocked, "expected locked vault unlock, got " + JSON.stringify(unlocked));
+    assert(secrets.login_email === EMAIL, "locked status identity must be persisted");
+
+    state = "unauthenticated";
+    delete secrets.session;
+    const recovered = plugin.secretGetItem("token");
+    assert("ok" in recovered && recovered.ok.value === "value", "expected relogin recovery, got " + JSON.stringify(recovered));
+    assert(unlocks === 2, "expected initial and recovery unlocks only, got " + unlocks);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
 // ── empty-creds unlock triggers auto-unlock (mem secret unlock no-arg) ──
 
 test("empty-creds unlock: no input + persisted master → auto-unlock succeeds", () => {
