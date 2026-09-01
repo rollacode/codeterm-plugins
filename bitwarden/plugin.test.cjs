@@ -106,7 +106,8 @@ test("auto-unlock: no session + persisted master password → op retries and ret
     object: "item", id: "id-1", type: 1, name: "db-pw", notes: null,
     login: { username: null, password: "s3cr3t-value", totp: null, uris: [] },
   };
-  const secrets = { master_password: MASTER }; // note: no "session" → locked
+  // Consent armed in the plugin's own bucket; same mechanism, now behind the opt-in.
+  const secrets = { auto_unlock_consent: "1", master_password: MASTER }; // note: no "session" → locked
   let unlockCalls = 0;
 
   const savedHost = globalThis.host;
@@ -151,7 +152,7 @@ test("auto-relogin: logged-out email account logs in, unlocks, and completes the
   const MASTER = "correct-horse-battery-staple";
   const EMAIL = "owner@example.com";
   const SESSION = "SESSION-AFTER-LOGIN";
-  const secrets = { master_password: MASTER, login_email: EMAIL };
+  const secrets = { auto_unlock_consent: "1", master_password: MASTER, login_email: EMAIL };
   const calls = [];
   const savedHost = globalThis.host;
   globalThis.host = {
@@ -193,6 +194,7 @@ test("auto-relogin: API-key account restores login without exposing credentials 
   const CLIENT_SECRET = "client-secret";
   const SESSION = "API-SESSION";
   const secrets = {
+    auto_unlock_consent: "1",
     master_password: MASTER,
     api_client_id: CLIENT_ID,
     api_client_secret: CLIENT_SECRET,
@@ -235,7 +237,7 @@ test("auto-relogin: API-key account restores login without exposing credentials 
 test("auto-relogin: stale session receives one bounded login-unlock-retry cycle", () => {
   const MASTER = "master-password";
   const SESSION = "fresh-session";
-  const secrets = { session: "stale-session", master_password: MASTER, login_email: "owner@example.com" };
+  const secrets = { auto_unlock_consent: "1", session: "stale-session", master_password: MASTER, login_email: "owner@example.com" };
   let operationCalls = 0;
   let loginCalls = 0;
   let unlockCalls = 0;
@@ -274,7 +276,7 @@ test("auto-relogin: stale session receives one bounded login-unlock-retry cycle"
 
 test("auto-relogin: server login failure is surfaced and keeps persisted credentials", () => {
   const MASTER = "master-password";
-  const secrets = { master_password: MASTER, login_email: "owner@example.com" };
+  const secrets = { auto_unlock_consent: "1", master_password: MASTER, login_email: "owner@example.com" };
   let loginCalls = 0;
   let unlockCalls = 0;
   const savedHost = globalThis.host;
@@ -307,7 +309,7 @@ test("auto-relogin: server login failure is surfaced and keeps persisted credent
 test("async status: logged-out vault advances through login and unlock jobs", () => {
   const MASTER = "master-password";
   const SESSION = "async-session";
-  const secrets = { master_password: MASTER, login_email: "owner@example.com" };
+  const secrets = { auto_unlock_consent: "1", master_password: MASTER, login_email: "owner@example.com" };
   const jobs = {};
   const polled = [];
   let nextJob = 1;
@@ -350,10 +352,10 @@ test("async status: logged-out vault advances through login and unlock jobs", ()
   }
 });
 
-test("successful unlock always persists the master password for auto-unlock", () => {
+test("consent armed + explicit intent: unlock persists the master password for auto-unlock", () => {
   const MASTER = "hunter2";
   const SESSION = "SESS-OFF";
-  const secrets = {};
+  const secrets = { auto_unlock_consent: "1" };
   const savedHost = globalThis.host;
   globalThis.host = {
     secretGet: (k) => (k in secrets ? secrets[k] : null),
@@ -372,10 +374,10 @@ test("successful unlock always persists the master password for auto-unlock", ()
     },
   };
   try {
-    const r = plugin.secretUnlock({ masterPassword: MASTER, email: "a@b.c" });
+    const r = plugin.secretUnlock({ masterPassword: MASTER, email: "a@b.c", persistForAutoUnlock: true });
     assert("ok" in r, "expected unlock ok, got " + JSON.stringify(r));
     assert(secrets.session === SESSION, "session must be persisted");
-    assert(secrets.master_password === MASTER, "K_MASTER must always be persisted");
+    assert(secrets.master_password === MASTER, "K_MASTER must be persisted when consent is armed and intent is explicit");
   } finally {
     globalThis.host = savedHost;
   }
@@ -386,7 +388,7 @@ test("locked identity survives a later CLI logout for headless recovery", () => 
   const EMAIL = "owner@example.com";
   const SESSION_1 = "first-session";
   const SESSION_2 = "recovered-session";
-  const secrets = {};
+  const secrets = { auto_unlock_consent: "1" };
   let state = "locked";
   let unlocks = 0;
   const savedHost = globalThis.host;
@@ -418,7 +420,7 @@ test("locked identity survives a later CLI logout for headless recovery", () => 
     },
   };
   try {
-    const unlocked = plugin.secretUnlock({ masterPassword: MASTER });
+    const unlocked = plugin.secretUnlock({ masterPassword: MASTER, persistForAutoUnlock: true });
     assert("ok" in unlocked, "expected locked vault unlock, got " + JSON.stringify(unlocked));
     assert(secrets.login_email === EMAIL, "locked status identity must be persisted");
 
@@ -437,7 +439,7 @@ test("locked identity survives a later CLI logout for headless recovery", () => 
 test("empty-creds unlock: no input + persisted master → auto-unlock succeeds", () => {
   const MASTER = "hunter2";
   const SESSION = "SESS-EMPTY";
-  const secrets = { master_password: MASTER };
+  const secrets = { auto_unlock_consent: "1", master_password: MASTER };
   let unlockCalls = 0;
   const savedHost = globalThis.host;
   globalThis.host = {
@@ -599,7 +601,7 @@ test("bw status runs on its own shorter budget than a full command", () => {
 });
 
 test("a rejected master password is forgotten, so the next call fails fast", () => {
-  const secrets = { master_password: "wrong" };
+  const secrets = { auto_unlock_consent: "1", master_password: "wrong" };
   const savedHost = globalThis.host;
   let unlocks = 0;
   globalThis.host = {
@@ -632,7 +634,7 @@ test("a rejected master password is forgotten, so the next call fails fast", () 
 });
 
 test("a transient unlock failure keeps the remembered password", () => {
-  const secrets = { master_password: "right" };
+  const secrets = { auto_unlock_consent: "1", master_password: "right" };
   const savedHost = globalThis.host;
   globalThis.host = {
     secretGet: (k) => (k in secrets ? secrets[k] : null),
@@ -710,6 +712,300 @@ test("reset connection applies the configured server and clears stale credential
     assert(Object.keys(secrets).length === 0, "all stale auth credentials must be cleared");
   } finally {
     globalThis.host = savedHost;
+  }
+});
+
+// ── auto-unlock consent ──
+// Capability advertises, the durable flag permits, the per-call intent requests,
+// and the vault still authenticates on its own evidence.
+
+const SYNTHETIC_MASTER = "synthetic-not-a-credential-0000";
+const SYNTHETIC_SESSION = "synthetic-session-token-0000";
+const SYNTHETIC_CLIENT_SECRET = "synthetic-client-secret-0000";
+
+// Records the calls themselves, so consent is asserted on writes, not on state.
+function recordingHost(secrets, exec) {
+  const rec = { writes: [], deletes: [], execs: [], starts: [] };
+  const h = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { rec.writes.push({ key: k, value: v }); secrets[k] = v; return true; },
+    secretDelete: (k) => { rec.deletes.push(k); delete secrets[k]; return true; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      rec.execs.push({ args: o.args || [], env: o.env || {} });
+      return exec ? exec(o) : JSON.stringify({ stdout: "{}", code: 0 });
+    },
+    execStart: (optsJson) => {
+      rec.starts.push(JSON.parse(optsJson));
+      return JSON.stringify({ error: "not used" });
+    },
+  };
+  return { host: h, rec };
+}
+
+// bw double: unlock succeeds for `master`, session-scoped ops need `session`.
+function bwDouble(master, session, extra) {
+  return (o) => {
+    const args = o.args || [], env = o.env || {};
+    let body = extra ? extra(args, env) : null;
+    if (!body) {
+      if (args.indexOf("status") >= 0) body = { success: true, data: { status: "locked", serverUrl: "https://vault.bitwarden.com" } };
+      else if (args.indexOf("unlock") >= 0) body = env.BW_PASSWORD === master
+        ? { success: true, data: { raw: session } }
+        : { success: false, message: "Invalid master password." };
+      else if (args.indexOf("login") >= 0) body = { success: true, data: {} };
+      else body = env.BW_SESSION === session
+        ? { success: true, data: { id: "id-1", type: 1, name: "token", login: { password: "value" } } }
+        : { success: false, message: "Vault is locked." };
+    }
+    return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+  };
+}
+
+// Two independent signals, one permitted cell.
+test("persistence requires BOTH durable consent and per-call intent", () => {
+  const savedHost = globalThis.host;
+  const table = [
+    { consent: false, intent: false, persists: false },
+    { consent: false, intent: true, persists: false },
+    { consent: true, intent: false, persists: false },
+    { consent: true, intent: true, persists: true },
+  ];
+  for (const row of table) {
+    const label = "consent=" + row.consent + " intent=" + row.intent;
+    const secrets = row.consent ? { auto_unlock_consent: "1" } : {};
+    const { host: h, rec } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+    globalThis.host = h;
+    try {
+      const r = plugin.secretUnlock({
+        masterPassword: SYNTHETIC_MASTER,
+        email: "owner@example.com",
+        persistForAutoUnlock: row.intent,
+      });
+      assert("ok" in r, label + ": unlock itself must succeed, got " + JSON.stringify(r));
+      assert(secrets.session === SYNTHETIC_SESSION, label + ": the session token is always persisted");
+      const writes = rec.writes.filter((w) => w.key === "master_password").length;
+      assert(
+        writes === (row.persists ? 1 : 0),
+        label + ": expected " + (row.persists ? 1 : 0) + " master_password writes, got " + writes,
+      );
+      assert(
+        ("master_password" in secrets) === row.persists,
+        label + ": stored master password should be " + row.persists,
+      );
+    } finally {
+      globalThis.host = savedHost;
+    }
+  }
+});
+
+test("consent absent: an unconsented unlock arms no auto-unlock", () => {
+  const secrets = {};
+  const { host: h, rec } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+  const savedHost = globalThis.host;
+  globalThis.host = h;
+  try {
+    const r = plugin.secretUnlock({
+      masterPassword: SYNTHETIC_MASTER,
+      email: "owner@example.com",
+      persistForAutoUnlock: true,
+    });
+    assert("ok" in r, "unlock itself must still succeed, got " + JSON.stringify(r));
+    assert(!("master_password" in secrets), "no master password may survive an unconsented unlock");
+
+    // Structural refusal, with no bw spent on a vault it cannot open.
+    delete secrets.session;
+    const before = rec.execs.length;
+    const op = plugin.secretGetItem("token");
+    assert(op && op.error && op.error.kind === "locked", "expected a locked envelope, got " + JSON.stringify(op));
+    assert(rec.execs.length === before, "an unarmed vault needs no bw call, ran " + (rec.execs.length - before));
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("a malformed consent flag reads as OFF, whatever the per-call intent says", () => {
+  const savedHost = globalThis.host;
+  for (const flag of ["", "yes", "true", "0", "1x", "01"]) {
+    const secrets = { auto_unlock_consent: flag };
+    const { host: h, rec } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+    globalThis.host = h;
+    try {
+      const r = plugin.secretUnlock({
+        masterPassword: SYNTHETIC_MASTER,
+        email: "owner@example.com",
+        persistForAutoUnlock: true,
+      });
+      assert("ok" in r, "unlock must succeed for flag " + JSON.stringify(flag) + ", got " + JSON.stringify(r));
+      assert(
+        rec.writes.filter((w) => w.key === "master_password").length === 0,
+        "flag " + JSON.stringify(flag) + " must not read as consent",
+      );
+    } finally {
+      globalThis.host = savedHost;
+    }
+  }
+});
+
+test("a malformed per-call intent reads as false, even with consent armed", () => {
+  const savedHost = globalThis.host;
+  for (const intent of [undefined, "true", 1, null, {}]) {
+    const secrets = { auto_unlock_consent: "1" };
+    const { host: h, rec } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+    globalThis.host = h;
+    try {
+      const creds = { masterPassword: SYNTHETIC_MASTER, email: "owner@example.com" };
+      if (intent !== undefined) creds.persistForAutoUnlock = intent;
+      const r = plugin.secretUnlock(creds);
+      assert("ok" in r, "unlock must succeed for intent " + JSON.stringify(intent) + ", got " + JSON.stringify(r));
+      assert(
+        rec.writes.filter((w) => w.key === "master_password").length === 0,
+        "intent " + JSON.stringify(intent) + " must be treated as false",
+      );
+    } finally {
+      globalThis.host = savedHost;
+    }
+  }
+});
+
+test("consent withdrawn: the OFF verb deletes the master password in that same call", () => {
+  const secrets = {
+    auto_unlock_consent: "1",
+    master_password: SYNTHETIC_MASTER,
+    session: SYNTHETIC_SESSION,
+    login_email: "owner@example.com",
+  };
+  const { host: h, rec } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+  const savedHost = globalThis.host;
+  globalThis.host = h;
+  try {
+    const r = plugin.viewCall("setAutoUnlockConsent", { enabled: false });
+    assert(r && r.ok === true, "expected the withdrawal verb to succeed, got " + JSON.stringify(r));
+    assert(rec.deletes.indexOf("master_password") >= 0, "withdrawal must delete master_password, deleted " + JSON.stringify(rec.deletes));
+    assert(!("master_password" in secrets), "no master password may survive withdrawal");
+    assert(rec.execs.length === 0, "withdrawing consent must not shell bw, ran " + rec.execs.length);
+
+    // No further login: the next op refuses rather than recovering what was revoked.
+    delete secrets.session;
+    const op = plugin.secretGetItem("token");
+    assert(op && op.error && op.error.kind === "locked", "expected a locked envelope, got " + JSON.stringify(op));
+    assert(rec.execs.length === 0, "a revoked vault needs no bw call, ran " + rec.execs.length);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("consent verb: absent reads OFF, ON arms it, and an omitted flag is a withdrawal", () => {
+  const secrets = {};
+  const { host: h } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+  const savedHost = globalThis.host;
+  globalThis.host = h;
+  try {
+    assert(plugin.viewCall("autoUnlockConsent", {}).enabled === false, "an absent flag must read as OFF");
+
+    assert(plugin.viewCall("setAutoUnlockConsent", { enabled: true }).ok === true, "expected the ON verb to succeed");
+    assert(plugin.viewCall("autoUnlockConsent", {}).enabled === true, "the ON verb must arm consent durably");
+
+    assert(plugin.viewCall("setAutoUnlockConsent", {}).ok === true, "expected an omitted flag to be accepted");
+    assert(plugin.viewCall("autoUnlockConsent", {}).enabled === false, "an omitted flag is a withdrawal, never consent");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("consent armed but no stored credential: an operation is refused with a named discriminant", () => {
+  const secrets = { auto_unlock_consent: "1" };
+  const { host: h, rec } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+  const savedHost = globalThis.host;
+  globalThis.host = h;
+  try {
+    const r = plugin.secretGetItem("token");
+    assert(r && r.error && r.error.kind === "locked", "expected a locked discriminant, got " + JSON.stringify(r));
+    assert(/unlock/i.test(r.error.message || ""), "the refusal must name the way out, got " + r.error.message);
+    assert(rec.execs.length === 0, "consent is not access: nothing is attempted, ran " + rec.execs.length);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("the manifest declares the auto-unlock capability it now implements", () => {
+  const { readFileSync } = require("node:fs");
+  const { join } = require("node:path");
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  const cap = manifest.capabilities && manifest.capabilities.secretBackend;
+  assert(cap && typeof cap === "object", "secretBackend must be the object form, got " + JSON.stringify(cap));
+  assert(cap.autoUnlock === true, "the manifest must declare autoUnlock, got " + JSON.stringify(cap));
+});
+
+test("secretInit performs no exec and no secret write", () => {
+  const secrets = {
+    auto_unlock_consent: "1",
+    master_password: SYNTHETIC_MASTER,
+    session: SYNTHETIC_SESSION,
+    login_email: "owner@example.com",
+  };
+  const { host: h, rec } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+  const savedHost = globalThis.host;
+  globalThis.host = h;
+  try {
+    const r = plugin.secretInit();
+    assert(r && r.ok === true, "expected secretInit to succeed, got " + JSON.stringify(r));
+    assert(rec.execs.length === 0 && rec.starts.length === 0, "secretInit must shell nothing, ran " + (rec.execs.length + rec.starts.length));
+    assert(rec.writes.length === 0 && rec.deletes.length === 0, "secretInit must write nothing, touched " + JSON.stringify(rec.writes.concat(rec.deletes)));
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("no credential reaches argv or any emitted string across the recovery paths", () => {
+  const savedHost = globalThis.host;
+  const emitted = [];
+  const argv = [];
+
+  const drive = (secrets, exec, run) => {
+    const { host: h, rec } = recordingHost(secrets, exec);
+    globalThis.host = h;
+    try {
+      emitted.push(JSON.stringify(run()));
+    } finally {
+      globalThis.host = savedHost;
+      for (const call of rec.execs) argv.push(call.args.join(" "));
+      for (const call of rec.starts) argv.push((call.args || []).join(" "));
+    }
+  };
+
+  // login + persist, JIT auto-unlock, API-key relogin, surfaced login failure.
+  drive({ auto_unlock_consent: "1" }, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION), () =>
+    plugin.secretUnlock({ masterPassword: SYNTHETIC_MASTER, email: "owner@example.com", persistForAutoUnlock: true }));
+
+  drive({ auto_unlock_consent: "1", master_password: SYNTHETIC_MASTER, login_email: "owner@example.com" },
+    bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION), () => plugin.secretGetItem("token"));
+
+  drive({
+    auto_unlock_consent: "1",
+    master_password: SYNTHETIC_MASTER,
+    api_client_id: "client-id",
+    api_client_secret: SYNTHETIC_CLIENT_SECRET,
+  }, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION, (args) =>
+    args.indexOf("status") >= 0 ? { success: true, data: { status: "unauthenticated" } } : null),
+  () => plugin.secretGetItem("token"));
+
+  drive({ auto_unlock_consent: "1", master_password: SYNTHETIC_MASTER, login_email: "owner@example.com" },
+    bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION, (args) => {
+      if (args.indexOf("status") >= 0) return { success: true, data: { status: "unauthenticated" } };
+      if (args.indexOf("login") >= 0) return { success: false, message: "Error saving device" };
+      return null;
+    }), () => plugin.secretGetItem("token"));
+
+  for (const value of [SYNTHETIC_MASTER, SYNTHETIC_SESSION, SYNTHETIC_CLIENT_SECRET]) {
+    for (const line of argv) {
+      assert(line.indexOf(value) < 0, "a credential reached argv: " + line.split(value).join("<redacted>"));
+    }
+    for (const out of emitted) {
+      assert(out.indexOf(value) < 0, "a credential reached an emitted envelope: " + out.split(value).join("<redacted>"));
+    }
   }
 });
 
