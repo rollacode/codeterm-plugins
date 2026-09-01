@@ -25,6 +25,10 @@ const K_MASTER = "master_password";
 const K_EMAIL = "login_email";
 const K_CLIENT_ID = "api_client_id";
 const K_CLIENT_SECRET = "api_client_secret";
+const K_CONSENT = "auto_unlock_consent";
+// Only this exact byte arms consent, so an absent, empty or hand-edited flag
+// fails closed rather than reading as a yes.
+const CONSENT_ON = "1";
 const BW_TIMEOUT_MS = 30_000;
 
 // `bw status` reads local state and answers promptly even against a self-hosted
@@ -33,12 +37,38 @@ const BW_TIMEOUT_MS = 30_000;
 // is a second every other secret call spends queued behind it (#4).
 const BW_STATUS_TIMEOUT_MS = 8_000;
 
+// The user's standing answer, kept in the plugin's own bucket and changed only
+// by setAutoUnlockConsent. A stored credential is never itself consent.
+function autoUnlockConsented(): boolean {
+  return host.secretGet(K_CONSENT) === CONSENT_ON;
+}
+
+// The credential auto-unlock may use, or null. Withdrawn consent purges on the
+// spot, so an upgrade from a build that persisted unconditionally leaves nothing.
+function rememberedMasterPassword(): string | null {
+  const master = host.secretGet(K_MASTER);
+  if (autoUnlockConsented()) return master && master.length ? master : null;
+  if (master) host.secretDelete(K_MASTER);
+  return null;
+}
+
 // A locked vault with nothing remembered can never be opened headlessly. Saying
 // so costs one local secret read; discovering it by running bw costs the budget
 // above, twice, for an answer that was already knowable.
 function canUnlockHeadlessly(): boolean {
-  const master = host.secretGet(K_MASTER);
-  return !!(master && master.length);
+  return !!rememberedMasterPassword();
+}
+
+// Withdrawal deletes the credential in the same call that revokes consent, so
+// canUnlockHeadlessly() is false immediately and no later login can restore it.
+function setAutoUnlockConsent(enabled: boolean): Envelope<true> {
+  if (enabled === true) {
+    host.secretSet(K_CONSENT, CONSENT_ON);
+    return { ok: true };
+  }
+  host.secretDelete(K_CONSENT);
+  host.secretDelete(K_MASTER);
+  return { ok: true };
 }
 
 // bw's wording for "these credentials are wrong", as opposed to a network or
@@ -331,7 +361,7 @@ function tryAutoUnlock(): boolean {
   if (autoUnlocking) return false;
   autoUnlocking = true;
   try {
-    const master = host.secretGet(K_MASTER);
+    const master = rememberedMasterPassword();
     if (master && master.length) {
       const status = bwStatus();
       if (status.failure) {
@@ -578,9 +608,12 @@ function secretUnlock(creds: SecretCreds): Envelope<true> {
   const token = extractSessionToken(unlocked.data);
   if (!token) return { error: { kind: "backend", message: "bw unlock returned empty session" } };
 
-  // Persist both values so every successful unlock enables headless auto-unlock.
   host.secretSet(K_SESSION, token);
-  host.secretSet(K_MASTER, creds.masterPassword as string);
+  // Two independent signals, one permitted cell: the standing consent flag and
+  // this call's explicit intent must both say yes.
+  if (autoUnlockConsented() && creds.persistForAutoUnlock === true) {
+    host.secretSet(K_MASTER, creds.masterPassword as string);
+  }
   if (!creds.apiKeyClientId && creds.email) host.secretSet(K_EMAIL, creds.email);
   return { ok: true };
 }
@@ -853,7 +886,7 @@ function statusPoll(jobId: string): { done: boolean; status?: SecretStatus; erro
     if (!response.success && (response.message || "").toLowerCase().indexOf("already logged in") < 0) {
       return flowFailure(jobId, response.message, flow.usedApiKey);
     }
-    const master = host.secretGet(K_MASTER);
+    const master = rememberedMasterPassword();
     if (!master || !startFlowJob(jobId, "unlock", ["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], {
       env: { BW_PASSWORD: master || "" },
     })) {
@@ -877,7 +910,7 @@ function statusPoll(jobId: string): { done: boolean; status?: SecretStatus; erro
     delete statusFlows[jobId];
     return { done: true, status };
   }
-  const master = host.secretGet(K_MASTER) || "";
+  const master = rememberedMasterPassword() || "";
   const started = status.status === "logged_out"
     ? startFlowLogin(jobId, master)
     : !!startFlowJob(jobId, "unlock", ["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: master } });
@@ -920,6 +953,8 @@ interface ViewArgs {
   apiKeyClientSecret?: string;
   organization?: string;
   jobId?: string;
+  enabled?: boolean;
+  persistForAutoUnlock?: boolean;
 }
 
 // Bridge entry for the plugin's iframe UI (capability: view). The iframe owns the
@@ -938,6 +973,8 @@ function viewCall(method: string, args: ViewArgs): unknown {
     host.secretSet("server_url", url);
     return { ok: true };
   }
+  if (method === "autoUnlockConsent") return { enabled: autoUnlockConsented() };
+  if (method === "setAutoUnlockConsent") return setAutoUnlockConsent(args.enabled === true);
   if (method === "unlock") {
     return secretUnlock({
       masterPassword: args.masterPassword,
@@ -945,6 +982,7 @@ function viewCall(method: string, args: ViewArgs): unknown {
       twoFactorToken: args.twoFactorToken,
       apiKeyClientId: args.apiKeyClientId,
       apiKeyClientSecret: args.apiKeyClientSecret,
+      persistForAutoUnlock: args.persistForAutoUnlock === true,
     } as SecretCreds);
   }
   if (method === "resetConnection") return resetConnection();
