@@ -32,20 +32,37 @@ Turning the toggle off falls back to the built-in local file store; your vault i
 
 ## Auto-unlock
 
-Every successful unlock stores the accepted credentials in CodeTerm's local
-`~/.codeterm/.secrets` file alongside the short-lived `bw` session token. The
-file is written atomically and restricted to the current user (`0600` on Unix,
-an owner-only ACL on Windows). There is no separate toggle.
+Auto-unlock is **off by default** and never turns itself on. The plugin keeps
+your master password only when both of these are true:
+
+- **Remember master password** is on in the connection view. The answer lives in
+  the plugin's own secret bucket and is changed only from that control.
+- The unlock that arms it asked to be remembered — `codeterm mem secret
+  save-master-password`, or the view's own remember action. An ordinary unlock
+  sends "no" and stores nothing, even while the toggle is on.
+
+Turning **Remember master password** off deletes the stored password in that
+same call. Auto-unlock stops immediately; no later sign-in restores it.
+
+The short-lived `bw` session token is always kept, so an unlocked vault stays
+usable for the session. Stored values live in CodeTerm's local `~/.codeterm/.secrets`
+file, written atomically and restricted to the current user (`0600` on Unix, an
+owner-only ACL on Windows).
 
 The account identity exposed by `bw status` is retained while the CLI is locked,
 so a later full CLI logout can be recovered without another interactive sign-in.
 
-When the session expires:
+When the session expires and the master password is remembered:
 
 - Any operation that hits a locked vault performs one just-in-time re-unlock (`bw unlock --passwordenv`, password via env only — never argv or logs) and retries once.
 - If the CLI has become fully logged out, the plugin performs one bounded headless login, unlocks, stores the fresh session, and retries the operation once.
 - `codeterm mem secret unlock` with no input re-unlocks from the remembered password.
 - Status reflects the truly reachable state: locked or logged-out vaults recover automatically whenever the persisted credentials are sufficient.
+
+Without a remembered password none of that runs: a locked vault answers `locked`
+and names the interactive way out, without spending a `bw` invocation on a vault
+it cannot open. Declaring the capability advertises the feature and grants
+nothing — every operation still authenticates against the vault itself.
 
 > API-key credentials (`BW_CLIENTID`/`BW_CLIENTSECRET`) can re-establish login headlessly, but `bw unlock` still requires the master password entered during unlock.
 
