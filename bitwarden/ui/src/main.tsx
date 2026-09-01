@@ -48,6 +48,15 @@ const btnStyle: React.CSSProperties = {
   border: "none", background: "var(--ct-accent, #5b8cff)", color: "#fff", cursor: "pointer", whiteSpace: "nowrap",
 };
 
+function RememberToggle({ checked, disabled, onChange }: { checked: boolean; disabled: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11.5, color: COLOR.muted, cursor: disabled ? "default" : "pointer" }}>
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      Remember master password for auto-unlock
+    </label>
+  );
+}
+
 function conciseReason(reason: string | null | undefined): string {
   if (!reason) return "The Bitwarden connection failed.";
   const first = reason.split(/\n|\sat\sClientRequest|\sat\sTLSSocket/)[0].trim();
@@ -71,6 +80,7 @@ function App() {
   const [apiClientSecret, setApiClientSecret] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [remember, setRemember] = useState(false);
 
   // Server URL is a cheap read — fetch it on its own so the panel paints at once.
   const refreshServer = useCallback(async () => {
@@ -79,6 +89,16 @@ function App() {
       setServerUrl((su as { url?: string })?.url ?? "");
     } catch {
       /* leave the field empty; the status probe surfaces real errors */
+    }
+  }, []);
+
+  // The standing consent answer, owned by the plugin and never inferred here.
+  const refreshConsent = useCallback(async () => {
+    try {
+      const c = await ct().invoke("autoUnlockConsent");
+      setRemember((c as { enabled?: boolean })?.enabled === true);
+    } catch {
+      setRemember(false);
     }
   }, []);
 
@@ -109,26 +129,37 @@ function App() {
 
   const refresh = useCallback(async () => {
     await refreshServer();
+    await refreshConsent();
     await refreshStatus();
-  }, [refreshServer, refreshStatus]);
+  }, [refreshServer, refreshConsent, refreshStatus]);
 
   // Paint immediately: kick the cheap server read and the deferred status probe
   // independently so neither blocks the other or the initial render.
   useEffect(() => {
     void refreshServer();
+    void refreshConsent();
     void refreshStatus();
-  }, [refreshServer, refreshStatus]);
+  }, [refreshServer, refreshConsent, refreshStatus]);
 
   const st = status?.status;
   const hasApiKey = !!apiClientId.trim() && !!apiClientSecret.trim();
   const canSubmit = !!master && (!!email.trim() || hasApiKey || st === "locked");
+  // An unlock the user did not ask to be remembered sends false and stores nothing.
   const doUnlock = () => run(() => ct().invoke("unlock", {
     masterPassword: master,
     email: email.trim() || undefined,
     twoFactorToken: twoFactor.trim() || undefined,
     apiKeyClientId: apiClientId.trim() || undefined,
     apiKeyClientSecret: apiClientSecret.trim() || undefined,
+    persistForAutoUnlock: remember,
   }), "unlock");
+
+  // Every toggle routes here: OFF revokes synchronously, and refresh() restores
+  // the checkbox from durable state if the verb failed.
+  const changeConsent = (enabled: boolean) => {
+    setRemember(enabled);
+    void run(() => ct().invoke("setAutoUnlockConsent", { enabled }), enabled ? "remember password" : "forget password");
+  };
 
   const run = useCallback(async (fn: () => Promise<unknown>, errPrefix: string) => {
     setBusy(true);
@@ -160,10 +191,13 @@ function App() {
       {!status ? (
         <span style={{ color: COLOR.muted, fontSize: 12.5 }}>Checking status…</span>
       ) : st === "unlocked" ? (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <Badge tone="ok" label={`Unlocked${status.user ? ` · ${status.user}` : ""}`} />
-          <button style={{ ...btnStyle, background: "rgba(255,255,255,0.08)" }} disabled={busy}
-            onClick={() => void run(() => ct().invoke("signout"), "sign out")}>Sign out</button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <Badge tone="ok" label={`Unlocked${status.user ? ` · ${status.user}` : ""}`} />
+            <button style={{ ...btnStyle, background: "rgba(255,255,255,0.08)" }} disabled={busy}
+              onClick={() => void run(() => ct().invoke("signout"), "sign out")}>Sign out</button>
+          </div>
+          <RememberToggle checked={remember} disabled={busy} onChange={changeConsent} />
         </div>
       ) : st === "unavailable" ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -198,6 +232,7 @@ function App() {
             value={apiClientId} onChange={(e) => setApiClientId(e.target.value)} />
           <input style={inputStyle} type="password" autoComplete="off" placeholder="API key client_secret (optional)"
             value={apiClientSecret} onChange={(e) => setApiClientSecret(e.target.value)} />
+          <RememberToggle checked={remember} disabled={busy} onChange={changeConsent} />
           {busy && (
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
               <Spinner />
