@@ -1009,6 +1009,28 @@ test("no credential reaches argv or any emitted string across the recovery paths
   }
 });
 
+test("every remember toggle routes through the revocation verb handler", () => {
+  const { readFileSync } = require("node:fs");
+  const { join } = require("node:path");
+  const src = readFileSync(join(__dirname, "ui", "src", "main.tsx"), "utf8");
+  const rendered = src.match(/<RememberToggle [^>]*>/g) || [];
+  assert(rendered.length > 0, "the view must render the remember toggle");
+  for (const tag of rendered) {
+    assert(
+      /onChange=\{changeConsent\}/.test(tag),
+      "a toggle bypasses the revocation verb: " + tag,
+    );
+  }
+  assert(
+    /const changeConsent = \(enabled: boolean\) => \{[\s\S]*?invoke\("setAutoUnlockConsent", \{ enabled \}\)/.test(src),
+    "changeConsent must invoke setAutoUnlockConsent with the new value",
+  );
+  assert(
+    /persistForAutoUnlock: remember/.test(src),
+    "unlock must carry the per-call intent from the toggle",
+  );
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try {
