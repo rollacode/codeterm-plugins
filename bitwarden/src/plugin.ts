@@ -25,10 +25,6 @@ const K_MASTER = "master_password";
 const K_EMAIL = "login_email";
 const K_CLIENT_ID = "api_client_id";
 const K_CLIENT_SECRET = "api_client_secret";
-const K_CONSENT = "auto_unlock_consent";
-// Only this exact byte arms consent, so an absent, empty or hand-edited flag
-// fails closed rather than reading as a yes.
-const CONSENT_ON = "1";
 const BW_TIMEOUT_MS = 30_000;
 
 // `bw status` reads local state and answers promptly even against a self-hosted
@@ -37,19 +33,11 @@ const BW_TIMEOUT_MS = 30_000;
 // is a second every other secret call spends queued behind it (#4).
 const BW_STATUS_TIMEOUT_MS = 8_000;
 
-// The user's standing answer, kept in the plugin's own bucket and changed only
-// by setAutoUnlockConsent. A stored credential is never itself consent.
-function autoUnlockConsented(): boolean {
-  return host.secretGet(K_CONSENT) === CONSENT_ON;
-}
-
-// The credential auto-unlock may use, or null. Withdrawn consent purges on the
-// spot, so an upgrade from a build that persisted unconditionally leaves nothing.
+// The credential auto-unlock uses, or null. Signing in always stores it, so the
+// only reason this is empty is that the user has never signed in or has locked.
 function rememberedMasterPassword(): string | null {
   const master = host.secretGet(K_MASTER);
-  if (autoUnlockConsented()) return master && master.length ? master : null;
-  if (master) host.secretDelete(K_MASTER);
-  return null;
+  return master && master.length ? master : null;
 }
 
 // A locked vault with nothing remembered can never be opened headlessly. Saying
@@ -57,18 +45,6 @@ function rememberedMasterPassword(): string | null {
 // above, twice, for an answer that was already knowable.
 function canUnlockHeadlessly(): boolean {
   return !!rememberedMasterPassword();
-}
-
-// Withdrawal deletes the credential in the same call that revokes consent, so
-// canUnlockHeadlessly() is false immediately and no later login can restore it.
-function setAutoUnlockConsent(enabled: boolean): Envelope<true> {
-  if (enabled === true) {
-    host.secretSet(K_CONSENT, CONSENT_ON);
-    return { ok: true };
-  }
-  host.secretDelete(K_CONSENT);
-  host.secretDelete(K_MASTER);
-  return { ok: true };
 }
 
 // bw's wording for "these credentials are wrong", as opposed to a network or
@@ -609,11 +585,7 @@ function secretUnlock(creds: SecretCreds): Envelope<true> {
   if (!token) return { error: { kind: "backend", message: "bw unlock returned empty session" } };
 
   host.secretSet(K_SESSION, token);
-  // Two independent signals, one permitted cell: the standing consent flag and
-  // this call's explicit intent must both say yes.
-  if (autoUnlockConsented() && creds.persistForAutoUnlock === true) {
-    host.secretSet(K_MASTER, creds.masterPassword as string);
-  }
+  host.secretSet(K_MASTER, creds.masterPassword as string);
   if (!creds.apiKeyClientId && creds.email) host.secretSet(K_EMAIL, creds.email);
   return { ok: true };
 }
@@ -954,7 +926,6 @@ interface ViewArgs {
   organization?: string;
   jobId?: string;
   enabled?: boolean;
-  persistForAutoUnlock?: boolean;
 }
 
 // Bridge entry for the plugin's iframe UI (capability: view). The iframe owns the
@@ -973,8 +944,6 @@ function viewCall(method: string, args: ViewArgs): unknown {
     host.secretSet("server_url", url);
     return { ok: true };
   }
-  if (method === "autoUnlockConsent") return { enabled: autoUnlockConsented() };
-  if (method === "setAutoUnlockConsent") return setAutoUnlockConsent(args.enabled === true);
   if (method === "unlock") {
     return secretUnlock({
       masterPassword: args.masterPassword,
@@ -982,7 +951,6 @@ function viewCall(method: string, args: ViewArgs): unknown {
       twoFactorToken: args.twoFactorToken,
       apiKeyClientId: args.apiKeyClientId,
       apiKeyClientSecret: args.apiKeyClientSecret,
-      persistForAutoUnlock: args.persistForAutoUnlock === true,
     } as SecretCreds);
   }
   if (method === "resetConnection") return resetConnection();

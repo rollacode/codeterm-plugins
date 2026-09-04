@@ -1,6 +1,6 @@
 {
   "id": "bitwarden",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "minCodeterm": "1.0.0",
   "hostApi": 2,
   "displayName": "Bitwarden",

@@ -32,17 +32,14 @@ Turning the toggle off falls back to the built-in local file store; your vault i
 
 ## Auto-unlock
 
-Auto-unlock is **off by default** and never turns itself on. The plugin keeps
-your master password only when both of these are true:
+Auto-unlock is **always on**. Signing in from the connection view — with an
+email and master password, or with API-key credentials — stores the master
+password in the plugin's own secret bucket, and every later locked vault is
+reopened from it without asking. There is no toggle and no per-unlock opt-in:
+the credentials you entered are the consent.
 
-- **Remember master password** is on in the connection view. The answer lives in
-  the plugin's own secret bucket and is changed only from that control.
-- The unlock that arms it asked to be remembered — `codeterm mem secret
-  save-master-password`, or the view's own remember action. An ordinary unlock
-  sends "no" and stores nothing, even while the toggle is on.
-
-Turning **Remember master password** off deletes the stored password in that
-same call. Auto-unlock stops immediately; no later sign-in restores it.
+`codeterm mem secret lock` still locks the vault for the session, and signing
+out clears the stored password.
 
 The short-lived `bw` session token is always kept, so an unlocked vault stays
 usable for the session. Stored values live in CodeTerm's local `~/.codeterm/.secrets`

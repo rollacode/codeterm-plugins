@@ -29,30 +29,14 @@ var K_MASTER = "master_password";
 var K_EMAIL = "login_email";
 var K_CLIENT_ID = "api_client_id";
 var K_CLIENT_SECRET = "api_client_secret";
-var K_CONSENT = "auto_unlock_consent";
-var CONSENT_ON = "1";
 var BW_TIMEOUT_MS = 3e4;
 var BW_STATUS_TIMEOUT_MS = 8e3;
-function autoUnlockConsented() {
-  return host.secretGet(K_CONSENT) === CONSENT_ON;
-}
 function rememberedMasterPassword() {
   const master = host.secretGet(K_MASTER);
-  if (autoUnlockConsented()) return master && master.length ? master : null;
-  if (master) host.secretDelete(K_MASTER);
-  return null;
+  return master && master.length ? master : null;
 }
 function canUnlockHeadlessly() {
   return !!rememberedMasterPassword();
-}
-function setAutoUnlockConsent(enabled) {
-  if (enabled === true) {
-    host.secretSet(K_CONSENT, CONSENT_ON);
-    return { ok: true };
-  }
-  host.secretDelete(K_CONSENT);
-  host.secretDelete(K_MASTER);
-  return { ok: true };
 }
 function isRejectedCredential(msg) {
   const m = (msg || "").toLowerCase();
@@ -460,9 +444,7 @@ function secretUnlock(creds) {
   const token = extractSessionToken(unlocked.data);
   if (!token) return { error: { kind: "backend", message: "bw unlock returned empty session" } };
   host.secretSet(K_SESSION, token);
-  if (autoUnlockConsented() && creds.persistForAutoUnlock === true) {
-    host.secretSet(K_MASTER, creds.masterPassword);
-  }
+  host.secretSet(K_MASTER, creds.masterPassword);
   if (!creds.apiKeyClientId && creds.email) host.secretSet(K_EMAIL, creds.email);
   return { ok: true };
 }
@@ -761,16 +743,13 @@ function viewCall(method, args) {
     host.secretSet("server_url", url);
     return { ok: true };
   }
-  if (method === "autoUnlockConsent") return { enabled: autoUnlockConsented() };
-  if (method === "setAutoUnlockConsent") return setAutoUnlockConsent(args.enabled === true);
   if (method === "unlock") {
     return secretUnlock({
       masterPassword: args.masterPassword,
       email: args.email,
       twoFactorToken: args.twoFactorToken,
       apiKeyClientId: args.apiKeyClientId,
-      apiKeyClientSecret: args.apiKeyClientSecret,
-      persistForAutoUnlock: args.persistForAutoUnlock === true
+      apiKeyClientSecret: args.apiKeyClientSecret
     });
   }
   if (method === "resetConnection") return resetConnection();

@@ -765,83 +765,44 @@ function bwDouble(master, session, extra) {
 }
 
 // Two independent signals, one permitted cell.
-test("persistence requires BOTH durable consent and per-call intent", () => {
+test("signing in always arms auto-unlock, whatever the caller asks for", () => {
   const savedHost = globalThis.host;
-  const table = [
-    { consent: false, intent: false, persists: false },
-    { consent: false, intent: true, persists: false },
-    { consent: true, intent: false, persists: false },
-    { consent: true, intent: true, persists: true },
-  ];
-  for (const row of table) {
-    const label = "consent=" + row.consent + " intent=" + row.intent;
-    const secrets = row.consent ? { auto_unlock_consent: "1" } : {};
+  // Auto-unlock is unconditional now, so no caller-supplied intent may weaken it.
+  for (const intent of [false, true, undefined]) {
+    const label = "intent=" + String(intent);
+    const secrets = {};
     const { host: h, rec } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
     globalThis.host = h;
     try {
       const r = plugin.secretUnlock({
         masterPassword: SYNTHETIC_MASTER,
         email: "owner@example.com",
-        persistForAutoUnlock: row.intent,
+        persistForAutoUnlock: intent,
       });
       assert("ok" in r, label + ": unlock itself must succeed, got " + JSON.stringify(r));
       assert(secrets.session === SYNTHETIC_SESSION, label + ": the session token is always persisted");
       const writes = rec.writes.filter((w) => w.key === "master_password").length;
-      assert(
-        writes === (row.persists ? 1 : 0),
-        label + ": expected " + (row.persists ? 1 : 0) + " master_password writes, got " + writes,
-      );
-      assert(
-        ("master_password" in secrets) === row.persists,
-        label + ": stored master password should be " + row.persists,
-      );
+      assert(writes === 1, label + ": expected exactly 1 master_password write, got " + writes);
+      assert(secrets.master_password === SYNTHETIC_MASTER, label + ": the master password must be stored");
     } finally {
       globalThis.host = savedHost;
     }
   }
 });
 
-test("consent absent: an unconsented unlock arms no auto-unlock", () => {
-  const secrets = {};
-  const { host: h, rec } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+test("a stale consent flag from an older build cannot disarm auto-unlock", () => {
   const savedHost = globalThis.host;
-  globalThis.host = h;
-  try {
-    const r = plugin.secretUnlock({
-      masterPassword: SYNTHETIC_MASTER,
-      email: "owner@example.com",
-      persistForAutoUnlock: true,
-    });
-    assert("ok" in r, "unlock itself must still succeed, got " + JSON.stringify(r));
-    assert(!("master_password" in secrets), "no master password may survive an unconsented unlock");
-
-    // Structural refusal, with no bw spent on a vault it cannot open.
-    delete secrets.session;
-    const before = rec.execs.length;
-    const op = plugin.secretGetItem("token");
-    assert(op && op.error && op.error.kind === "locked", "expected a locked envelope, got " + JSON.stringify(op));
-    assert(rec.execs.length === before, "an unarmed vault needs no bw call, ran " + (rec.execs.length - before));
-  } finally {
-    globalThis.host = savedHost;
-  }
-});
-
-test("a malformed consent flag reads as OFF, whatever the per-call intent says", () => {
-  const savedHost = globalThis.host;
-  for (const flag of ["", "yes", "true", "0", "1x", "01"]) {
-    const secrets = { auto_unlock_consent: flag };
-    const { host: h, rec } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+  // Upgrades carry the old key; it must be inert, not a hidden off switch.
+  for (const stale of ["", "0", "no"]) {
+    const secrets = { auto_unlock_consent: stale };
+    const { host: h } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
     globalThis.host = h;
     try {
-      const r = plugin.secretUnlock({
-        masterPassword: SYNTHETIC_MASTER,
-        email: "owner@example.com",
-        persistForAutoUnlock: true,
-      });
-      assert("ok" in r, "unlock must succeed for flag " + JSON.stringify(flag) + ", got " + JSON.stringify(r));
+      const r = plugin.secretUnlock({ masterPassword: SYNTHETIC_MASTER, email: "owner@example.com" });
+      assert("ok" in r, "stale flag " + JSON.stringify(stale) + ": unlock must succeed");
       assert(
-        rec.writes.filter((w) => w.key === "master_password").length === 0,
-        "flag " + JSON.stringify(flag) + " must not read as consent",
+        secrets.master_password === SYNTHETIC_MASTER,
+        "stale flag " + JSON.stringify(stale) + " must not suppress the stored password",
       );
     } finally {
       globalThis.host = savedHost;
@@ -849,71 +810,23 @@ test("a malformed consent flag reads as OFF, whatever the per-call intent says",
   }
 });
 
-test("a malformed per-call intent reads as false, even with consent armed", () => {
+test("the consent verbs are gone from the view bridge", () => {
   const savedHost = globalThis.host;
-  for (const intent of [undefined, "true", 1, null, {}]) {
-    const secrets = { auto_unlock_consent: "1" };
-    const { host: h, rec } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
-    globalThis.host = h;
-    try {
-      const creds = { masterPassword: SYNTHETIC_MASTER, email: "owner@example.com" };
-      if (intent !== undefined) creds.persistForAutoUnlock = intent;
-      const r = plugin.secretUnlock(creds);
-      assert("ok" in r, "unlock must succeed for intent " + JSON.stringify(intent) + ", got " + JSON.stringify(r));
+  const { host: h } = recordingHost({}, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+  globalThis.host = h;
+  try {
+    for (const method of ["autoUnlockConsent", "setAutoUnlockConsent"]) {
+      const r = plugin.viewCall(method, {});
       assert(
-        rec.writes.filter((w) => w.key === "master_password").length === 0,
-        "intent " + JSON.stringify(intent) + " must be treated as false",
+        r && typeof r.error === "string" && /unknown view method/.test(r.error),
+        method + " must no longer be routed, got " + JSON.stringify(r),
       );
-    } finally {
-      globalThis.host = savedHost;
     }
-  }
-});
-
-test("consent withdrawn: the OFF verb deletes the master password in that same call", () => {
-  const secrets = {
-    auto_unlock_consent: "1",
-    master_password: SYNTHETIC_MASTER,
-    session: SYNTHETIC_SESSION,
-    login_email: "owner@example.com",
-  };
-  const { host: h, rec } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
-  const savedHost = globalThis.host;
-  globalThis.host = h;
-  try {
-    const r = plugin.viewCall("setAutoUnlockConsent", { enabled: false });
-    assert(r && r.ok === true, "expected the withdrawal verb to succeed, got " + JSON.stringify(r));
-    assert(rec.deletes.indexOf("master_password") >= 0, "withdrawal must delete master_password, deleted " + JSON.stringify(rec.deletes));
-    assert(!("master_password" in secrets), "no master password may survive withdrawal");
-    assert(rec.execs.length === 0, "withdrawing consent must not shell bw, ran " + rec.execs.length);
-
-    // No further login: the next op refuses rather than recovering what was revoked.
-    delete secrets.session;
-    const op = plugin.secretGetItem("token");
-    assert(op && op.error && op.error.kind === "locked", "expected a locked envelope, got " + JSON.stringify(op));
-    assert(rec.execs.length === 0, "a revoked vault needs no bw call, ran " + rec.execs.length);
   } finally {
     globalThis.host = savedHost;
   }
 });
 
-test("consent verb: absent reads OFF, ON arms it, and an omitted flag is a withdrawal", () => {
-  const secrets = {};
-  const { host: h } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
-  const savedHost = globalThis.host;
-  globalThis.host = h;
-  try {
-    assert(plugin.viewCall("autoUnlockConsent", {}).enabled === false, "an absent flag must read as OFF");
-
-    assert(plugin.viewCall("setAutoUnlockConsent", { enabled: true }).ok === true, "expected the ON verb to succeed");
-    assert(plugin.viewCall("autoUnlockConsent", {}).enabled === true, "the ON verb must arm consent durably");
-
-    assert(plugin.viewCall("setAutoUnlockConsent", {}).ok === true, "expected an omitted flag to be accepted");
-    assert(plugin.viewCall("autoUnlockConsent", {}).enabled === false, "an omitted flag is a withdrawal, never consent");
-  } finally {
-    globalThis.host = savedHost;
-  }
-});
 
 test("consent armed but no stored credential: an operation is refused with a named discriminant", () => {
   const secrets = { auto_unlock_consent: "1" };
@@ -1009,26 +922,14 @@ test("no credential reaches argv or any emitted string across the recovery paths
   }
 });
 
-test("every remember toggle routes through the revocation verb handler", () => {
+test("the view renders no auto-unlock toggle and asks for no consent", () => {
   const { readFileSync } = require("node:fs");
   const { join } = require("node:path");
   const src = readFileSync(join(__dirname, "ui", "src", "main.tsx"), "utf8");
-  const rendered = src.match(/<RememberToggle [^>]*>/g) || [];
-  assert(rendered.length > 0, "the view must render the remember toggle");
-  for (const tag of rendered) {
-    assert(
-      /onChange=\{changeConsent\}/.test(tag),
-      "a toggle bypasses the revocation verb: " + tag,
-    );
-  }
-  assert(
-    /const changeConsent = \(enabled: boolean\) => \{[\s\S]*?invoke\("setAutoUnlockConsent", \{ enabled \}\)/.test(src),
-    "changeConsent must invoke setAutoUnlockConsent with the new value",
-  );
-  assert(
-    /persistForAutoUnlock: remember/.test(src),
-    "unlock must carry the per-call intent from the toggle",
-  );
+  assert(!/RememberToggle/.test(src), "the view must not render a remember toggle");
+  assert(!/setAutoUnlockConsent|autoUnlockConsent/.test(src), "the view must not call a consent verb");
+  assert(!/persistForAutoUnlock/.test(src), "unlock must not carry a per-call persistence intent");
+  assert(/invoke\("unlock"/.test(src), "the view must still perform the unlock");
 });
 
 let failed = 0;
