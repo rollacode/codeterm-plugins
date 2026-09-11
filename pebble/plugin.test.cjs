@@ -16,6 +16,16 @@ function assert(condition, message) {
 function assertIncludes(text, expected, message) {
   assert(text.includes(expected), `${message}: missing ${JSON.stringify(expected)}\n${text}`);
 }
+function assertThrows(fn, expectedMessage) {
+  try {
+    fn();
+  } catch (error) {
+    assert(error && typeof error.message === "string", "malformed delivery throws an Error");
+    assert(error.message.includes(expectedMessage), `error names ${expectedMessage}: ${error.message}`);
+    return;
+  }
+  throw new Error(`expected throw containing ${expectedMessage}`);
+}
 
 let sequence = 0;
 function payload(overrides = {}) {
@@ -95,30 +105,31 @@ test("visibly truncates transcript content at 8000 characters", () => {
   assert(transcriptLine.length === "transcript: ".length + 8000, "transcript line honors the 8000-character bound");
 });
 
-test("returns null for malformed or unsafe payloads", () => {
+test("throws an observable failure for malformed or unsafe payloads", () => {
   const valid = payload({ event_id: "invalid-baseline" });
   const cases = [
-    null,
-    [],
-    { ...valid, transcript: 42 },
-    { ...valid, trigger: null },
-    { ...valid, event_id: "" },
-    { ...valid, ring_id: "\x1b[31m\x1b[0m" },
-    { ...valid, source_message_id: 42 },
-    { ...valid, recorded_at: "" },
+    [null, "expected an object"],
+    [[], "expected an object"],
+    [{ ...valid, transcript: 42 }, "transcript"],
+    [{ ...valid, trigger: null }, "trigger"],
+    [{ ...valid, event_id: "" }, "event_id"],
+    [{ ...valid, ring_id: "\x1b[31m\x1b[0m" }, "ring_id"],
+    [{ ...valid, source_message_id: 42 }, "source_message_id"],
+    [{ ...valid, recorded_at: "" }, "recorded_at"],
   ];
-  for (const invalid of cases) {
-    assert(receive(invalid) === null, `invalid payload must be ignored: ${JSON.stringify(invalid)}`);
+  for (const [invalid, expectedMessage] of cases) {
+    assertThrows(() => receive(invalid), expectedMessage);
   }
-  assert(receive(null, null) === null, "invalid receivedAt context must be ignored");
-  assert(plugin.webhookReceive(null) === null, "missing context must be ignored");
+  assertThrows(() => receive(null, null), "receivedAt");
+  assertThrows(() => plugin.webhookReceive(null), "receivedAt");
 });
 
 test("suppresses repeated event_id values", () => {
   const first = receive(payload({ event_id: "duplicate-event", transcript: "first delivery" }));
   const second = receive(payload({ event_id: "duplicate-event", transcript: "replayed delivery" }));
   assert(first, "first delivery is returned");
-  assert(second === null, "duplicate event_id returns null");
+  assert(second === null, "duplicate event_id is the deliberate no-op");
+  assert(second !== first, "duplicate suppression differs from a failed delivery");
 });
 
 test("keeps replay suppression bounded and evicts the oldest id", () => {

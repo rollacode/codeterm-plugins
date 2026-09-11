@@ -55,37 +55,53 @@ function truncateWithMarker(text: string, maxLength: number): string {
   return `${text.slice(0, keep)}${TRUNCATION_MARKER}`;
 }
 
-function asPayload(value: unknown): PebblePayload | null {
+function requiredString(raw: Record<string, unknown>, key: keyof PebblePayload): string {
+  const value = raw[key];
+  if (typeof value !== "string") {
+    throw new Error(`invalid Pebble payload: ${key} must be a string`);
+  }
+  return value;
+}
+
+function parsePayload(value: unknown): PebblePayload {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return null;
+    throw new Error("invalid Pebble payload: expected an object");
   }
 
   const raw = value as Record<string, unknown>;
-  if (
-    typeof raw.transcript !== "string" ||
-    typeof raw.trigger !== "string" ||
-    typeof raw.event_id !== "string" ||
-    typeof raw.ring_id !== "string" ||
-    typeof raw.source_message_id !== "string" ||
-    typeof raw.recorded_at !== "string"
-  ) {
-    return null;
-  }
+  const transcript = requiredString(raw, "transcript");
+  const rawTrigger = requiredString(raw, "trigger");
+  const rawEventId = requiredString(raw, "event_id");
+  const rawRingId = requiredString(raw, "ring_id");
+  const rawSourceMessageId = requiredString(raw, "source_message_id");
+  const rawRecordedAt = requiredString(raw, "recorded_at");
 
-  const eventId = sanitizeField(raw.event_id);
-  const ringId = sanitizeField(raw.ring_id);
-  const sourceMessageId = sanitizeField(raw.source_message_id);
-  const recordedAt = sanitizeField(raw.recorded_at);
-  const trigger = sanitizeField(raw.trigger);
+  const eventId = sanitizeField(rawEventId);
+  const ringId = sanitizeField(rawRingId);
+  const sourceMessageId = sanitizeField(rawSourceMessageId);
+  const recordedAt = sanitizeField(rawRecordedAt);
+  const trigger = sanitizeField(rawTrigger);
 
   // An empty transcript is a valid Pebble utterance, but identity and timing
   // fields must remain usable after untrusted control data is removed.
-  if (!eventId || !ringId || !sourceMessageId || !recordedAt || !trigger) {
-    return null;
+  if (!eventId) {
+    throw new Error("invalid Pebble payload: event_id is empty after sanitization");
+  }
+  if (!ringId) {
+    throw new Error("invalid Pebble payload: ring_id is empty after sanitization");
+  }
+  if (!sourceMessageId) {
+    throw new Error("invalid Pebble payload: source_message_id is empty after sanitization");
+  }
+  if (!recordedAt) {
+    throw new Error("invalid Pebble payload: recorded_at is empty after sanitization");
+  }
+  if (!trigger) {
+    throw new Error("invalid Pebble payload: trigger is empty after sanitization");
   }
 
   return {
-    transcript: sanitizeField(raw.transcript),
+    transcript: sanitizeField(transcript),
     trigger,
     event_id: eventId,
     ring_id: ringId,
@@ -128,11 +144,11 @@ function formatMessage(payload: PebblePayload): string {
 const plugin: WebhookReceiver = {
   webhookReceive(ctx: WebhookReceiveContext): WebhookDelivery | null {
     if (!ctx || typeof ctx !== "object" || typeof ctx.receivedAt !== "string") {
-      return null;
+      throw new Error("invalid webhook context: receivedAt must be a string");
     }
 
-    const payload = asPayload(ctx.payload);
-    if (!payload || hasReplayed(payload.event_id)) return null;
+    const payload = parsePayload(ctx.payload);
+    if (hasReplayed(payload.event_id)) return null;
 
     return {
       text: formatMessage(payload),

@@ -11,6 +11,13 @@ The host owns the route and authentication:
 - Header: `Authorization: Bearer <secret>`
 - Secret-store name: `pebble_webhook_secret`
 
+The six payload names — `transcript`, `trigger`, `event_id`, `ring_id`,
+`source_message_id`, and `recorded_at` — come from the closed-source Pebble
+CoreApp contract. They have not been verified against a live CoreApp in this
+repository. A rename, casing change, or missing field is therefore an
+observable failed delivery rather than a deliberate no-op, so the mismatch is
+available for diagnosis instead of being silently discarded.
+
 The plugin does not open a listener, parse URL tokens, call a network API, or
 execute transcript text. Transcript content is treated as untrusted text:
 ANSI/OSC/CSI and control sequences are removed, whitespace is collapsed to one
