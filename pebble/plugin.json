@@ -1,0 +1,18 @@
+{
+  "id": "pebble",
+  "version": "0.1.0",
+  "minCodeterm": "1.0.0",
+  "hostApi": 2,
+  "displayName": "Pebble",
+  "description": "Receives authenticated Pebble ring events and delivers their sanitized metadata and transcript to the CodeTerm General Agent.",
+  "readme": "README.md",
+  "iconHint": "🪨",
+  "iconColor": "var(--ct-accent)",
+  "entry": "plugin.js",
+  "capabilities": {
+    "webhookReceiver": {
+      "kind": "pebble"
+    }
+  },
+  "configHelp": "Pebble is host-invoked through POST /api/plugins/pebble/webhook. The host owns routing and authenticates Authorization: Bearer <secret> using the pebble_webhook_secret secret-store entry; this plugin does not parse URL tokens or make network requests. Configure the Pebble CoreApp webhook URL and header in the app, then install or update this plugin from the codeterm-plugins channel."
+}
