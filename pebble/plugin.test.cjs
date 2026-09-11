@@ -92,7 +92,11 @@ test("strips ANSI, OSC, CSI, and control input and collapses whitespace", () => 
   const result = receive(payload({ transcript, event_id: "hygiene-event" }));
   assert(result, "hygiene fixture is delivered");
   assertIncludes(result.text, "transcript: red text with controls", "transcript is sanitized");
-  assert(!/[\x00-\x1f\x7f\x1b]/.test(result.text), "output contains no ANSI/control characters");
+  // The delivery text is line-structured, so \n is the one control character it may contain.
+  assert(
+    !/[\x00-\x09\x0b-\x1f\x7f]/.test(result.text),
+    "output contains no ANSI/control characters besides line separators",
+  );
   assert(!result.text.includes("unsafe title"), "OSC title payload is removed");
 });
 
