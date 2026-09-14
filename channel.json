@@ -37,8 +37,8 @@
     {
       "id": "pebble",
       "path": "pebble",
-      "version": "0.1.0",
-      "minCodeterm": "1.0.0"
+      "version": "0.1.1",
+      "minCodeterm": "1.10.19"
     }
   ]
 }
