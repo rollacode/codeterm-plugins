@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "name": "codeterm-plugins",
   "displayName": "CodeTerm Plugins",
-  "description": "Andrey's CodeTerm capability plugins \u00e2\u20ac\u201d Git, Transcriber, Bitwarden, LM Studio, Chat Preprocessor, Pebble.",
+  "description": "Andrey's CodeTerm capability plugins \u2014 Git, Transcriber, Bitwarden, LM Studio, Chat Preprocessor, Pebble.",
   "plugins": [
     {
       "id": "lmstudio",
