@@ -64,7 +64,7 @@ const tests = [
   ["manifest declares the generic receiver-target tab menu item and requires the host that ships it", () => {
     const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
     assert.deepEqual(manifest.capabilities.tabMenu, [
-      { id: "receiver-target", label: "Pebble ring → this tab", action: "receiverTarget" },
+      { id: "receiver-target", label: "Connect Pebble ring", action: "receiverTarget" },
     ]);
     const [item] = manifest.capabilities.tabMenu;
     assert.match(item.id, /^[a-z0-9-]{1,32}$/);
