@@ -38,7 +38,7 @@
       "id": "pebble",
       "path": "pebble",
       "version": "0.1.2",
-      "minCodeterm": "1.10.19"
+      "minCodeterm": "1.10.20"
     }
   ]
 }

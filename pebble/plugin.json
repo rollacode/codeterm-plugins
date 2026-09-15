@@ -1,7 +1,7 @@
 {
   "id": "pebble",
   "version": "0.1.2",
-  "minCodeterm": "1.10.19",
+  "minCodeterm": "1.10.20",
   "hostApi": 2,
   "displayName": "Pebble",
   "description": "Receives authenticated Pebble ring events and delivers their sanitized metadata and transcript to the CodeTerm General Agent.",
@@ -12,7 +12,8 @@
   "capabilities": {
     "webhookReceiver": {
       "kind": "pebble"
-    }
+    },
+    "view": true
   },
-  "configHelp": "Requires CodeTerm 1.10.19+ with multipart webhook support. Prod BLACKSTAR URL: https://blackstar.tail0e459c.ts.net/api/plugins/pebble/webhook. In CoreApp set that URL, add Authorization: Bearer <the value of pebble_webhook_secret>, and select Transcription only. Retrieve the token from CodeTerm Settings > Secrets or codeterm mem secret get --name pebble_webhook_secret on prod; it is not the CodeTerm API token and never belongs in the URL. Do not override Content-Type: CoreApp supplies multipart/form-data with its boundary. HTTP 415 means the host or media type is wrong."
+  "configHelp": "Requires CodeTerm 1.10.20+ with multipart webhook support and the Pebble setup view. Open the Pebble view to see the current machine's webhook URL and pebble_webhook_secret, then put that URL and Authorization: Bearer <token> into CoreApp. Select Transcription only and let CoreApp generate Content-Type with its multipart boundary. HTTP 415 means the host or media type is wrong."
 }
