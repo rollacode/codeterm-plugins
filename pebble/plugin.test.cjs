@@ -17,7 +17,7 @@ function receive(value) {
 }
 
 function fields(result) {
-  return Object.fromEntries(result.text.split("\n").slice(1).map((line) => {
+  return Object.fromEntries(result.text.split("\n").map((line) => {
     const separator = line.indexOf(": ");
     return [line.slice(0, separator), JSON.parse(line.slice(separator + 2))];
   }));
@@ -58,7 +58,7 @@ const tests = [
       assert.throws(() => receive(payload({ recordedAt })), /recordedAt/);
     }
   }],
-  ["untrusted metadata is quoted, sanitized, and bounded", () => {
+  ["metadata is quoted, sanitized, and bounded", () => {
     const result = fields(receive(payload({
       transcription: 'hello\nclient: "forged"\u001b[31m!\u001b[0m',
       client: "\u009b31ma\u009b0m\u202Eb\u200Bc",

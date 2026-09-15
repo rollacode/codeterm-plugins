@@ -5,20 +5,31 @@ forwards bounded, sanitized text to the General Agent.
 
 ## Setup
 
-The CodeTerm host must support multipart webhook parsing; updating this plugin
-alone cannot fix a host that only accepts JSON.
+The token is per CodeTerm installation and is intentionally not embedded in
+this plugin, the channel manifest, or its documentation. Open the Pebble view
+in CodeTerm to display the current machine's webhook URL and token. The view
+reads the active CodeTerm secret store and never writes the URL or token to the
+plugin repository.
 
-In CoreApp's Index webhook settings:
+In CoreApp's Index webhook settings, copy the values shown by the Pebble view:
 
-- URL: your reachable CodeTerm HTTPS origin plus `/api/plugins/pebble/webhook`.
-- Header name: `Authorization`.
-- Header value: `Bearer <secret>`.
-- Send: **Transcription only**.
+- URL: the displayed machine URL
+- Header name: `Authorization`
+- Header value: `Bearer <the displayed token>`
+- Send: **Transcription only**
 - Remove any manually configured `Content-Type`. CoreApp supplies
   `multipart/form-data; boundary=...` automatically.
 
-Store the same secret as `pebble_webhook_secret` in CodeTerm's secret store.
-Tailscale Serve works when the sending phone can reach that tailnet address.
+If the view reports that the secret is unavailable, create the
+`pebble_webhook_secret` entry in CodeTerm Settings → Secrets, then refresh the
+view.
+
+The URL is generated for the machine running CodeTerm. The phone must be able
+to reach that machine; HTTPS Tailscale Serve is suitable for a phone on the
+same tailnet. Do not put the token in the URL or a query string.
+
+The host must support multipart webhook parsing; updating this plugin alone
+cannot fix a host that only accepts JSON.
 
 ## Wire contract
 
@@ -44,14 +55,17 @@ parts and 64 KiB per text part. Oversized audio can still exceed the request
 limit even though file parts are not forwarded.
 
 The plugin does not open a listener, read secrets, call network APIs, or
-execute transcript text. Output fields are JSON-quoted untrusted data.
+execute transcript text. Output fields are JSON-quoted.
 ANSI/OSC/CSI sequences, controls, bidi and zero-width formatting are stripped.
 Whitespace is collapsed; transcription is clipped to 8000 UTF-16 code units,
 metadata to 256, with a visible marker and intact surrogate pairs.
 
-HTTP 415 means the host rejected the media type. HTTP 400 means malformed
-JSON/multipart. HTTP 502 means the receiver or agent delivery failed.
+HTTP 401 means the Authorization header is missing or its Bearer value does
+not match `pebble_webhook_secret`. HTTP 415 means the host rejected the media
+type; remove a manually supplied Content-Type and use CodeTerm 1.10.20 or
+newer. HTTP 400 means malformed JSON/multipart. HTTP 502 means the receiver
+or agent delivery failed.
 CodeTerm Settings → Logs contains host rejection codes and receiver failures,
 without authentication headers or recording payloads.
 
-<!-- revision: 1 -->
+<!-- revision: 3 -->
