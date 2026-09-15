@@ -88,10 +88,51 @@ function parsePayload(value) {
 function formatMessage(payload) {
   return Object.entries(payload).map(([name, value]) => `${name}: ${JSON.stringify(value)}`).join("\n");
 }
+var TARGET_UNAVAILABLE = "This CodeTerm build cannot report the receiver target. Events go to the General Agent.";
+function unavailable(error, message = TARGET_UNAVAILABLE) {
+  return { status: "unavailable", error, message };
+}
+function receiverTargetApi() {
+  if (typeof host === "undefined" || host === null) return null;
+  const api = host.receiverTarget;
+  return typeof api === "object" && api !== null ? api : null;
+}
+function normalizeTarget(raw) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return unavailable("receiver_target_unavailable");
+  }
+  const value = raw;
+  if (typeof value.error === "string") {
+    const message = typeof value.message === "string" && value.message ? sanitizeField(value.message) : "";
+    return unavailable(sanitizeField(value.error) || "receiver_target_unavailable", message || TARGET_UNAVAILABLE);
+  }
+  if (value.pluginId !== void 0 && value.pluginId !== "pebble") {
+    return unavailable("malformed_receiver_target");
+  }
+  if (typeof value.live !== "boolean") return unavailable("malformed_receiver_target");
+  if (value.tabId === null) return { status: "general", tabId: null };
+  if (typeof value.tabId !== "string" || !sanitizeField(value.tabId)) {
+    return unavailable("malformed_receiver_target");
+  }
+  const tabId = truncateWithMarker(sanitizeField(value.tabId), FIELD_MAX_LENGTH);
+  return value.live ? { status: "bound", tabId } : { status: "notLive", tabId };
+}
+function callReceiverTarget(verb) {
+  const api = receiverTargetApi();
+  const fn = api?.[verb];
+  if (typeof fn !== "function") return unavailable("receiver_target_unavailable");
+  try {
+    return normalizeTarget(fn.call(api));
+  } catch {
+    return unavailable("receiver_target_unavailable");
+  }
+}
 function viewCall(method) {
   if (method === "webhookSettings") {
     return { error: "This CodeTerm build does not provide webhook settings yet" };
   }
+  if (method === "receiverTarget") return callReceiverTarget("get");
+  if (method === "resetReceiverTarget") return callReceiverTarget("clear");
   return { error: `unknown view method: ${method}` };
 }
 var plugin = {
