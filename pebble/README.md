@@ -5,20 +5,37 @@ forwards bounded, sanitized text to the General Agent.
 
 ## Setup
 
-The CodeTerm host must support multipart webhook parsing; updating this plugin
-alone cannot fix a host that only accepts JSON.
+The token is per CodeTerm installation and is intentionally not embedded in
+this plugin, the channel manifest, or its documentation. It is the value of
+the `pebble_webhook_secret` entry in the prod CodeTerm secret store. It is not
+the CodeTerm API token and it must never be placed in the URL or a query string.
 
-In CoreApp's Index webhook settings:
+On BLACKSTAR, retrieve the existing prod token from CodeTerm Settings →
+Secrets, or run this locally on the prod machine:
 
-- URL: your reachable CodeTerm HTTPS origin plus `/api/plugins/pebble/webhook`.
-- Header name: `Authorization`.
-- Header value: `Bearer <secret>`.
-- Send: **Transcription only**.
+```text
+codeterm mem secret get --name pebble_webhook_secret
+```
+
+If the entry does not exist, create one in Settings → Secrets, then use the
+same value in both CodeTerm and CoreApp. A token rotation requires updating
+both places; do not commit or send the value through GitHub, chat, or a URL.
+
+For Andrey's prod BLACKSTAR, configure CoreApp's Index webhook as follows:
+
+- URL: `https://blackstar.tail0e459c.ts.net/api/plugins/pebble/webhook`
+- Header name: `Authorization`
+- Header value: `Bearer <the value of pebble_webhook_secret>`
+- Send: **Transcription only**
 - Remove any manually configured `Content-Type`. CoreApp supplies
   `multipart/form-data; boundary=...` automatically.
 
-Store the same secret as `pebble_webhook_secret` in CodeTerm's secret store.
-Tailscale Serve works when the sending phone can reach that tailnet address.
+For another CodeTerm host, replace only the HTTPS origin and keep the path
+`/api/plugins/pebble/webhook`. The phone must be able to reach that host over
+HTTPS; Tailscale Serve is suitable for a phone on the same tailnet.
+
+The host must support multipart webhook parsing; updating this plugin alone
+cannot fix a host that only accepts JSON.
 
 ## Wire contract
 
@@ -49,9 +66,12 @@ ANSI/OSC/CSI sequences, controls, bidi and zero-width formatting are stripped.
 Whitespace is collapsed; transcription is clipped to 8000 UTF-16 code units,
 metadata to 256, with a visible marker and intact surrogate pairs.
 
-HTTP 415 means the host rejected the media type. HTTP 400 means malformed
-JSON/multipart. HTTP 502 means the receiver or agent delivery failed.
+HTTP 401 means the Authorization header is missing or its Bearer value does
+not match `pebble_webhook_secret`. HTTP 415 means the host rejected the media
+type; remove a manually supplied Content-Type and use CodeTerm 1.10.19 or
+newer. HTTP 400 means malformed JSON/multipart. HTTP 502 means the receiver
+or agent delivery failed.
 CodeTerm Settings → Logs contains host rejection codes and receiver failures,
 without authentication headers or recording payloads.
 
-<!-- revision: 1 -->
+<!-- revision: 2 -->

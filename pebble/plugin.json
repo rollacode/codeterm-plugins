@@ -1,6 +1,6 @@
 {
   "id": "pebble",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minCodeterm": "1.10.19",
   "hostApi": 2,
   "displayName": "Pebble",
@@ -14,5 +14,5 @@
       "kind": "pebble"
     }
   },
-  "configHelp": "Requires a CodeTerm host with multipart webhook support. In Pebble CoreApp set the webhook URL to your reachable CodeTerm HTTPS origin plus /api/plugins/pebble/webhook, add Authorization: Bearer <secret>, and select Transcription only. Store that secret as pebble_webhook_secret in CodeTerm Settings > Secrets. Do not override Content-Type: CoreApp supplies multipart/form-data with its boundary. HTTP 415 requires a multipart-capable host, not a JSON header. The plugin receives transcription, recordedAt, client, and optional test fields; it does not read secrets, make network requests, or deduplicate unsigned events."
+  "configHelp": "Requires CodeTerm 1.10.19+ with multipart webhook support. Prod BLACKSTAR URL: https://blackstar.tail0e459c.ts.net/api/plugins/pebble/webhook. In CoreApp set that URL, add Authorization: Bearer <the value of pebble_webhook_secret>, and select Transcription only. Retrieve the token from CodeTerm Settings > Secrets or codeterm mem secret get --name pebble_webhook_secret on prod; it is not the CodeTerm API token and never belongs in the URL. Do not override Content-Type: CoreApp supplies multipart/form-data with its boundary. HTTP 415 means the host or media type is wrong."
 }
