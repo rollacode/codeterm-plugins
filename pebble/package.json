@@ -1,6 +1,6 @@
 {
   "name": "@codeterm/plugin-pebble",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "CodeTerm Pebble ring webhook receiver plugin.",
