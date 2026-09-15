@@ -1,50 +1,57 @@
 # Pebble
 
-The Pebble plugin receives the authenticated Pebble ring webhook through
-CodeTerm's host and delivers one sanitized, bounded message to the General
-Agent. It supports the `single-click-hold` and `double-click-hold` triggers;
-other non-empty trigger strings are retained as explicit `unknown (...)` data.
+Receives Pebble Index/CoreApp transcription webhooks through CodeTerm and
+forwards bounded, sanitized text to the General Agent.
 
-The host owns the route and authentication:
+## Setup
 
-- Route: `POST /api/plugins/pebble/webhook`
-- Header: `Authorization: Bearer <secret>`
-- Secret-store name: `pebble_webhook_secret`
+The CodeTerm host must support multipart webhook parsing; updating this plugin
+alone cannot fix a host that only accepts JSON.
 
-The six payload names — `transcript`, `trigger`, `event_id`, `ring_id`,
-`source_message_id`, and `recorded_at` — come from the closed-source Pebble
-CoreApp contract. They have not been verified against a live CoreApp in this
-repository. A rename, casing change, or missing field is therefore an
-observable failed delivery rather than a deliberate no-op, so the mismatch is
-available for diagnosis instead of being silently discarded.
+In CoreApp's Index webhook settings:
 
-The plugin does not open a listener, parse URL tokens, call a network API, or
-execute transcript text. Every payload field is treated as untrusted data and
-is delivered as a JSON-quoted value under a header that says so: ANSI/OSC/CSI
-sequences (7-bit and 8-bit), C0/C1 controls, and zero-width and bidi formatting
-characters are removed, and whitespace is collapsed to one line. The transcript
-is bounded at the upstream 8000 characters and every other field at 256; clipped
-content ends with the visible `... [truncated]` marker and never splits a
-surrogate pair.
+- URL: your reachable CodeTerm HTTPS origin plus `/api/plugins/pebble/webhook`.
+- Header name: `Authorization`.
+- Header value: `Bearer <secret>`.
+- Send: **Transcription only**.
+- Remove any manually configured `Content-Type`. CoreApp supplies
+  `multipart/form-data; boundary=...` automatically.
 
-`event_id` is the replay key, so it is never rewritten: an id that is empty,
-longer than 256 characters, or contains control, formatting, or extra
-whitespace characters is a failed delivery. Repeated `event_id` values are
-ignored within the bounded lifetime of the plugin VM. An id is marked seen when
-the plugin returns its delivery, before the host confirms the message reached
-the agent, so a sender retry after a host-side delivery failure is suppressed
-as a replay.
+Store the same secret as `pebble_webhook_secret` in CodeTerm's secret store.
+Tailscale Serve works when the sending phone can reach that tailnet address.
 
-## Installation
+## Wire contract
 
-Refresh the registered marketplace channel and install the plugin:
+The [official webhook documentation](https://help.repebble.com/en/articles/15724406-index-advanced-features-mcp-webhook)
+and [CoreApp sender](https://github.com/coredevices/mobileapp/blob/master/experimental/src/commonMain/kotlin/coredevices/ring/external/indexwebhook/IndexWebhookApi.kt)
+define multipart fields `transcription`, `recordedAt` (epoch milliseconds),
+and `client`. Test events also carry `test=true`.
+The host decodes text parts into the receiver's payload object and skips file
+parts. Audio is not transcribed by this plugin. Missing or empty transcription
+is an observable receiver error; select Transcription only and check the
+phone's transcription result.
 
-```bash
-codeterm plugin channel refresh codeterm-plugins
-codeterm plugin install pebble
-```
+The unsigned form supplies no event identifier. The plugin invents none,
+returns no `eventId`, and keeps no replay cache. Identical requests are
+processed again; exactly-once delivery is not promised. This avoids suppressing
+a sender retry merely because the plugin ran before a host delivery failure.
 
-Then configure the Pebble CoreApp webhook to use the host route and the
-`Authorization` header. The shared secret must be stored as
-`pebble_webhook_secret` through CodeTerm's secret-store flow; do not put it in
-the URL or in this repository.
+## Safety and diagnostics
+
+The host authenticates before parsing JSON or multipart content or invoking
+the receiver. It limits the complete request to 1 MiB, with at most 16 form
+parts and 64 KiB per text part. Oversized audio can still exceed the request
+limit even though file parts are not forwarded.
+
+The plugin does not open a listener, read secrets, call network APIs, or
+execute transcript text. Output fields are JSON-quoted untrusted data.
+ANSI/OSC/CSI sequences, controls, bidi and zero-width formatting are stripped.
+Whitespace is collapsed; transcription is clipped to 8000 UTF-16 code units,
+metadata to 256, with a visible marker and intact surrogate pairs.
+
+HTTP 415 means the host rejected the media type. HTTP 400 means malformed
+JSON/multipart. HTTP 502 means the receiver or agent delivery failed.
+CodeTerm Settings → Logs contains host rejection codes and receiver failures,
+without authentication headers or recording payloads.
+
+<!-- revision: 1 -->
