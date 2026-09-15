@@ -13,6 +13,7 @@
     "build": "node scripts/build-plugin.mjs",
     "build:all": "node scripts/build-plugin.mjs git && node scripts/build-plugin.mjs bitwarden && node scripts/build-plugin.mjs transcriber && node scripts/build-plugin.mjs lmstudio && node scripts/build-plugin.mjs chat-preprocessor && node scripts/build-plugin.mjs pebble",
     "typecheck": "tsc --noEmit",
+    "check:icons": "node scripts/check-plugin-icons.mjs",
     "test": "npx tsx git/plugin.test.cjs && npx tsx bitwarden/plugin.test.cjs && npx tsx lmstudio/plugin.test.cjs && npx tsx chat-preprocessor/plugin.test.cjs && npx tsx transcriber/plugin.test.cjs && npx tsx pebble/plugin.test.cjs"
   },
   "devDependencies": {
