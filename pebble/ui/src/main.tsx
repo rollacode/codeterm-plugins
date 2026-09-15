@@ -304,7 +304,7 @@ function TargetSection() {
 
   const hint = (
     <span style={{ color: MUTED, fontSize: 11.5 }}>
-      To pick a tab, open its ⋮ menu → <strong style={{ color: FG }}>Connect Pebble ring</strong>.
+      To pick a tab, open its ⋮ menu → <strong style={{ color: FG }}>Attach Pebble ring</strong>.
     </span>
   );
 

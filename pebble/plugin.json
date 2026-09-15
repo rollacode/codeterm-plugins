@@ -1,6 +1,6 @@
 {
   "id": "pebble",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "minCodeterm": "1.10.21",
   "hostApi": 2,
   "displayName": "Pebble",
@@ -14,12 +14,12 @@
     "tabMenu": [
       {
         "id": "receiver-target",
-        "label": "Connect Pebble ring",
+        "label": "Attach Pebble ring",
         "action": "receiverTarget"
       }
     ],
     "view": true
   },
-  "configHelp": "Requires CodeTerm 1.10.21+ (host-owned receiver targets). Open the Pebble view to copy this machine's webhook URL and pebble_webhook_secret into CoreApp as Authorization: Bearer <token>, with Send set to Transcription only and no manual Content-Type. Pick a tab with its ⋮ menu → Connect Pebble ring; without one, events go to the General Agent.",
+  "configHelp": "Requires CodeTerm 1.10.21+ (host-owned receiver targets). Open the Pebble view to copy this machine's webhook URL and pebble_webhook_secret into CoreApp as Authorization: Bearer <token>, with Send set to Transcription only and no manual Content-Type. Pick a tab with its ⋮ menu → Attach Pebble ring; without one, events go to the General Agent.",
   "icon": "icon.svg"
 }
