@@ -20,6 +20,10 @@ In CoreApp's Index webhook settings, copy the values shown by the Pebble view:
 - Remove any manually configured `Content-Type`. CoreApp supplies
   `multipart/form-data; boundary=...` automatically.
 
+If the view reports that the secret is unavailable, create the
+`pebble_webhook_secret` entry in CodeTerm Settings → Secrets, then refresh the
+view.
+
 The URL is generated for the machine running CodeTerm. The phone must be able
 to reach that machine; HTTPS Tailscale Serve is suitable for a phone on the
 same tailnet. Do not put the token in the URL or a query string.
