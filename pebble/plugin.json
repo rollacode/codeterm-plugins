@@ -1,13 +1,11 @@
 {
   "id": "pebble",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "minCodeterm": "1.10.21",
   "hostApi": 2,
   "displayName": "Pebble",
   "description": "Receives authenticated Pebble ring events and delivers their sanitized metadata and transcript to the tab you pick, or to the CodeTerm General Agent.",
   "readme": "README.md",
-  "iconHint": "🪨",
-  "iconColor": "var(--ct-accent)",
   "entry": "plugin.js",
   "capabilities": {
     "webhookReceiver": {
