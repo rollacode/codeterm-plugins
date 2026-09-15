@@ -103,10 +103,62 @@ function formatMessage(payload: PebblePayload): string {
     .join("\n");
 }
 
+type ReceiverTargetState =
+  | { status: "general"; tabId: null }
+  | { status: "bound"; tabId: string }
+  | { status: "notLive"; tabId: string }
+  | { status: "unavailable"; error: string; message: string };
+
+const TARGET_UNAVAILABLE = "This CodeTerm build cannot report the receiver target. Events go to the General Agent.";
+
+function unavailable(error: string, message = TARGET_UNAVAILABLE): ReceiverTargetState {
+  return { status: "unavailable", error, message };
+}
+
+function receiverTargetApi(): { get?: unknown; clear?: unknown } | null {
+  if (typeof host === "undefined" || host === null) return null;
+  const api = (host as { receiverTarget?: unknown }).receiverTarget;
+  return typeof api === "object" && api !== null ? (api as { get?: unknown; clear?: unknown }) : null;
+}
+
+function normalizeTarget(raw: unknown): ReceiverTargetState {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return unavailable("receiver_target_unavailable");
+  }
+  const value = raw as Record<string, unknown>;
+  if (typeof value.error === "string") {
+    const message = typeof value.message === "string" && value.message ? sanitizeField(value.message) : "";
+    return unavailable(sanitizeField(value.error) || "receiver_target_unavailable", message || TARGET_UNAVAILABLE);
+  }
+  if (value.pluginId !== undefined && value.pluginId !== "pebble") {
+    return unavailable("malformed_receiver_target");
+  }
+  if (typeof value.live !== "boolean") return unavailable("malformed_receiver_target");
+  if (value.tabId === null) return { status: "general", tabId: null };
+  if (typeof value.tabId !== "string" || !sanitizeField(value.tabId)) {
+    return unavailable("malformed_receiver_target");
+  }
+  const tabId = truncateWithMarker(sanitizeField(value.tabId), FIELD_MAX_LENGTH);
+  return value.live ? { status: "bound", tabId } : { status: "notLive", tabId };
+}
+
+function callReceiverTarget(verb: "get" | "clear"): ReceiverTargetState {
+  const api = receiverTargetApi();
+  const fn = api?.[verb];
+  if (typeof fn !== "function") return unavailable("receiver_target_unavailable");
+  try {
+    return normalizeTarget(fn.call(api));
+  } catch {
+    return unavailable("receiver_target_unavailable");
+  }
+}
+
 function viewCall(method: string): unknown {
   if (method === "webhookSettings") {
     return { error: "This CodeTerm build does not provide webhook settings yet" };
   }
+  if (method === "receiverTarget") return callReceiverTarget("get");
+  if (method === "resetReceiverTarget") return callReceiverTarget("clear");
   return { error: `unknown view method: ${method}` };
 }
 
