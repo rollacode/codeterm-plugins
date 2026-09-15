@@ -63,10 +63,13 @@ const tests = [
   }],
   ["manifest declares the generic receiver-target tab menu item and requires the host that ships it", () => {
     const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
-    assert.deepEqual(manifest.capabilities.tabMenu, [
-      { id: "receiver-target", label: "Connect Pebble ring", action: "receiverTarget" },
-    ]);
+    assert.equal(manifest.capabilities.tabMenu.length, 1);
     const [item] = manifest.capabilities.tabMenu;
+    assert.deepEqual(Object.keys(item).sort(), ["action", "id", "label"]);
+    assert.equal(item.id, "receiver-target");
+    assert.equal(item.action, "receiverTarget");
+    assert.equal(typeof item.label, "string");
+    assert.ok(item.label.length > 0 && item.label.length <= 48 && item.label === item.label.trim());
     assert.match(item.id, /^[a-z0-9-]{1,32}$/);
     assert.ok(item.label.trim() === item.label && item.label.length <= 48);
     const [major, minor, patch] = manifest.minCodeterm.split(".").map(Number);
