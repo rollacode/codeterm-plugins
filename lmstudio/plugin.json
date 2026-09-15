@@ -1,13 +1,12 @@
 {
   "id": "lmstudio",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minCodeterm": "1.0.0",
   "hostApi": 2,
   "displayName": "LM Studio",
   "description": "Chat with a local LM Studio model right inside a CodeTerm pane. An open agent shell: native LM Studio v1 streaming, presets, visible system prompt, and CodeTerm tool execution.",
   "readme": "README.md",
-  "iconHint": "🤖",
-  "iconColor": "var(--ct-accent)",
+  "icon": "icon.svg",
   "entry": "plugin.js",
   "capabilities": {
     "chatBackend": { "spawnable": true, "watcher": true }
@@ -27,6 +26,5 @@
         "codeterm"
       ]
     }
-  },
-  "iconSvg": "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"3\" y=\"11\" width=\"18\" height=\"10\" rx=\"2\"/><circle cx=\"12\" cy=\"5\" r=\"2\"/><path d=\"M12 7v4\"/><line x1=\"8\" y1=\"16\" x2=\"8\" y2=\"16\"/><line x1=\"16\" y1=\"16\" x2=\"16\" y2=\"16\"/></svg>"
+  }
 }
