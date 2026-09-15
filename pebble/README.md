@@ -39,7 +39,7 @@ value.
 
 ## Choosing the receiving tab
 
-Open any local tab's ⋮ menu and choose **Pebble ring → this tab**. The item is
+Open any local tab's ⋮ menu and choose **Connect Pebble ring**. The item is
 checked on the bound tab; choosing it again on that tab clears the binding.
 Binding another tab replaces the previous one. The Pebble view's **Delivers
 to** section shows the current tab id and a **Reset to General Agent** button.
@@ -93,4 +93,4 @@ or agent delivery failed.
 CodeTerm Settings → Logs contains host rejection codes and receiver failures,
 without authentication headers or recording payloads.
 
-<!-- revision: 4 -->
+<!-- revision: 5 -->

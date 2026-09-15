@@ -16,11 +16,11 @@
     "tabMenu": [
       {
         "id": "receiver-target",
-        "label": "Pebble ring → this tab",
+        "label": "Connect Pebble ring",
         "action": "receiverTarget"
       }
     ],
     "view": true
   },
-  "configHelp": "Requires CodeTerm 1.10.21+ (host-owned receiver targets). Open the Pebble view to copy this machine's webhook URL and pebble_webhook_secret into CoreApp as Authorization: Bearer <token>, with Send set to Transcription only and no manual Content-Type. Pick a tab with its ⋮ menu → Pebble ring → this tab; without one, events go to the General Agent."
+  "configHelp": "Requires CodeTerm 1.10.21+ (host-owned receiver targets). Open the Pebble view to copy this machine's webhook URL and pebble_webhook_secret into CoreApp as Authorization: Bearer <token>, with Send set to Transcription only and no manual Content-Type. Pick a tab with its ⋮ menu → Connect Pebble ring; without one, events go to the General Agent."
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -304,7 +304,7 @@ function TargetSection() {
 
   const hint = (
     <span style={{ color: MUTED, fontSize: 11.5 }}>
-      To pick a tab, open its ⋮ menu → <strong style={{ color: FG }}>Pebble ring → this tab</strong>.
+      To pick a tab, open its ⋮ menu → <strong style={{ color: FG }}>Connect Pebble ring</strong>.
     </span>
   );
 
@@ -351,9 +351,36 @@ function TargetSection() {
   );
 }
 
+// Host clamp for embedded view heights (PluginView embedded).
+const HOST_MAX_HEIGHT = 720;
+
+// The bridge reports body.scrollHeight, an integer, while text layout is fractional: a
+// sub-pixel remainder overflows the sized iframe and shows a scrollbar. Pin whole pixels.
+function useWholePixelBody() {
+  const ref = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const main = ref.current;
+    if (!main) return;
+    const html = document.documentElement;
+    const body = document.body;
+    const fit = () => {
+      const height = Math.ceil(main.getBoundingClientRect().height);
+      body.style.height = `${height}px`;
+      html.style.overflow = height <= HOST_MAX_HEIGHT ? "hidden" : "";
+    };
+    fit();
+    const observer = new ResizeObserver(fit);
+    observer.observe(main);
+    return () => observer.disconnect();
+  }, []);
+  return ref;
+}
+
 function App() {
+  const ref = useWholePixelBody();
   return (
     <main
+      ref={ref}
       style={{
         display: "grid",
         gap: 16,
