@@ -1,10 +1,10 @@
 {
   "id": "pebble",
-  "version": "0.1.2",
-  "minCodeterm": "1.10.20",
+  "version": "0.2.0",
+  "minCodeterm": "1.10.21",
   "hostApi": 2,
   "displayName": "Pebble",
-  "description": "Receives authenticated Pebble ring events and delivers their sanitized metadata and transcript to the CodeTerm General Agent.",
+  "description": "Receives authenticated Pebble ring events and delivers their sanitized metadata and transcript to the tab you pick, or to the CodeTerm General Agent.",
   "readme": "README.md",
   "iconHint": "🪨",
   "iconColor": "var(--ct-accent)",
@@ -13,7 +13,15 @@
     "webhookReceiver": {
       "kind": "pebble"
     },
+    "tabMenu": [
+      {
+        "id": "receiver-target",
+        "label": "Connect Pebble ring",
+        "action": "receiverTarget"
+      }
+    ],
     "view": true
   },
-  "configHelp": "Requires CodeTerm 1.10.20+ with multipart webhook support and the Pebble setup view. Open the Pebble view to see the current machine's webhook URL and pebble_webhook_secret, then put that URL and Authorization: Bearer <token> into CoreApp. Select Transcription only and let CoreApp generate Content-Type with its multipart boundary. HTTP 415 means the host or media type is wrong."
+  "configHelp": "Requires CodeTerm 1.10.21+ (host-owned receiver targets). Open the Pebble view to copy this machine's webhook URL and pebble_webhook_secret into CoreApp as Authorization: Bearer <token>, with Send set to Transcription only and no manual Content-Type. Pick a tab with its ⋮ menu → Connect Pebble ring; without one, events go to the General Agent.",
+  "icon": "icon.svg"
 }

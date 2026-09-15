@@ -1,7 +1,9 @@
 # Pebble
 
 Receives Pebble Index/CoreApp transcription webhooks through CodeTerm and
-forwards bounded, sanitized text to the General Agent.
+forwards bounded, sanitized text to the tab you pick, or to the General Agent.
+
+Requires CodeTerm 1.10.21 or newer, which ships host-owned receiver targets.
 
 ## Setup
 
@@ -30,6 +32,29 @@ same tailnet. Do not put the token in the URL or a query string.
 
 The host must support multipart webhook parsing; updating this plugin alone
 cannot fix a host that only accepts JSON.
+
+The Pebble view shows the URL, header, and token with a Copy button on each
+row. The token is masked until you press Show; Copy always copies the real
+value.
+
+## Choosing the receiving tab
+
+Open any local tab's ⋮ menu and choose **Connect Pebble ring**. The item is
+checked on the bound tab; choosing it again on that tab clears the binding.
+Binding another tab replaces the previous one. The Pebble view's **Delivers
+to** section shows the current tab id and a **Reset to General Agent** button.
+
+CodeTerm owns this binding, not the plugin: it is kept across restarts and
+cleared when the bound tab closes. The plugin only reads or clears it through
+the host; it stores no copy and does not route events itself.
+
+Events go to the General Agent when:
+
+- no tab is bound, or the binding was reset
+- the bound tab closed, or has no live terminal or chat session
+- the host cannot report the target (the view then shows it as unavailable)
+
+The event text, marker, and metadata are the same whichever tab receives it.
 
 ## Wire contract
 
@@ -68,4 +93,4 @@ or agent delivery failed.
 CodeTerm Settings → Logs contains host rejection codes and receiver failures,
 without authentication headers or recording payloads.
 
-<!-- revision: 3 -->
+<!-- revision: 5 -->
