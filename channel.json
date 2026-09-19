@@ -33,6 +33,12 @@
       "path": "chat-preprocessor",
       "version": "0.1.0",
       "minCodeterm": "1.0.0"
+    },
+    {
+      "id": "grok",
+      "path": "grok",
+      "version": "0.1.0",
+      "minCodeterm": "1.11.4"
     }
   ]
 }

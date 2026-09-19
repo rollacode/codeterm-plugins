@@ -1,0 +1,125 @@
+{
+  "id": "grok",
+  "version": "0.1.0",
+  "minCodeterm": "1.11.4",
+  "hostApi": 2,
+  "displayName": "Grok",
+  "description": "xAI Grok CLI — optional PTY agent. Install the grok binary separately; not a core provider.",
+  "readme": "README.md",
+  "binaryName": "grok",
+  "cliBinary": "grok",
+  "iconColor": "var(--ct-fg)",
+  "entry": "plugin.js",
+  "spawn": {
+    "readinessStrategy": {
+      "kind": "poll_shell_prompt",
+      "timeoutSecs": 30
+    },
+    "taskDelivery": "inline_flag",
+    "systemPromptDelivery": {
+      "kind": "external"
+    },
+    "verifySubmit": {
+      "kind": "tui_input_drained"
+    },
+    "sessionIdInjection": "none",
+    "statusBarRows": 1,
+    "supportsLazySkills": false,
+    "hasHooks": false
+  },
+  "models": [
+    {
+      "id": "grok-4.6",
+      "displayName": "Grok 4.6",
+      "description": "xAI frontier model.",
+      "group": "xAI"
+    },
+    {
+      "id": "grok-4.5",
+      "displayName": "Grok 4.5",
+      "description": "xAI previous frontier model.",
+      "group": "xAI"
+    }
+  ],
+  "defaultModel": "grok-4.6",
+  "reasoningEfforts": [
+    {
+      "id": "low",
+      "displayName": "Low",
+      "description": "Quick, fast implementations."
+    },
+    {
+      "id": "medium",
+      "displayName": "Medium",
+      "description": "Balanced effort with standard implementation and testing."
+    },
+    {
+      "id": "high",
+      "displayName": "High",
+      "description": "Higher implementation quality with extensive reasoning."
+    },
+    {
+      "id": "xhigh",
+      "displayName": "Extra High",
+      "description": "Highest effort and reasoning level."
+    }
+  ],
+  "defaultReasoningEffort": "high",
+  "sessions": {
+    "rootDir": "~/.grok/sessions",
+    "fileExtension": "jsonl"
+  },
+  "credentials": [
+    {
+      "id": "grokAuth",
+      "file": "~/.grok/auth.json",
+      "public": {
+        "userId": "/https:~1~1auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828/user_id"
+      },
+      "secret": {
+        "accessToken": "/https:~1~1auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828/key"
+      }
+    }
+  ],
+  "installer": {
+    "macos": "curl -fsSL https://x.ai/cli/install.sh | bash",
+    "linux": "curl -fsSL https://x.ai/cli/install.sh | bash",
+    "windows": "irm https://x.ai/cli/install.ps1 | iex"
+  },
+  "updater": {
+    "macos": "grok update",
+    "linux": "grok update",
+    "windows": "grok update"
+  },
+  "commands": {
+    "stopKey": "\u001b",
+    "autoApproveFlags": [
+      "--always-approve"
+    ],
+    "modelLaunchArgsFormat": [
+      "--model",
+      "{model}"
+    ],
+    "reasoningEffortLaunchArgsFormat": [
+      "--reasoning-effort",
+      "{effort}"
+    ]
+  },
+  "permissions": {
+    "network": {
+      "allow": [
+        "x.ai",
+        "cli-chat-proxy.grok.com",
+        "auth.x.ai",
+        "accounts.x.ai"
+      ]
+    },
+    "subprocess": {
+      "allow": [
+        "grok",
+        "agent"
+      ]
+    }
+  },
+  "icon": "icon.svg"
+}
