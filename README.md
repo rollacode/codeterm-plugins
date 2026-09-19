@@ -7,6 +7,7 @@ This channel is pre-registered out of the box — its plugins show up under
 - **git** — branch/working-tree status bubble, glance popover, and a full Git view
 - **transcriber** — speech-to-text backend (local engine or mesh peer)
 - **bitwarden** — secret backend via the `bw` CLI, glance + connection view
+- **grok** — optional xAI Grok CLI PTY agent (not a core provider)
 
 ## Authoring
 
