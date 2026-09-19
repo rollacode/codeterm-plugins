@@ -7,6 +7,7 @@ This channel is pre-registered out of the box — its plugins show up under
 - **git** — branch/working-tree status bubble, glance popover, and a full Git view
 - **transcriber** — speech-to-text backend (local engine or mesh peer)
 - **bitwarden** — secret backend via the `bw` CLI, glance + connection view
+- **pebble** — authenticated Pebble ring webhook receiver
 - **grok** — optional xAI Grok CLI PTY agent (not a core provider)
 
 ## Authoring
@@ -24,7 +25,18 @@ npm run build:all          # build git, bitwarden, transcriber
 npm run build git          # build a single plugin
 npm run typecheck          # tsc --noEmit across all plugin sources
 npm test                   # plugin-side parser tests (via tsx)
+npm run check:icons        # offline icon allowlist + manifest/channel consistency
 ```
+
+Every plugin ships its icon as `<id>/icon.svg`, referenced by `"icon": "icon.svg"` in
+`plugin.json`; inline `iconSvg`, `iconHint` and `iconColor` are not part of the manifest.
+The host sanitizes the file and renders it with `currentColor`, so it must stay under
+8 KiB and use only `svg`, `g`, `path`, `circle`, `ellipse`, `rect`, `line`, `polyline`
+and `polygon` with numeric geometry, `fill`/`stroke` of `currentColor` or `none`, and no
+`style`, `transform`, `href`, ids, gradients, text, comments or doctype.
+`scripts/check-plugin-icons.mjs` mirrors that allowlist without network access; pass
+file paths to check individual SVGs, and see `scripts/fixtures/plugin-icons` for the
+accepted and rejected shapes it is tested against.
 
 Local typechecking expects the canonical CodeTerm checkout beside this repository
 at `../codeterm`, which supplies `packages/plugin-sdk` and `packages/chat-engine`.
