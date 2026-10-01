@@ -88,21 +88,12 @@ function timeoutMs() {
   const configured = settings().decision?.timeoutMs;
   return typeof configured === "number" && Number.isFinite(configured) && configured > 0 ? Math.min(Math.ceil(configured), DEFAULT_TIMEOUT_MS) : DEFAULT_TIMEOUT_MS;
 }
-function modelList() {
-  const result = host.fetch.async(
-    {
-      url: apiUrl("/models"),
-      method: "GET",
-      headers: { accept: "application/json" },
-      timeoutMs: timeoutMs()
-    },
-    (response) => response
-  );
-  if (result.error || typeof result.status === "number" && result.status >= 400 || !result.body) {
+function parseModelList(response) {
+  if (response.error || typeof response.status === "number" && response.status >= 400 || !response.body) {
     return [];
   }
   try {
-    const parsed = JSON.parse(result.body);
+    const parsed = JSON.parse(response.body);
     if (!Array.isArray(parsed.data)) return [];
     const models = [];
     for (const row of parsed.data) {
@@ -121,15 +112,31 @@ function modelList() {
     return [];
   }
 }
-function selectedModel() {
+function requestModelList(then) {
+  return host.fetch.async(
+    {
+      url: apiUrl("/models"),
+      method: "GET",
+      headers: { accept: "application/json" },
+      timeoutMs: timeoutMs()
+    },
+    (response) => then(parseModelList(response))
+  );
+}
+function modelList() {
+  return requestModelList((models) => models);
+}
+function withSelectedModel(then) {
   const config = settings();
   const decisionModel2 = config.decision?.model;
-  if (typeof decisionModel2 === "string" && decisionModel2.trim()) return decisionModel2.trim();
-  if (typeof config.model === "string" && config.model.trim()) return config.model.trim();
-  if (defaultLoadedModel) return defaultLoadedModel;
-  const loaded = modelList();
-  if (loaded.length) return loaded[0].id;
-  throw new Error("LM Studio decision model unavailable: set decision.model or load a model");
+  if (typeof decisionModel2 === "string" && decisionModel2.trim()) return then(decisionModel2.trim());
+  if (typeof config.model === "string" && config.model.trim()) return then(config.model.trim());
+  if (defaultLoadedModel) return then(defaultLoadedModel);
+  return requestModelList((models) => {
+    if (!models.length) throw new Error("LM Studio decision model unavailable: load a model or set decision.model");
+    defaultLoadedModel = models[0].id;
+    return then(defaultLoadedModel);
+  });
 }
 function stateText(request) {
   return JSON.stringify(request.state);
@@ -195,7 +202,7 @@ function messages(system, user) {
     { role: "user", content: user }
   ];
 }
-function requestCompletion(model, conversation, topLogprobs, responseFormat) {
+function requestCompletion(model, conversation, topLogprobs, then, responseFormat) {
   const outputLimit = responseFormat ? Math.max(32, maxTokens()) : maxTokens();
   const body = {
     model,
@@ -223,11 +230,13 @@ function requestCompletion(model, conversation, topLogprobs, responseFormat) {
         throw new Error(`LM Studio decision request failed: HTTP ${result.status}`);
       }
       if (!result.body) return parseFailure("LM Studio returned an empty completion");
+      let completion;
       try {
-        return JSON.parse(result.body);
+        completion = JSON.parse(result.body);
       } catch {
         return parseFailure("LM Studio returned invalid JSON");
       }
+      return then(completion);
     }
   );
 }
@@ -268,25 +277,27 @@ function noulFallback(model, conversation) {
       }
     }
   };
-  const completion = requestCompletion(
+  return requestCompletion(
     model,
     messages(
       "Return JSON with answer yes or no and confidence as an integer from 0 to 100. Confidence is your certainty that the chosen answer is correct.",
       conversation[1].content
     ),
     null,
+    (completion) => {
+      const parsed = parseStructuredContent(completion);
+      if (parsed.answer !== "yes" && parsed.answer !== "no") {
+        return parseFailure("constrained response is not yes or no");
+      }
+      const confidence = integerConfidence(parsed.confidence);
+      approximateModels.add(model);
+      return {
+        type: "noul",
+        p: parsed.answer === "yes" ? confidence : 1 - confidence
+      };
+    },
     responseFormat
   );
-  const parsed = parseStructuredContent(completion);
-  if (parsed.answer !== "yes" && parsed.answer !== "no") {
-    return parseFailure("constrained response is not yes or no");
-  }
-  const confidence = integerConfidence(parsed.confidence);
-  approximateModels.add(model);
-  return {
-    type: "noul",
-    p: parsed.answer === "yes" ? confidence : 1 - confidence
-  };
 }
 function noul(request) {
   const question = request.question;
@@ -303,17 +314,17 @@ ${stateText(request)}
 A no means: ${criteria.false}
 ` : "Answer yes when the stated condition is satisfied; otherwise answer no.\n") + "Answer yes or no."
   );
-  const model = selectedModel();
-  const completion = requestCompletion(model, conversation, 5);
-  const entries = firstContentLogprobs(completion);
-  if (!entries) return noulFallback(model, conversation);
-  const groups = /* @__PURE__ */ new Map([["yes", []], ["no", []]]);
-  for (const entry of entries) {
-    const token = normalizeToken(entry.token);
-    if (token === "yes" || token === "no") groups.get(token).push(entry.logprob);
-  }
-  const probabilities = probabilitiesFromGroups(groups);
-  return { type: "noul", p: probabilities.yes };
+  return withSelectedModel((model) => requestCompletion(model, conversation, 5, (completion) => {
+    const entries = firstContentLogprobs(completion);
+    if (!entries) return noulFallback(model, conversation);
+    const groups = /* @__PURE__ */ new Map([["yes", []], ["no", []]]);
+    for (const entry of entries) {
+      const token = normalizeToken(entry.token);
+      if (token === "yes" || token === "no") groups.get(token).push(entry.logprob);
+    }
+    const probabilities = probabilitiesFromGroups(groups);
+    return { type: "noul", p: probabilities.yes };
+  }));
 }
 function optionRecord(request) {
   if (request.question.type === "choice") return request.question.options;
@@ -361,28 +372,30 @@ function constrainedChoice(request, options, model) {
       }
     }
   };
-  const completion = requestCompletion(
+  return requestCompletion(
     model,
     messages(
       "Return JSON with one supplied choice and confidence as an integer from 0 to 100. Confidence is your certainty that the selected choice is correct.",
       choicePrompt(request, options)
     ),
     null,
+    (completion) => {
+      const parsed = parseStructuredContent(completion);
+      const choice = parsed.choice;
+      if (typeof choice !== "string" || !Object.prototype.hasOwnProperty.call(options, choice)) {
+        return parseFailure("constrained response is not one of the supplied labels");
+      }
+      const confidence = integerConfidence(parsed.confidence);
+      approximateModels.add(model);
+      return {
+        type: "choice",
+        choice,
+        probabilities: confidenceProbabilities(choice, labels, confidence),
+        confidence: labels.length === 1 ? 1 : confidence
+      };
+    },
     responseFormat
   );
-  const parsed = parseStructuredContent(completion);
-  const choice = parsed.choice;
-  if (typeof choice !== "string" || !Object.prototype.hasOwnProperty.call(options, choice)) {
-    return parseFailure("constrained response is not one of the supplied labels");
-  }
-  const confidence = integerConfidence(parsed.confidence);
-  approximateModels.add(model);
-  return {
-    type: "choice",
-    choice,
-    probabilities: confidenceProbabilities(choice, labels, confidence),
-    confidence: labels.length === 1 ? 1 : confidence
-  };
 }
 function choiceProbabilitiesFromLogs(labels, entries) {
   const groups = new Map(labels.map((label) => [label, []]));
@@ -400,35 +413,38 @@ function choose(request, options) {
   if (!labels.length || labels.some((label) => !label.trim())) {
     return parseFailure("choice options must include non-empty labels");
   }
-  const model = selectedModel();
-  if (hasSharedFirstTokenPrefix(labels)) return constrainedChoice(request, options, model);
-  const count = Math.min(MAX_TOP_LOGPROBS, Math.max(5, labels.length * 3));
-  const completion = requestCompletion(
-    model,
-    messages(
-      "Answer with the first token of exactly one supplied option key. Do not explain.",
-      choicePrompt(request, options)
-    ),
-    count
-  );
-  const entries = firstContentLogprobs(completion);
-  if (!entries) return constrainedChoice(request, options, model);
-  let probabilities;
-  try {
-    probabilities = choiceProbabilitiesFromLogs(labels, entries);
-  } catch (error) {
-    if (String(error && error.message || error).includes("shared candidate token prefixes")) {
-      return constrainedChoice(request, options, model);
-    }
-    throw error;
-  }
-  const selected = answerChoice(probabilities);
-  return {
-    type: "choice",
-    choice: selected.choice,
-    probabilities,
-    confidence: selected.confidence
-  };
+  return withSelectedModel((model) => {
+    if (hasSharedFirstTokenPrefix(labels)) return constrainedChoice(request, options, model);
+    const count = Math.min(MAX_TOP_LOGPROBS, Math.max(5, labels.length * 3));
+    return requestCompletion(
+      model,
+      messages(
+        "Answer with the first token of exactly one supplied option key. Do not explain.",
+        choicePrompt(request, options)
+      ),
+      count,
+      (completion) => {
+        const entries = firstContentLogprobs(completion);
+        if (!entries) return constrainedChoice(request, options, model);
+        let probabilities;
+        try {
+          probabilities = choiceProbabilitiesFromLogs(labels, entries);
+        } catch (error) {
+          if (String(error && error.message || error).includes("shared candidate token prefixes")) {
+            return constrainedChoice(request, options, model);
+          }
+          throw error;
+        }
+        const selected = answerChoice(probabilities);
+        return {
+          type: "choice",
+          choice: selected.choice,
+          probabilities,
+          confidence: selected.confidence
+        };
+      }
+    );
+  });
 }
 function pointScoreProbabilities(score2) {
   const low = Math.floor(score2);
@@ -460,24 +476,26 @@ Return one numeric score for these ordered levels. Each level's index is its sco
       }
     }
   };
-  const completion = requestCompletion(
+  return requestCompletion(
     model,
     messages("Return JSON with a numeric score in the declared range.", scorePrompt),
     null,
+    (completion) => {
+      const parsed = parseStructuredContent(completion);
+      const scoreValue = parsed.score;
+      if (typeof scoreValue !== "number" || !Number.isFinite(scoreValue) || scoreValue < 0 || scoreValue > maximum) {
+        return parseFailure("constrained score is outside the declared range");
+      }
+      approximateModels.add(model);
+      return {
+        type: "score",
+        score: scoreValue,
+        probabilities: pointScoreProbabilities(scoreValue),
+        confidence: null
+      };
+    },
     responseFormat
   );
-  const parsed = parseStructuredContent(completion);
-  const scoreValue = parsed.score;
-  if (typeof scoreValue !== "number" || !Number.isFinite(scoreValue) || scoreValue < 0 || scoreValue > maximum) {
-    return parseFailure("constrained score is outside the declared range");
-  }
-  approximateModels.add(model);
-  return {
-    type: "score",
-    score: scoreValue,
-    probabilities: pointScoreProbabilities(scoreValue),
-    confidence: null
-  };
 }
 function score(request) {
   if (request.question.type !== "score") return parseFailure("expected a score question");
@@ -485,39 +503,42 @@ function score(request) {
   if (!levels.length) return parseFailure("score levels are empty");
   const options = optionRecord(request);
   const labels = Object.keys(options);
-  const model = selectedModel();
-  if (hasSharedFirstTokenPrefix(labels)) return constrainedScore(request, model);
-  const count = Math.min(MAX_TOP_LOGPROBS, Math.max(5, labels.length * 3));
-  const completion = requestCompletion(
-    model,
-    messages(
-      "Answer with the first token of exactly one supplied option key. Do not explain.",
-      choicePrompt(request, options)
-    ),
-    count
-  );
-  const entries = firstContentLogprobs(completion);
-  if (!entries) return constrainedScore(request, model);
-  let probabilities;
-  try {
-    probabilities = choiceProbabilitiesFromLogs(labels, entries);
-  } catch (error) {
-    if (String(error && error.message || error).includes("shared candidate token prefixes")) {
-      return constrainedScore(request, model);
-    }
-    throw error;
-  }
-  let expectedScore = 0;
-  for (const [index, probability] of Object.entries(probabilities)) {
-    expectedScore += Number(index) * probability;
-  }
-  const selected = answerChoice(probabilities);
-  return {
-    type: "score",
-    score: expectedScore,
-    probabilities,
-    confidence: selected.confidence
-  };
+  return withSelectedModel((model) => {
+    if (hasSharedFirstTokenPrefix(labels)) return constrainedScore(request, model);
+    const count = Math.min(MAX_TOP_LOGPROBS, Math.max(5, labels.length * 3));
+    return requestCompletion(
+      model,
+      messages(
+        "Answer with the first token of exactly one supplied option key. Do not explain.",
+        choicePrompt(request, options)
+      ),
+      count,
+      (completion) => {
+        const entries = firstContentLogprobs(completion);
+        if (!entries) return constrainedScore(request, model);
+        let probabilities;
+        try {
+          probabilities = choiceProbabilitiesFromLogs(labels, entries);
+        } catch (error) {
+          if (String(error && error.message || error).includes("shared candidate token prefixes")) {
+            return constrainedScore(request, model);
+          }
+          throw error;
+        }
+        let expectedScore = 0;
+        for (const [index, probability] of Object.entries(probabilities)) {
+          expectedScore += Number(index) * probability;
+        }
+        const selected = answerChoice(probabilities);
+        return {
+          type: "score",
+          score: expectedScore,
+          probabilities,
+          confidence: selected.confidence
+        };
+      }
+    );
+  });
 }
 var decisionModel = {
   decide(request) {
