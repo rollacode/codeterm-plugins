@@ -9,6 +9,9 @@ baseUrl: http://localhost:1234
 decision:
   # Blank inherits `model` when set, otherwise the first loaded model.
   model: ""
+  # auto uses constrained JSON for model ids containing MLX (owner-probed null
+  # logprobs); set to logprobs or constrained to override for a model.
+  logprobsMode: auto
   maxTokens: 64
   timeoutMs: 30000
 

@@ -12,6 +12,7 @@ interface DecisionSettings {
     model?: unknown;
     maxTokens?: unknown;
     timeoutMs?: unknown;
+    logprobsMode?: unknown;
   };
 }
 
@@ -40,6 +41,8 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 // Some engines emit leading whitespace/newline tokens before the first answer token.
 const DEFAULT_MAX_TOKENS = 64;
 const MAX_TOP_LOGPROBS = 20;
+const CONSTRAINED_CHOICE_BATCH_SIZE = 12;
+const MAX_CONSTRAINED_CHOICE_LABELS = 36;
 let defaultLoadedModel = "";
 const approximateModels = new Set<string>();
 
@@ -76,6 +79,16 @@ function timeoutMs(): number {
   return typeof configured === "number" && Number.isFinite(configured) && configured > 0
     ? Math.min(Math.ceil(configured), DEFAULT_TIMEOUT_MS)
     : DEFAULT_TIMEOUT_MS;
+}
+
+function useTokenLogprobs(model: string): boolean {
+  const configured = settings().decision?.logprobsMode;
+  if (configured === "constrained") return false;
+  if (configured === "logprobs") return true;
+  // Owner probes found null logprobs on LM Studio's MLX models. Start with the
+  // constrained path for those ids instead of paying for a request that cannot
+  // produce token probabilities. Other model ids keep the measured logprob path.
+  return !/(?:^|[-_/.])mlx(?:$|[-_/.])/i.test(model);
 }
 
 function parseModelList(response: FetchResponse): DecisionModelInfo[] {
@@ -336,18 +349,21 @@ function noul(request: DecisionRequest): DecisionAnswer {
         : "Answer yes when the stated condition is satisfied; otherwise answer no.\n") +
       "Answer yes or no.",
   );
-  return withSelectedModel((model) => requestCompletion(model, conversation, 5, (completion) => {
-    const entries = firstContentLogprobs(completion);
-    if (!entries) return noulFallback(model, conversation);
+  return withSelectedModel((model) => {
+    if (!useTokenLogprobs(model)) return noulFallback(model, conversation);
+    return requestCompletion(model, conversation, 5, (completion) => {
+      const entries = firstContentLogprobs(completion);
+      if (!entries) return noulFallback(model, conversation);
 
-    const groups = new Map<string, number[]>([["yes", []], ["no", []]]);
-    for (const entry of entries) {
-      const token = normalizeToken(entry.token);
-      if (token === "yes" || token === "no") groups.get(token)!.push(entry.logprob);
-    }
-    const probabilities = probabilitiesFromGroups(groups);
-    return { type: "noul", p: probabilities.yes };
-  }));
+      const groups = new Map<string, number[]>([["yes", []], ["no", []]]);
+      for (const entry of entries) {
+        const token = normalizeToken(entry.token);
+        if (token === "yes" || token === "no") groups.get(token)!.push(entry.logprob);
+      }
+      const probabilities = probabilitiesFromGroups(groups);
+      return { type: "noul", p: probabilities.yes };
+    });
+  });
 }
 
 function optionRecord(request: DecisionRequest): Record<string, string> {
@@ -424,6 +440,112 @@ function constrainedChoice(
   );
 }
 
+function constrainedChoiceScoreFormat(keys: string[]): Record<string, unknown> {
+  const scoreProperties: Record<string, unknown> = {};
+  for (const key of keys) {
+    scoreProperties[key] = { type: "integer", minimum: 0, maximum: 100 };
+  }
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: "decision_choice_batch_scores",
+      strict: true,
+      schema: {
+        type: "object",
+        properties: {
+          scores: {
+            type: "object",
+            properties: scoreProperties,
+            required: keys,
+            additionalProperties: false,
+          },
+        },
+        required: ["scores"],
+        additionalProperties: false,
+      },
+    },
+  };
+}
+
+function constrainedChoiceBatches(
+  request: DecisionRequest,
+  options: Record<string, string>,
+  model: string,
+): DecisionAnswer {
+  const labels = Object.keys(options);
+  if (labels.length > MAX_CONSTRAINED_CHOICE_LABELS) {
+    return parseFailure(`constrained choice supports at most ${MAX_CONSTRAINED_CHOICE_LABELS} labels`);
+  }
+
+  const scores: Record<string, number> = {};
+  const allOptions = labels.map((label) => ({ label, description: options[label] }));
+  const requestBatch = (offset: number): DecisionAnswer => {
+    if (offset >= labels.length) {
+      const total = labels.reduce((sum, label) => sum + scores[label], 0);
+      if (!(total > 0)) return parseFailure("constrained candidate scores contain no positive mass");
+      const probabilities: Record<string, number> = {};
+      for (const label of labels) probabilities[label] = scores[label] / total;
+      const selected = answerChoice(probabilities);
+      approximateModels.add(model);
+      return {
+        type: "choice",
+        choice: selected.choice,
+        probabilities,
+        confidence: selected.confidence,
+      };
+    }
+
+    const batchLabels = labels.slice(offset, offset + CONSTRAINED_CHOICE_BATCH_SIZE);
+    const scoreKeys = batchLabels.map((_, index) => `s${index}`);
+    const batch = batchLabels.map((label, index) => ({
+      key: scoreKeys[index],
+      label,
+      description: options[label],
+    }));
+    const user = `${request.instructions}\n\nState and decision context:\n${stateText(request)}\n\n` +
+      "Evaluate the complete candidate set below using one consistent absolute 0-100 relevance scale. " +
+      "Return an independent integer score for every key in score_batch. Do not normalize scores within a batch.\n" +
+      `Complete candidate set: ${JSON.stringify(allOptions)}\n` +
+      `score_batch: ${JSON.stringify(batch)}`;
+
+    return requestCompletion(
+      model,
+      messages("Return JSON with an integer score from 0 to 100 for each requested candidate key.", user),
+      null,
+      (completion) => {
+        const parsed = parseStructuredContent(completion);
+        const batchScores = parsed.scores;
+        if (!batchScores || typeof batchScores !== "object" || Array.isArray(batchScores)) {
+          return parseFailure("constrained choice batch has no scores object");
+        }
+        const values = batchScores as Record<string, unknown>;
+        for (let index = 0; index < batchLabels.length; index += 1) {
+          const key = scoreKeys[index];
+          const value = values[key];
+          if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) {
+            return parseFailure(`constrained candidate score ${key} is outside the integer range 0-100`);
+          }
+          scores[batchLabels[index]] = value;
+        }
+        return requestBatch(offset + batchLabels.length);
+      },
+      constrainedChoiceScoreFormat(scoreKeys),
+    );
+  };
+
+  return requestBatch(0);
+}
+
+function constrainedChoiceFallback(
+  request: DecisionRequest,
+  options: Record<string, string>,
+  model: string,
+): DecisionAnswer {
+  return Object.keys(options).length > CONSTRAINED_CHOICE_BATCH_SIZE
+    ? constrainedChoiceBatches(request, options, model)
+    : constrainedChoice(request, options, model);
+}
+
 function choiceProbabilitiesFromLogs(labels: string[], entries: TokenLogprob[]): Record<string, number> {
   const groups = new Map<string, number[]>(labels.map((label) => [label, []]));
   for (const entry of entries) {
@@ -441,8 +563,14 @@ function choose(request: DecisionRequest, options: Record<string, string>): Deci
   if (!labels.length || labels.some((label) => !label.trim())) {
     return parseFailure("choice options must include non-empty labels");
   }
+  if (labels.length > MAX_CONSTRAINED_CHOICE_LABELS) {
+    return parseFailure(`choice supports at most ${MAX_CONSTRAINED_CHOICE_LABELS} labels`);
+  }
   return withSelectedModel((model) => {
-    if (hasSharedFirstTokenPrefix(labels)) return constrainedChoice(request, options, model);
+    if (!useTokenLogprobs(model) || labels.length > MAX_TOP_LOGPROBS) {
+      return constrainedChoiceFallback(request, options, model);
+    }
+    if (hasSharedFirstTokenPrefix(labels)) return constrainedChoiceFallback(request, options, model);
 
     const count = Math.min(MAX_TOP_LOGPROBS, Math.max(5, labels.length * 3));
     return requestCompletion(
@@ -454,14 +582,14 @@ function choose(request: DecisionRequest, options: Record<string, string>): Deci
       count,
       (completion) => {
         const entries = firstContentLogprobs(completion);
-        if (!entries) return constrainedChoice(request, options, model);
+        if (!entries) return constrainedChoiceFallback(request, options, model);
 
         let probabilities: Record<string, number>;
         try {
           probabilities = choiceProbabilitiesFromLogs(labels, entries);
         } catch (error) {
           if (String(error && (error as Error).message || error).includes("shared candidate token prefixes")) {
-            return constrainedChoice(request, options, model);
+            return constrainedChoiceFallback(request, options, model);
           }
           throw error;
         }
@@ -536,6 +664,7 @@ function score(request: DecisionRequest): DecisionAnswer {
   const options = optionRecord(request);
   const labels = Object.keys(options);
   return withSelectedModel((model) => {
+    if (!useTokenLogprobs(model) || labels.length > MAX_TOP_LOGPROBS) return constrainedScore(request, model);
     if (hasSharedFirstTokenPrefix(labels)) return constrainedScore(request, model);
 
     const count = Math.min(MAX_TOP_LOGPROBS, Math.max(5, labels.length * 3));

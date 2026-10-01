@@ -1822,6 +1822,19 @@ test("decision_noul_empty_null_logprobs_retries_instead_of_guessing", () => {
   assert(fetchCalls.length === 2, "empty content with null logprobs makes a constrained request");
 });
 
+test("decision_noul_mlx_defaults_to_one_constrained_json_request", () => {
+  reset({ decision: { model: "owner/jev-style-qwen3.5-2b-decision-mlx-bf16" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-noul-confidence.fixture.json")) });
+
+  const answer = decide(decisionRequest({ type: "noul", criteria: null }));
+
+  assert(answer.type === "noul", "MLX noul result type");
+  closeTo(answer.p, 0.8, "MLX constrained confidence maps to yes probability");
+  assert(fetchCalls.length === 1, "known null-logprobs model avoids a speculative completion");
+  const body = JSON.parse(fetchCalls[0].body);
+  assert(body.logprobs === undefined && body.response_format.json_schema.schema.properties.answer.enum.join(",") === "yes,no", "first MLX request is constrained JSON");
+});
+
 test("decision_noul_present_logprobs_without_yes_no_tokens_is_parse_error", () => {
   reset({ decision: { model: "fixture-model" } });
   const response = decisionFixture("noul-variants.fixture.json");
@@ -1880,6 +1893,66 @@ test("decision_choice_null_logprobs_uses_confidence_and_spreads_remainder", () =
   assert(schema.properties.confidence.minimum === 0 && schema.properties.confidence.maximum === 100, "JSON schema constrains confidence");
 });
 
+test("decision_choice_mlx_defaults_to_one_constrained_json_request", () => {
+  reset({ decision: { model: "owner/jev-style-qwen3.5-2b-decision-mlx-bf16" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-choice.fixture.json")) });
+
+  const answer = decide(decisionRequest({
+    type: "choice",
+    options: { allow: "Allow the action", alternate: "Choose an alternative", deny: "Deny the action" },
+  }));
+
+  assert(answer.type === "choice" && answer.choice === "alternate", "MLX constrained label is returned");
+  assert(fetchCalls.length === 1, "known null-logprobs model uses one constrained request");
+  assert(JSON.parse(fetchCalls[0].body).logprobs === undefined, "MLX constrained request does not request token logprobs");
+});
+
+test("decision_choice_batches_36_candidates_in_three_constrained_requests", () => {
+  reset({ decision: { model: "owner/jev-style-qwen3.5-2b-decision-mlx-bf16" } });
+  const options = Object.fromEntries(Array.from({ length: 36 }, (_, index) => [
+    `candidate-${String(index).padStart(2, "0")}`,
+    `Candidate ${index}`,
+  ]));
+  let batchIndex = 0;
+  asyncFetchHandler = (opts) => {
+    const body = JSON.parse(opts.body);
+    const schema = body.response_format.json_schema.schema;
+    const keys = Object.keys(schema.properties.scores.properties);
+    assert(keys.length > 0 && keys.length <= 12, "each constrained request scores at most twelve candidates");
+    const scores = {};
+    keys.forEach((key, index) => { scores[key] = batchIndex * 12 + index + 1; });
+    batchIndex += 1;
+    return {
+      status: 200,
+      body: JSON.stringify({
+        choices: [{ message: { role: "assistant", content: JSON.stringify({ scores }) } }],
+      }),
+    };
+  };
+
+  const answer = decide(decisionRequest({ type: "choice", options }));
+
+  assert(answer.type === "choice" && answer.choice === "candidate-35", "highest batch score selects the final candidate");
+  closeTo(answer.probabilities["candidate-35"], 36 / 666, "batch scores normalize over the complete candidate set");
+  assert(fetchCalls.length === 3, "36 candidates require three serialized model calls");
+  assert(fetchCalls.every((call) => JSON.parse(call.body).logprobs === undefined), "known null-logprobs model uses constrained requests only");
+});
+
+test("decision_choice_batch_rejects_more_than_36_labels_without_a_guess", () => {
+  reset({ decision: { model: "owner/jev-style-qwen3.5-2b-decision-mlx-bf16" } });
+  const options = Object.fromEntries(Array.from({ length: 37 }, (_, index) => [`candidate-${index}`, `Candidate ${index}`]));
+
+  let error = "";
+  try {
+    decide(decisionRequest({ type: "choice", options }));
+  } catch (caught) {
+    error = String(caught && caught.message || caught);
+  }
+
+  assert(/parse error: choice supports at most 36 labels/.test(error), "oversized batch fails explicitly, got " + error);
+  assert(fetchCalls.length === 0, "oversized batch sends no partial or guessed requests");
+});
+
 test("decision_choice_shared_prefix_falls_back_constrained", () => {
   reset({ decision: { model: "fixture-model" } });
   asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-choice.fixture.json")) });
@@ -1934,7 +2007,19 @@ test("decision_score_null_logprobs_uses_constrained_point_and_interpolated_index
   assert(schema.properties.score.minimum === 0 && schema.properties.score.maximum === 2, "schema constrains the declared level range");
 });
 
-test("decision_models_lists_the_server_catalog_without_hardcoded_ids", () => {
+test("decision_score_mlx_defaults_to_one_constrained_json_request", () => {
+  reset({ decision: { model: "owner/jev-style-qwen3.5-2b-decision-mlx-bf16" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-score.fixture.json")) });
+
+  const answer = decide(decisionRequest({ type: "score", levels: ["low", "medium", "high"] }));
+
+  assert(answer.type === "score", "MLX score result type");
+  closeTo(answer.score, 1.25, "MLX constrained score point");
+  assert(fetchCalls.length === 1, "known null-logprobs model uses one constrained request");
+  assert(JSON.parse(fetchCalls[0].body).logprobs === undefined, "MLX score request does not claim token logprobs");
+});
+
+test("decision_models_returns_nonempty_server_catalog_through_async_marker_without_hardcoded_ids", () => {
   reset({ baseUrl: "http://localhost:1234/v1" });
   const catalog = decisionFixture("models.fixture.json");
   asyncFetchHandler = (opts) => {
@@ -1942,12 +2027,15 @@ test("decision_models_lists_the_server_catalog_without_hardcoded_ids", () => {
     return { status: 200, body: JSON.stringify(catalog) };
   };
 
-  const models = decisionModels();
+  const pending = plugin.models();
+  assert(pending && pending.__ctAwait__, "models export yields the host.fetch.async marker");
+  const models = settleFetchExport(pending, "models export");
 
   assertJsonEqual(models, [
     { id: "owner/model-a", display_name: "Model A" },
     { id: "owner/model-b", display_name: "owner/model-b" },
   ], "server model ids and display names returned as listed");
+  assert(fetchCalls.length === 1 && asyncFetchJobs[0].resumed, "non-empty catalogue is parsed after the marker resumes");
 });
 
 test("decision_models_marks_models_after_approximate_fallback", () => {
