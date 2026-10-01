@@ -1,0 +1,24 @@
+{
+  "id": "chatcmpl-fixture-choice",
+  "object": "chat.completion",
+  "model": "fixture-model",
+  "choices": [
+    {
+      "index": 0,
+      "logprobs": {
+        "content": [
+          {
+            "token": " drop",
+            "logprob": -0.2876820724517809,
+            "top_logprobs": [
+              { "token": " keep", "logprob": -1.3862943611198906 },
+              { "token": "drop", "logprob": -0.2876820724517809 }
+            ]
+          }
+        ]
+      },
+      "finish_reason": "length",
+      "message": { "role": "assistant", "content": " drop" }
+    }
+  ]
+}
