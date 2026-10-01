@@ -1,0 +1,13 @@
+{
+  "id": "chatcmpl-fixture-constrained",
+  "object": "chat.completion",
+  "model": "fixture-model",
+  "choices": [
+    {
+      "index": 0,
+      "logprobs": null,
+      "finish_reason": "stop",
+      "message": { "role": "assistant", "content": "{\"choice\":\"alternate\"}" }
+    }
+  ]
+}

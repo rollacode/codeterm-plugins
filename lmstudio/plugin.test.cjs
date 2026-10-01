@@ -28,6 +28,7 @@ let pendingExecPolls = null;
 let forceParse = null;
 let settingsObj = {};
 let fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
+let asyncFetchHandler = () => ({ status: 500, error: "no async fetch handler set" });
 const lastModelPath = "/tmp/codeterm-home/.codeterm/plugins/lmstudio/last-model.json";
 
 function parseLooseJson(raw) {
@@ -100,15 +101,21 @@ function mockToolcallParse(rawText, schemaJson) {
   return JSON.stringify({ status: "ok", ...candidates[0] });
 }
 
+function mockHostFetch(optsJson) {
+  const opts = JSON.parse(optsJson);
+  fetchCalls.push(opts);
+  return fetchHandler(opts);
+}
+mockHostFetch.async = (opts, then) => {
+  fetchCalls.push(opts);
+  return then(asyncFetchHandler(opts));
+};
+
 globalThis.host = {
   homeDir: () => "/tmp/codeterm-home",
   makeDirs: () => true,
   settingsJson: () => JSON.stringify(settingsObj),
-  fetch: (optsJson) => {
-    const opts = JSON.parse(optsJson);
-    fetchCalls.push(opts);
-    return fetchHandler(opts);
-  },
+  fetch: mockHostFetch,
   fetchStream: (optsJson) => {
     const opts = JSON.parse(optsJson);
     streamCalls.push(opts);
@@ -232,6 +239,7 @@ function reset(settings) {
   settingsObj = settings || {};
   for (const key of Object.keys(fileStore)) delete fileStore[key];
   fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
+  asyncFetchHandler = () => ({ status: 500, error: "no async fetch handler set" });
 }
 
 // Queue the poll responses the in-flight authoring ticket hands back, in order.
@@ -299,6 +307,18 @@ function assertMachineMessages(messages, charter, state, tickInput, name) {
 
 function renderEngineMessages(messages) {
   return messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
+}
+
+function decisionFixture(name) {
+  return JSON.parse(readFileSync(join(__dirname, "fixtures", "decision", name), "utf8"));
+}
+
+function decisionRequest(question, instructions = "Evaluate the supplied state.") {
+  return { state: { candidate: "fixture" }, instructions, question };
+}
+
+function closeTo(actual, expected, message) {
+  assert(Math.abs(actual - expected) < 1e-10, `${message}: expected ${expected}, got ${actual}`);
 }
 
 function openAndStartBody(ctx) {
@@ -1691,6 +1711,104 @@ test("requestPromptAuthoring on an unknown session or one without a model is a s
   const res = plugin.requestPromptAuthoring("no-such-session", "x");
   assert(res && res.ok === false, "unknown session reports not-ok, got " + JSON.stringify(res));
   assert(agentSpawns.length === 0 && workspaceCalls.length === 0, "no agent spawned for unknown session");
+});
+
+test("decision_noul_ratio_from_logprobs merges case and leading-space variants", () => {
+  reset({ baseUrl: "http://localhost:1234", decision: { model: "fixture-model", maxTokens: 1, timeoutMs: 2400 } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("noul-variants.fixture.json")) });
+
+  const answer = plugin.decide(decisionRequest({
+    type: "noul",
+    criteria: { true: "the candidate matches", false: "the candidate does not match" },
+  }));
+
+  assert(answer.type === "noul", "noul result type");
+  closeTo(answer.p, 0.8, "yes mass divided by yes and no mass");
+  const body = JSON.parse(fetchCalls[0].body);
+  assert(fetchCalls[0].timeoutMs === 2400, "configured request timeout passed to async fetch");
+  assert(body.max_tokens === 1 && body.logprobs === true && body.top_logprobs === 5, "one-token logprob request shape");
+});
+
+test("decision_noul_missing_tokens_is_parse_error", () => {
+  reset({ decision: { model: "fixture-model", maxTokens: 1 } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("missing-tokens.fixture.json")) });
+
+  let error = "";
+  try {
+    plugin.decide(decisionRequest({ type: "noul", criteria: null }));
+  } catch (caught) {
+    error = String(caught && caught.message || caught);
+  }
+  assert(/parse error: candidate tokens are absent/.test(error), "missing yes/no tokens produce parse error, got " + error);
+});
+
+test("decision_choice_normalizes_label_logprobs", () => {
+  reset({ decision: { model: "fixture-model", maxTokens: 1 } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("choice-logprobs.fixture.json")) });
+
+  const answer = plugin.decide(decisionRequest({
+    type: "choice",
+    options: { keep: "Retain the candidate", drop: "Discard the candidate" },
+  }));
+
+  assert(answer.type === "choice" && answer.choice === "drop", "highest normalized label selected");
+  closeTo(answer.probabilities.keep, 0.25, "keep probability");
+  closeTo(answer.probabilities.drop, 0.75, "drop probability");
+  closeTo(answer.confidence, 0.75, "choice confidence");
+});
+
+test("decision_choice_shared_prefix_falls_back_constrained", () => {
+  reset({ decision: { model: "fixture-model", maxTokens: 1 } });
+  const responses = [
+    decisionFixture("shared-prefix.fixture.json"),
+    decisionFixture("constrained-choice.fixture.json"),
+  ];
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
+
+  const answer = plugin.decide(decisionRequest({
+    type: "choice",
+    options: { allow: "Allow the action", alternate: "Choose an alternative", deny: "Deny the action" },
+  }));
+
+  assert(answer.type === "choice" && answer.choice === "alternate", "constrained label is returned");
+  assertJsonEqual(answer.probabilities, { alternate: 1 }, "constrained choice is one-hot");
+  assert(answer.confidence === null, "constrained fallback has unknown confidence");
+  assert(fetchCalls.length === 2, "prefix collision makes a second constrained request");
+  const body = JSON.parse(fetchCalls[1].body);
+  const format = body.response_format.json_schema;
+  assert(body.logprobs === undefined, "constrained response does not claim token logprobs");
+  assert(format.schema.properties.choice.enum.join(",") === "allow,alternate,deny", "JSON schema constrains the supplied labels");
+  assert(body.max_tokens > 1, "schema response has enough output budget for JSON");
+});
+
+test("decision_score_index_keyed_map", () => {
+  reset({ decision: { model: "fixture-model", maxTokens: 1 } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("score-logprobs.fixture.json")) });
+
+  const answer = plugin.decide(decisionRequest({ type: "score", levels: ["low", "medium", "high"] }));
+
+  assert(answer.type === "score", "score result type");
+  assertJsonEqual(Object.keys(answer.probabilities), ["0", "1", "2"], "probabilities use level indexes");
+  closeTo(answer.probabilities["0"], 0.2, "low level probability");
+  closeTo(answer.probabilities["1"], 0.3, "medium level probability");
+  closeTo(answer.probabilities["2"], 0.5, "high level probability");
+  closeTo(answer.score, 1.3, "score is the probability-weighted level index");
+});
+
+test("decision_models_lists_the_server_catalog_without_hardcoded_ids", () => {
+  reset({ baseUrl: "http://localhost:1234/v1" });
+  const catalog = decisionFixture("models.fixture.json");
+  asyncFetchHandler = (opts) => {
+    assert(opts.url === "http://localhost:1234/v1/models", "OpenAI-compatible model endpoint");
+    return { status: 200, body: JSON.stringify(catalog) };
+  };
+
+  const models = plugin.models();
+
+  assertJsonEqual(models, [
+    { id: "owner/model-a", display_name: "Model A" },
+    { id: "owner/model-b", display_name: "owner/model-b" },
+  ], "server model ids and display names returned as listed");
 });
 
 let failed = 0;

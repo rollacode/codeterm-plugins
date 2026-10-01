@@ -5,6 +5,13 @@
 
 baseUrl: http://localhost:1234
 
+# OpenAI-compatible decision endpoint settings.
+decision:
+  # Blank inherits `model` when set, otherwise the first loaded model.
+  model: ""
+  maxTokens: 1
+  timeoutMs: 30000
+
 # Optional global model fallback. Leave blank to let LM Studio route to the
 # loaded model, or set a model id returned by listModels.
 model: ""

@@ -1,0 +1,26 @@
+{
+  "id": "chatcmpl-fixture-noul",
+  "object": "chat.completion",
+  "model": "fixture-model",
+  "choices": [
+    {
+      "index": 0,
+      "logprobs": {
+        "content": [
+          {
+            "token": "Yes",
+            "logprob": -0.5108256237659907,
+            "top_logprobs": [
+              { "token": "Yes", "logprob": -0.5108256237659907 },
+              { "token": " yes", "logprob": -1.6094379124341003 },
+              { "token": " NO", "logprob": -1.8971199848858813 },
+              { "token": "no", "logprob": -2.995732273553991 }
+            ]
+          }
+        ]
+      },
+      "finish_reason": "length",
+      "message": { "role": "assistant", "content": "Yes" }
+    }
+  ]
+}
