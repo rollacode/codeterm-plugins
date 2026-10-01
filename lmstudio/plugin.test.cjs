@@ -6,6 +6,8 @@ const { join } = require("node:path");
 const vm = require("node:vm");
 
 const fetchCalls = [];
+const asyncFetchJobs = [];
+let nextAsyncFetchJob = 0;
 const streamCalls = [];
 const streamJobs = [];
 const execCalls = [];
@@ -108,7 +110,12 @@ function mockHostFetch(optsJson) {
 }
 mockHostFetch.async = (opts, then) => {
   fetchCalls.push(opts);
-  return then(asyncFetchHandler(opts));
+  const jobId = `fetch-${nextAsyncFetchJob++}`;
+  const continuationId = String(nextAsyncFetchJob);
+  asyncFetchJobs.push({ jobId, continuationId, opts, then, resumed: false });
+  // Match host.awaitJob: the export yields now; the host invokes `then` only
+  // after the job finishes and serializes whatever that continuation returns.
+  return { __ctAwait__: { job: jobId, k: continuationId } };
 };
 
 globalThis.host = {
@@ -222,6 +229,8 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
 
 function reset(settings) {
   fetchCalls.length = 0;
+  asyncFetchJobs.length = 0;
+  nextAsyncFetchJob = 0;
   streamCalls.length = 0;
   streamJobs.length = 0;
   execCalls.length = 0;
@@ -276,6 +285,37 @@ function assertJsonEqual(actual, expected, msg) {
   const a = JSON.stringify(actual);
   const e = JSON.stringify(expected);
   assert(a === e, `${msg}\nactual: ${a}\nexpected: ${e}`);
+}
+
+function settleFetchExport(value, method) {
+  assert(
+    value && typeof value === "object" && value.__ctAwait__ &&
+      Object.keys(value).length === 1 &&
+      typeof value.__ctAwait__.job === "string" && typeof value.__ctAwait__.k === "string",
+    method + " returns the host.fetch.async await marker before a result exists",
+  );
+  let result = value;
+  let resumed = 0;
+  while (result && typeof result === "object" && result.__ctAwait__) {
+    assert(resumed++ < 20, method + " exceeded async continuation limit");
+    const marker = result.__ctAwait__;
+    const job = asyncFetchJobs.find((entry) =>
+      entry.jobId === marker.job && entry.continuationId === marker.k,
+    );
+    assert(job && !job.resumed, method + " returned an unknown or already-resumed fetch marker");
+    job.resumed = true;
+    result = job.then(asyncFetchHandler(job.opts));
+  }
+  assert(asyncFetchJobs.every((job) => job.resumed), method + " left a fetch continuation unawaited");
+  return result;
+}
+
+function decide(request) {
+  return settleFetchExport(plugin.decide(request), "decision export");
+}
+
+function decisionModels() {
+  return settleFetchExport(plugin.models(), "models export");
 }
 
 // The engine owns the verdict-contract wording; this plugin owns only the fact
@@ -1713,11 +1753,29 @@ test("requestPromptAuthoring on an unknown session or one without a model is a s
   assert(agentSpawns.length === 0 && workspaceCalls.length === 0, "no agent spawned for unknown session");
 });
 
+test("decision_noul_chains_model_discovery_from_the_async_continuation", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "", decision: { model: "" } });
+  asyncFetchHandler = (opts) => {
+    if (opts.url.endsWith("/models")) {
+      return { status: 200, body: JSON.stringify(decisionFixture("models.fixture.json")) };
+    }
+    return { status: 200, body: JSON.stringify(decisionFixture("noul-variants.fixture.json")) };
+  };
+
+  const answer = decide(decisionRequest({ type: "noul", criteria: null }));
+
+  assert(answer.type === "noul", "noul result type after discovery");
+  closeTo(answer.p, 0.8, "model discovery chains to the logprob request");
+  assert(fetchCalls.length === 2, "model list and completion requests both settle");
+  assert(fetchCalls[0].method === "GET" && fetchCalls[0].url.endsWith("/models"), "first continuation loads model ids");
+  assert(JSON.parse(fetchCalls[1].body).model === "owner/model-a", "completion uses the first server model");
+});
+
 test("decision_noul_ratio_from_logprobs merges variants after leading whitespace tokens", () => {
   reset({ baseUrl: "http://localhost:1234", decision: { model: "fixture-model", maxTokens: 1, timeoutMs: 2400 } });
   asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("noul-variants.fixture.json")) });
 
-  const answer = plugin.decide(decisionRequest({
+  const answer = decide(decisionRequest({
     type: "noul",
     criteria: { true: "the candidate matches", false: "the candidate does not match" },
   }));
@@ -1737,7 +1795,7 @@ test("decision_noul_null_logprobs_uses_confidence_schema_fallback", () => {
   ];
   asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
 
-  const answer = plugin.decide(decisionRequest({ type: "noul", criteria: null }));
+  const answer = decide(decisionRequest({ type: "noul", criteria: null }));
 
   assert(answer.type === "noul", "noul fallback result type");
   closeTo(answer.p, 0.8, "yes confidence maps to yes probability");
@@ -1757,7 +1815,7 @@ test("decision_noul_empty_null_logprobs_retries_instead_of_guessing", () => {
   const responses = [decisionFixture("mlx-null-logprobs-empty.fixture.json"), noAnswer];
   asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
 
-  const answer = plugin.decide(decisionRequest({ type: "noul", criteria: null }));
+  const answer = decide(decisionRequest({ type: "noul", criteria: null }));
 
   assert(answer.type === "noul", "noul fallback result type");
   closeTo(answer.p, 0.2, "no confidence maps to the complementary yes probability");
@@ -1774,7 +1832,7 @@ test("decision_noul_present_logprobs_without_yes_no_tokens_is_parse_error", () =
 
   let error = "";
   try {
-    plugin.decide(decisionRequest({ type: "noul", criteria: null }));
+    decide(decisionRequest({ type: "noul", criteria: null }));
   } catch (caught) {
     error = String(caught && caught.message || caught);
   }
@@ -1786,7 +1844,7 @@ test("decision_choice_normalizes_label_logprobs", () => {
   reset({ decision: { model: "fixture-model" } });
   asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("choice-logprobs.fixture.json")) });
 
-  const answer = plugin.decide(decisionRequest({
+  const answer = decide(decisionRequest({
     type: "choice",
     options: { keep: "Retain the candidate", drop: "Discard the candidate" },
   }));
@@ -1809,7 +1867,7 @@ test("decision_choice_null_logprobs_uses_confidence_and_spreads_remainder", () =
   const responses = [decisionFixture("mlx-null-logprobs-empty.fixture.json"), constrainedChoice];
   asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
 
-  const answer = plugin.decide(decisionRequest({
+  const answer = decide(decisionRequest({
     type: "choice",
     options: { keep: "Retain the candidate", drop: "Discard the candidate" },
   }));
@@ -1826,7 +1884,7 @@ test("decision_choice_shared_prefix_falls_back_constrained", () => {
   reset({ decision: { model: "fixture-model" } });
   asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-choice.fixture.json")) });
 
-  const answer = plugin.decide(decisionRequest({
+  const answer = decide(decisionRequest({
     type: "choice",
     options: { allow: "Allow the action", alternate: "Choose an alternative", deny: "Deny the action" },
   }));
@@ -1848,7 +1906,7 @@ test("decision_score_index_keyed_map", () => {
   reset({ decision: { model: "fixture-model" } });
   asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("score-logprobs.fixture.json")) });
 
-  const answer = plugin.decide(decisionRequest({ type: "score", levels: ["low", "medium", "high"] }));
+  const answer = decide(decisionRequest({ type: "score", levels: ["low", "medium", "high"] }));
 
   assert(answer.type === "score", "score result type");
   assertJsonEqual(Object.keys(answer.probabilities), ["0", "1", "2"], "probabilities use level indexes");
@@ -1866,7 +1924,7 @@ test("decision_score_null_logprobs_uses_constrained_point_and_interpolated_index
   ];
   asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
 
-  const answer = plugin.decide(decisionRequest({ type: "score", levels: ["low", "medium", "high"] }));
+  const answer = decide(decisionRequest({ type: "score", levels: ["low", "medium", "high"] }));
 
   assert(answer.type === "score", "score fallback result type");
   closeTo(answer.score, 1.25, "constrained score point");
@@ -1884,7 +1942,7 @@ test("decision_models_lists_the_server_catalog_without_hardcoded_ids", () => {
     return { status: 200, body: JSON.stringify(catalog) };
   };
 
-  const models = plugin.models();
+  const models = decisionModels();
 
   assertJsonEqual(models, [
     { id: "owner/model-a", display_name: "Model A" },
@@ -1905,8 +1963,8 @@ test("decision_models_marks_models_after_approximate_fallback", () => {
     return { status: 200, body: JSON.stringify({ data: [{ id: "catalog-model", name: "Catalog Model" }] }) };
   };
 
-  plugin.decide(decisionRequest({ type: "noul", criteria: null }));
-  const models = plugin.models();
+  decide(decisionRequest({ type: "noul", criteria: null }));
+  const models = decisionModels();
 
   assert(models.length === 1 && models[0].id === "catalog-model", "loaded model id remains selectable");
   assert(models[0].display_name === "Catalog Model (approximate fallback)", "model info marks constrained fallback as approximate");
