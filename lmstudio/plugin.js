@@ -140,12 +140,12 @@ function normalizeToken(token) {
 function firstTextWord(label) {
   return normalizeToken(label).split(/\s+/, 1)[0] || "";
 }
-function hasSharedLeadingWord(labels) {
+function hasSharedFirstTokenPrefix(labels) {
   const seen = /* @__PURE__ */ new Set();
   for (const label of labels) {
-    const word = firstTextWord(label);
-    if (word && seen.has(word)) return true;
-    if (word) seen.add(word);
+    const firstCharacter = Array.from(firstTextWord(label))[0];
+    if (firstCharacter && seen.has(firstCharacter)) return true;
+    if (firstCharacter) seen.add(firstCharacter);
   }
   return false;
 }
@@ -401,7 +401,7 @@ function choose(request, options) {
     return parseFailure("choice options must include non-empty labels");
   }
   const model = selectedModel();
-  if (hasSharedLeadingWord(labels)) return constrainedChoice(request, options, model);
+  if (hasSharedFirstTokenPrefix(labels)) return constrainedChoice(request, options, model);
   const count = Math.min(MAX_TOP_LOGPROBS, Math.max(5, labels.length * 3));
   const completion = requestCompletion(
     model,
@@ -486,7 +486,7 @@ function score(request) {
   const options = optionRecord(request);
   const labels = Object.keys(options);
   const model = selectedModel();
-  if (hasSharedLeadingWord(labels)) return constrainedScore(request, model);
+  if (hasSharedFirstTokenPrefix(labels)) return constrainedScore(request, model);
   const count = Math.min(MAX_TOP_LOGPROBS, Math.max(5, labels.length * 3));
   const completion = requestCompletion(
     model,
