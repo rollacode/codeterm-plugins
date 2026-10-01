@@ -130,12 +130,14 @@ function firstTextWord(label: string): string {
   return normalizeToken(label).split(/\s+/, 1)[0] || "";
 }
 
-function hasSharedLeadingWord(labels: string[]): boolean {
+function hasSharedFirstTokenPrefix(labels: string[]): boolean {
   const seen = new Set<string>();
   for (const label of labels) {
-    const word = firstTextWord(label);
-    if (word && seen.has(word)) return true;
-    if (word) seen.add(word);
+    const firstCharacter = Array.from(firstTextWord(label))[0];
+    // We do not know the model tokenizer before the request. A shared initial
+    // character is therefore treated conservatively as a possible shared token.
+    if (firstCharacter && seen.has(firstCharacter)) return true;
+    if (firstCharacter) seen.add(firstCharacter);
   }
   return false;
 }
@@ -418,7 +420,7 @@ function choose(request: DecisionRequest, options: Record<string, string>): Deci
     return parseFailure("choice options must include non-empty labels");
   }
   const model = selectedModel();
-  if (hasSharedLeadingWord(labels)) return constrainedChoice(request, options, model);
+  if (hasSharedFirstTokenPrefix(labels)) return constrainedChoice(request, options, model);
 
   const count = Math.min(MAX_TOP_LOGPROBS, Math.max(5, labels.length * 3));
   const completion = requestCompletion(
@@ -507,7 +509,7 @@ function score(request: DecisionRequest): DecisionAnswer {
   const options = optionRecord(request);
   const labels = Object.keys(options);
   const model = selectedModel();
-  if (hasSharedLeadingWord(labels)) return constrainedScore(request, model);
+  if (hasSharedFirstTokenPrefix(labels)) return constrainedScore(request, model);
 
   const count = Math.min(MAX_TOP_LOGPROBS, Math.max(5, labels.length * 3));
   const completion = requestCompletion(
