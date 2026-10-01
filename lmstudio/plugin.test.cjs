@@ -1713,7 +1713,7 @@ test("requestPromptAuthoring on an unknown session or one without a model is a s
   assert(agentSpawns.length === 0 && workspaceCalls.length === 0, "no agent spawned for unknown session");
 });
 
-test("decision_noul_ratio_from_logprobs merges case and leading-space variants", () => {
+test("decision_noul_ratio_from_logprobs merges variants after leading whitespace tokens", () => {
   reset({ baseUrl: "http://localhost:1234", decision: { model: "fixture-model", maxTokens: 1, timeoutMs: 2400 } });
   asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("noul-variants.fixture.json")) });
 
@@ -1726,12 +1726,51 @@ test("decision_noul_ratio_from_logprobs merges case and leading-space variants",
   closeTo(answer.p, 0.8, "yes mass divided by yes and no mass");
   const body = JSON.parse(fetchCalls[0].body);
   assert(fetchCalls[0].timeoutMs === 2400, "configured request timeout passed to async fetch");
-  assert(body.max_tokens === 1 && body.logprobs === true && body.top_logprobs === 5, "one-token logprob request shape");
+  assert(body.max_tokens === 8 && body.logprobs === true && body.top_logprobs === 5, "bounded request leaves room for leading whitespace");
 });
 
-test("decision_noul_missing_tokens_is_parse_error", () => {
-  reset({ decision: { model: "fixture-model", maxTokens: 1 } });
-  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("missing-tokens.fixture.json")) });
+test("decision_noul_null_logprobs_uses_confidence_schema_fallback", () => {
+  reset({ decision: { model: "fixture-model" } });
+  const responses = [
+    decisionFixture("mlx-null-logprobs-whitespace.fixture.json"),
+    decisionFixture("constrained-noul-confidence.fixture.json"),
+  ];
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
+
+  const answer = plugin.decide(decisionRequest({ type: "noul", criteria: null }));
+
+  assert(answer.type === "noul", "noul fallback result type");
+  closeTo(answer.p, 0.8, "yes confidence maps to yes probability");
+  assert(fetchCalls.length === 2, "null logprobs triggers one constrained retry");
+  const body = JSON.parse(fetchCalls[1].body);
+  assert(body.logprobs === undefined, "constrained retry does not claim token logprobs");
+  const schema = body.response_format.json_schema.schema;
+  assert(schema.properties.answer.enum.join(",") === "yes,no", "fallback constrains yes/no answer");
+  assert(schema.properties.confidence.minimum === 0 && schema.properties.confidence.maximum === 100, "fallback constrains integer confidence");
+  assert(JSON.parse(fetchCalls[0].body).max_tokens === 64, "default token budget reaches past leading whitespace");
+});
+
+test("decision_noul_empty_null_logprobs_retries_instead_of_guessing", () => {
+  reset({ decision: { model: "fixture-model" } });
+  const noAnswer = decisionFixture("constrained-noul-confidence.fixture.json");
+  noAnswer.choices[0].message.content = JSON.stringify({ answer: "no", confidence: 80 });
+  const responses = [decisionFixture("mlx-null-logprobs-empty.fixture.json"), noAnswer];
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
+
+  const answer = plugin.decide(decisionRequest({ type: "noul", criteria: null }));
+
+  assert(answer.type === "noul", "noul fallback result type");
+  closeTo(answer.p, 0.2, "no confidence maps to the complementary yes probability");
+  assert(fetchCalls.length === 2, "empty content with null logprobs makes a constrained request");
+});
+
+test("decision_noul_present_logprobs_without_yes_no_tokens_is_parse_error", () => {
+  reset({ decision: { model: "fixture-model" } });
+  const response = decisionFixture("noul-variants.fixture.json");
+  response.choices[0].logprobs.content[1].top_logprobs = [
+    { token: "maybe", logprob: -0.10536051565782628 },
+  ];
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(response) });
 
   let error = "";
   try {
@@ -1739,11 +1778,12 @@ test("decision_noul_missing_tokens_is_parse_error", () => {
   } catch (caught) {
     error = String(caught && caught.message || caught);
   }
-  assert(/parse error: candidate tokens are absent/.test(error), "missing yes/no tokens produce parse error, got " + error);
+  assert(/parse error: candidate tokens are absent/.test(error), "missing yes/no logprobs produce parse error, got " + error);
+  assert(fetchCalls.length === 1, "present but incomplete logprobs do not trigger a guessed fallback");
 });
 
 test("decision_choice_normalizes_label_logprobs", () => {
-  reset({ decision: { model: "fixture-model", maxTokens: 1 } });
+  reset({ decision: { model: "fixture-model" } });
   asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("choice-logprobs.fixture.json")) });
 
   const answer = plugin.decide(decisionRequest({
@@ -1757,13 +1797,34 @@ test("decision_choice_normalizes_label_logprobs", () => {
   closeTo(answer.confidence, 0.75, "choice confidence");
 });
 
-test("decision_choice_shared_prefix_falls_back_constrained", () => {
-  reset({ decision: { model: "fixture-model", maxTokens: 1 } });
-  const responses = [
-    decisionFixture("shared-prefix.fixture.json"),
-    decisionFixture("constrained-choice.fixture.json"),
-  ];
+test("decision_choice_null_logprobs_uses_confidence_and_spreads_remainder", () => {
+  reset({ decision: { model: "fixture-model" } });
+  const constrainedChoice = {
+    id: "chatcmpl-fixture-choice-confidence",
+    choices: [{
+      logprobs: null,
+      message: { role: "assistant", content: JSON.stringify({ choice: "drop", confidence: 75 }) },
+    }],
+  };
+  const responses = [decisionFixture("mlx-null-logprobs-empty.fixture.json"), constrainedChoice];
   asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
+
+  const answer = plugin.decide(decisionRequest({
+    type: "choice",
+    options: { keep: "Retain the candidate", drop: "Discard the candidate" },
+  }));
+
+  assert(answer.type === "choice" && answer.choice === "drop", "constrained label is returned");
+  assertJsonEqual(answer.probabilities, { keep: 0.25, drop: 0.75 }, "confidence maps to selected label and remainder");
+  closeTo(answer.confidence, 0.75, "fallback confidence");
+  const schema = JSON.parse(fetchCalls[1].body).response_format.json_schema.schema;
+  assert(schema.properties.choice.enum.join(",") === "keep,drop", "JSON schema constrains supplied labels");
+  assert(schema.properties.confidence.minimum === 0 && schema.properties.confidence.maximum === 100, "JSON schema constrains confidence");
+});
+
+test("decision_choice_shared_prefix_falls_back_constrained", () => {
+  reset({ decision: { model: "fixture-model" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-choice.fixture.json")) });
 
   const answer = plugin.decide(decisionRequest({
     type: "choice",
@@ -1771,18 +1832,18 @@ test("decision_choice_shared_prefix_falls_back_constrained", () => {
   }));
 
   assert(answer.type === "choice" && answer.choice === "alternate", "constrained label is returned");
-  assertJsonEqual(answer.probabilities, { alternate: 1 }, "constrained choice is one-hot");
-  assert(answer.confidence === null, "constrained fallback has unknown confidence");
-  assert(fetchCalls.length === 2, "prefix collision makes a second constrained request");
-  const body = JSON.parse(fetchCalls[1].body);
-  const format = body.response_format.json_schema;
+  assertJsonEqual(answer.probabilities, { allow: 0.1, alternate: 0.8, deny: 0.1 }, "confidence remainder is spread evenly");
+  closeTo(answer.confidence, 0.8, "constrained confidence");
+  assert(fetchCalls.length === 1, "shared first-token prefixes use the constrained request directly");
+  const body = JSON.parse(fetchCalls[0].body);
+  const schema = body.response_format.json_schema.schema;
   assert(body.logprobs === undefined, "constrained response does not claim token logprobs");
-  assert(format.schema.properties.choice.enum.join(",") === "allow,alternate,deny", "JSON schema constrains the supplied labels");
-  assert(body.max_tokens > 1, "schema response has enough output budget for JSON");
+  assert(schema.properties.choice.enum.join(",") === "allow,alternate,deny", "JSON schema constrains supplied labels");
+  assert(body.max_tokens >= 32, "schema response has enough output budget for JSON");
 });
 
 test("decision_score_index_keyed_map", () => {
-  reset({ decision: { model: "fixture-model", maxTokens: 1 } });
+  reset({ decision: { model: "fixture-model" } });
   asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("score-logprobs.fixture.json")) });
 
   const answer = plugin.decide(decisionRequest({ type: "score", levels: ["low", "medium", "high"] }));
@@ -1793,6 +1854,24 @@ test("decision_score_index_keyed_map", () => {
   closeTo(answer.probabilities["1"], 0.3, "medium level probability");
   closeTo(answer.probabilities["2"], 0.5, "high level probability");
   closeTo(answer.score, 1.3, "score is the probability-weighted level index");
+});
+
+test("decision_score_null_logprobs_uses_constrained_point_and_interpolated_index_map", () => {
+  reset({ decision: { model: "fixture-model" } });
+  const responses = [
+    decisionFixture("mlx-null-logprobs-empty.fixture.json"),
+    decisionFixture("constrained-score.fixture.json"),
+  ];
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
+
+  const answer = plugin.decide(decisionRequest({ type: "score", levels: ["low", "medium", "high"] }));
+
+  assert(answer.type === "score", "score fallback result type");
+  closeTo(answer.score, 1.25, "constrained score point");
+  assertJsonEqual(answer.probabilities, { "1": 0.75, "2": 0.25 }, "interpolation preserves the point estimate");
+  assert(answer.confidence === null, "point-score interpolation is not model confidence");
+  const schema = JSON.parse(fetchCalls[1].body).response_format.json_schema.schema;
+  assert(schema.properties.score.minimum === 0 && schema.properties.score.maximum === 2, "schema constrains the declared level range");
 });
 
 test("decision_models_lists_the_server_catalog_without_hardcoded_ids", () => {
@@ -1809,6 +1888,26 @@ test("decision_models_lists_the_server_catalog_without_hardcoded_ids", () => {
     { id: "owner/model-a", display_name: "Model A" },
     { id: "owner/model-b", display_name: "owner/model-b" },
   ], "server model ids and display names returned as listed");
+});
+
+test("decision_models_marks_models_after_approximate_fallback", () => {
+  reset({ decision: { model: "catalog-model" } });
+  const responses = [
+    decisionFixture("mlx-null-logprobs-empty.fixture.json"),
+    decisionFixture("constrained-noul-confidence.fixture.json"),
+  ];
+  asyncFetchHandler = (opts) => {
+    if (opts.url.endsWith("/chat/completions")) {
+      return { status: 200, body: JSON.stringify(responses.shift()) };
+    }
+    return { status: 200, body: JSON.stringify({ data: [{ id: "catalog-model", name: "Catalog Model" }] }) };
+  };
+
+  plugin.decide(decisionRequest({ type: "noul", criteria: null }));
+  const models = plugin.models();
+
+  assert(models.length === 1 && models[0].id === "catalog-model", "loaded model id remains selectable");
+  assert(models[0].display_name === "Catalog Model (approximate fallback)", "model info marks constrained fallback as approximate");
 });
 
 let failed = 0;

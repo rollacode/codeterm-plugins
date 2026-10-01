@@ -56,6 +56,7 @@ Config lives in [`config.yaml`](./config.yaml):
 
 - `baseUrl`: server base URL, default `http://localhost:1234`.
 - `model`: fallback model id; blank lets LM Studio use the loaded model.
+- `decision.model`: model id for decision requests; blank uses `model` or the first id from `GET /v1/models`. `decision.maxTokens` defaults to 64 (clamped to 8–128); `decision.timeoutMs` is capped at 30 seconds.
 - `defaultPreset`: preset id when the chosen model has no bound preset and the
   session does not request one explicitly.
 - `presets`: array of `{ id, name, systemPrompt?, model?, params? }`. A preset
@@ -102,6 +103,45 @@ still gates that subprocess path through this plugin's manifest grant. The
 manifest also lists `codeterm` in `subprocess.allow` for readability, but the
 current implementation invokes it through `sh`, so that direct `codeterm` grant
 is redundant.
+
+## Decision model
+
+The plugin also provides the `decisionModel` capability through LM Studio's
+OpenAI-compatible `POST /v1/chat/completions` endpoint. `models()` reads loaded
+ids from `GET /v1/models`; it does not bundle model ids. `decision.model` selects
+a model explicitly, otherwise the general `model` setting or first loaded id is
+used. The default `decision.maxTokens` is 64 so engines can emit leading
+whitespace before their first answer token. The configured value is clamped to
+8–128 tokens.
+
+When a response includes token `top_logprobs`, the adapter skips whitespace-only
+generated tokens and derives noul and choice probabilities from the first content
+token. Noul combines case and leading-space yes/no variants before normalizing.
+If token logprobs are absent (as observed with LM Studio's MLX engine), the
+adapter retries with a JSON-schema-constrained response. LM Studio documents the
+OpenAI-compatible chat-completions payload and JSON-schema output support in its
+[Chat Completions docs](https://lmstudio.ai/docs/developer/openai-compat/chat-completions)
+and [Structured Output docs](https://lmstudio.ai/docs/developer/openai-compat/structured-output).
+In the owner's local probe, `logprobs: true` with `top_logprobs: 5` returned
+`logprobs: null` for the loaded MLX models, while a JSON-schema enum was honored.
+That path is approximate:
+noul uses the model's 0–100 confidence for yes/no, while choice assigns that
+confidence to the selected label and spreads the remainder evenly across the
+other labels. After a model uses this path, its entry in `models()` is marked
+`(approximate fallback)`. A missing candidate in a present logprob list remains a
+parse error; the adapter does not invent a logprob.
+
+For score fallback, the model returns one constrained numeric point in the
+0–(number of levels − 1) range. The result's index-keyed probability map linearly
+interpolates between adjacent levels to preserve that point estimate; it is not
+a model confidence distribution, so `confidence` is null. This result is
+approximate as well.
+
+`decision.timeoutMs` is a per-request cap (default and maximum 30 seconds). The
+current SDK `DecisionRequest` does not expose the host's remaining deadline, so
+this cap cannot track that live deadline. The host also maps plugin exceptions to
+a generic decision transport error, so the plugin's detailed parse-error text
+may not reach callers.
 
 ## Develop
 

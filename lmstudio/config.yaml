@@ -9,7 +9,7 @@ baseUrl: http://localhost:1234
 decision:
   # Blank inherits `model` when set, otherwise the first loaded model.
   model: ""
-  maxTokens: 1
+  maxTokens: 64
   timeoutMs: 30000
 
 # Optional global model fallback. Leave blank to let LM Studio route to the

@@ -1,5 +1,5 @@
 {
-  "id": "chatcmpl-fixture-constrained",
+  "id": "chatcmpl-fixture-constrained-noul",
   "object": "chat.completion",
   "model": "fixture-model",
   "choices": [
@@ -9,7 +9,7 @@
       "finish_reason": "stop",
       "message": {
         "role": "assistant",
-        "content": "{\"choice\":\"alternate\",\"confidence\":80}"
+        "content": "{\"answer\":\"yes\",\"confidence\":80}"
       }
     }
   ]

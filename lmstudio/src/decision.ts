@@ -23,7 +23,7 @@ interface TokenLogprob {
 interface Completion {
   choices?: {
     logprobs?: {
-      content?: { top_logprobs?: TokenLogprob[] }[];
+      content?: { token?: string; top_logprobs?: TokenLogprob[] | null }[];
     } | null;
     message?: { content?: unknown };
   }[];
@@ -31,9 +31,11 @@ interface Completion {
 
 const DEFAULT_BASE_URL = "http://localhost:1234";
 const DEFAULT_TIMEOUT_MS = 30_000;
-const DEFAULT_MAX_TOKENS = 1;
+// Some engines emit leading whitespace/newline tokens before the first answer token.
+const DEFAULT_MAX_TOKENS = 64;
 const MAX_TOP_LOGPROBS = 20;
 let defaultLoadedModel = "";
+const approximateModels = new Set<string>();
 
 function settings(): DecisionSettings {
   try {
@@ -57,13 +59,13 @@ function apiUrl(path: string): string {
 function maxTokens(): number {
   const configured = settings().decision?.maxTokens;
   return typeof configured === "number" && Number.isInteger(configured) && configured > 0
-    ? Math.min(configured, 32)
+    ? Math.max(8, Math.min(configured, 128))
     : DEFAULT_MAX_TOKENS;
 }
 
 function timeoutMs(): number {
-  // The current DecisionRequest SDK shape omits the caller's remaining deadline.
-  // This bounds the network wait; it is not a substitute for that live budget.
+  // DecisionRequest currently omits the caller's remaining deadline. This is a
+  // configurable per-request cap, not the host's live remaining deadline.
   const configured = settings().decision?.timeoutMs;
   return typeof configured === "number" && Number.isFinite(configured) && configured > 0
     ? Math.min(Math.ceil(configured), DEFAULT_TIMEOUT_MS)
@@ -92,7 +94,11 @@ function modelList(): DecisionModelInfo[] {
       if (!row || typeof row !== "object") continue;
       const item = row as { id?: unknown; name?: unknown };
       if (typeof item.id !== "string" || !item.id) continue;
-      models.push({ id: item.id, display_name: typeof item.name === "string" ? item.name : item.id });
+      const name = typeof item.name === "string" ? item.name : item.id;
+      models.push({
+        id: item.id,
+        display_name: approximateModels.has(item.id) ? `${name} (approximate fallback)` : name,
+      });
     }
     defaultLoadedModel = models.length ? models[0].id : "";
     return models;
@@ -138,10 +144,15 @@ function parseFailure(message: string): never {
   throw new Error(`decision parse error: ${message}`);
 }
 
-function logprobEntries(completion: Completion): TokenLogprob[] {
-  const first = completion.choices?.[0]?.logprobs?.content?.[0];
-  if (!first || !Array.isArray(first.top_logprobs)) return [];
-  return first.top_logprobs.filter((entry): entry is TokenLogprob =>
+function firstContentLogprobs(completion: Completion): TokenLogprob[] | null {
+  const content = completion.choices?.[0]?.logprobs?.content;
+  if (!Array.isArray(content)) return null;
+  // Ignore whitespace-only tokens (LM Studio engines can emit newlines first).
+  const firstAnswerToken = content.find((entry) =>
+    typeof entry.token === "string" && entry.token.trim().length > 0,
+  );
+  if (!firstAnswerToken || !Array.isArray(firstAnswerToken.top_logprobs)) return null;
+  return firstAnswerToken.top_logprobs.filter((entry): entry is TokenLogprob =>
     !!entry && typeof entry.token === "string" && Number.isFinite(entry.logprob),
   );
 }
@@ -190,7 +201,7 @@ function requestCompletion(
   topLogprobs: number | null,
   responseFormat?: Record<string, unknown>,
 ): Completion {
-  const outputLimit = responseFormat ? Math.max(16, maxTokens()) : maxTokens();
+  const outputLimit = responseFormat ? Math.max(32, maxTokens()) : maxTokens();
   const body: Record<string, unknown> = {
     model,
     messages: conversation,
@@ -227,6 +238,70 @@ function requestCompletion(
   );
 }
 
+function parseStructuredContent(completion: Completion): Record<string, unknown> {
+  const raw = completion.choices?.[0]?.message?.content;
+  if (typeof raw !== "string") return parseFailure("constrained response has no JSON content");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return parseFailure("constrained response is invalid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return parseFailure("constrained response is not a JSON object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function integerConfidence(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) {
+    return parseFailure("constrained confidence is outside the integer range 0-100");
+  }
+  return value / 100;
+}
+
+function noulFallback(
+  model: string,
+  conversation: { role: string; content: string }[],
+): DecisionAnswer {
+  const responseFormat = {
+    type: "json_schema",
+    json_schema: {
+      name: "decision_noul",
+      strict: true,
+      schema: {
+        type: "object",
+        properties: {
+          answer: { type: "string", enum: ["yes", "no"] },
+          confidence: { type: "integer", minimum: 0, maximum: 100 },
+        },
+        required: ["answer", "confidence"],
+        additionalProperties: false,
+      },
+    },
+  };
+  const completion = requestCompletion(
+    model,
+    messages(
+      "Return JSON with answer yes or no and confidence as an integer from 0 to 100. " +
+        "Confidence is your certainty that the chosen answer is correct.",
+      conversation[1].content,
+    ),
+    null,
+    responseFormat,
+  );
+  const parsed = parseStructuredContent(completion);
+  if (parsed.answer !== "yes" && parsed.answer !== "no") {
+    return parseFailure("constrained response is not yes or no");
+  }
+  const confidence = integerConfidence(parsed.confidence);
+  approximateModels.add(model);
+  return {
+    type: "noul",
+    p: parsed.answer === "yes" ? confidence : 1 - confidence,
+  };
+}
+
 function noul(request: DecisionRequest): DecisionAnswer {
   const question = request.question;
   if (question.type !== "noul") return parseFailure("expected a noul question");
@@ -239,9 +314,13 @@ function noul(request: DecisionRequest): DecisionAnswer {
         : "Answer yes when the stated condition is satisfied; otherwise answer no.\n") +
       "Answer yes or no.",
   );
-  const completion = requestCompletion(selectedModel(), conversation, 5);
+  const model = selectedModel();
+  const completion = requestCompletion(model, conversation, 5);
+  const entries = firstContentLogprobs(completion);
+  if (!entries) return noulFallback(model, conversation);
+
   const groups = new Map<string, number[]>([["yes", []], ["no", []]]);
-  for (const entry of logprobEntries(completion)) {
+  for (const entry of entries) {
     const token = normalizeToken(entry.token);
     if (token === "yes" || token === "no") groups.get(token)!.push(entry.logprob);
   }
@@ -265,9 +344,19 @@ function choicePrompt(request: DecisionRequest, options: Record<string, string>)
     JSON.stringify(options);
 }
 
+function confidenceProbabilities(choice: string, labels: string[], confidence: number): Record<string, number> {
+  if (labels.length === 1) return { [choice]: 1 };
+  const chosenProbability = confidence;
+  const otherProbability = (1 - confidence) / (labels.length - 1);
+  const probabilities: Record<string, number> = {};
+  for (const label of labels) probabilities[label] = label === choice ? chosenProbability : otherProbability;
+  return probabilities;
+}
+
 function constrainedChoice(
   request: DecisionRequest,
   options: Record<string, string>,
+  model: string,
 ): DecisionAnswer {
   const labels = Object.keys(options);
   const responseFormat = {
@@ -277,38 +366,50 @@ function constrainedChoice(
       strict: true,
       schema: {
         type: "object",
-        properties: { choice: { type: "string", enum: labels } },
-        required: ["choice"],
+        properties: {
+          choice: { type: "string", enum: labels },
+          confidence: { type: "integer", minimum: 0, maximum: 100 },
+        },
+        required: ["choice", "confidence"],
         additionalProperties: false,
       },
     },
   };
   const completion = requestCompletion(
-    selectedModel(),
-    messages("Return one valid JSON object with the selected choice only.", choicePrompt(request, options)),
+    model,
+    messages(
+      "Return JSON with one supplied choice and confidence as an integer from 0 to 100. " +
+        "Confidence is your certainty that the selected choice is correct.",
+      choicePrompt(request, options),
+    ),
     null,
     responseFormat,
   );
-  const raw = completion.choices?.[0]?.message?.content;
-  if (typeof raw !== "string") return parseFailure("constrained response has no choice content");
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return parseFailure("constrained response is invalid JSON");
-  }
-  const choice = parsed && typeof parsed === "object"
-    ? (parsed as { choice?: unknown }).choice
-    : undefined;
+  const parsed = parseStructuredContent(completion);
+  const choice = parsed.choice;
   if (typeof choice !== "string" || !Object.prototype.hasOwnProperty.call(options, choice)) {
     return parseFailure("constrained response is not one of the supplied labels");
   }
+  const confidence = integerConfidence(parsed.confidence);
+  approximateModels.add(model);
   return {
     type: "choice",
     choice,
-    probabilities: { [choice]: 1 },
-    confidence: null,
+    probabilities: confidenceProbabilities(choice, labels, confidence),
+    confidence: labels.length === 1 ? 1 : confidence,
   };
+}
+
+function choiceProbabilitiesFromLogs(labels: string[], entries: TokenLogprob[]): Record<string, number> {
+  const groups = new Map<string, number[]>(labels.map((label) => [label, []]));
+  for (const entry of entries) {
+    const token = normalizeToken(entry.token);
+    if (!token) continue;
+    const matches = labels.filter((label) => normalizeToken(label).startsWith(token));
+    if (matches.length > 1) return parseFailure("shared candidate token prefixes");
+    if (matches.length === 1) groups.get(matches[0])!.push(entry.logprob);
+  }
+  return probabilitiesFromGroups(groups);
 }
 
 function choose(request: DecisionRequest, options: Record<string, string>): DecisionAnswer {
@@ -316,27 +417,30 @@ function choose(request: DecisionRequest, options: Record<string, string>): Deci
   if (!labels.length || labels.some((label) => !label.trim())) {
     return parseFailure("choice options must include non-empty labels");
   }
-  if (hasSharedLeadingWord(labels)) return constrainedChoice(request, options);
+  const model = selectedModel();
+  if (hasSharedLeadingWord(labels)) return constrainedChoice(request, options, model);
 
   const count = Math.min(MAX_TOP_LOGPROBS, Math.max(5, labels.length * 3));
   const completion = requestCompletion(
-    selectedModel(),
+    model,
     messages(
       "Answer with the first token of exactly one supplied option key. Do not explain.",
       choicePrompt(request, options),
     ),
     count,
   );
-  const entries = logprobEntries(completion);
-  const groups = new Map<string, number[]>(labels.map((label) => [label, []]));
-  for (const entry of entries) {
-    const token = normalizeToken(entry.token);
-    if (!token) continue;
-    const matches = labels.filter((label) => normalizeToken(label).startsWith(token));
-    if (matches.length > 1) return constrainedChoice(request, options);
-    if (matches.length === 1) groups.get(matches[0])!.push(entry.logprob);
+  const entries = firstContentLogprobs(completion);
+  if (!entries) return constrainedChoice(request, options, model);
+
+  let probabilities: Record<string, number>;
+  try {
+    probabilities = choiceProbabilitiesFromLogs(labels, entries);
+  } catch (error) {
+    if (String(error && (error as Error).message || error).includes("shared candidate token prefixes")) {
+      return constrainedChoice(request, options, model);
+    }
+    throw error;
   }
-  const probabilities = probabilitiesFromGroups(groups);
   const selected = answerChoice(probabilities);
   return {
     type: "choice",
@@ -346,21 +450,96 @@ function choose(request: DecisionRequest, options: Record<string, string>): Deci
   };
 }
 
+function pointScoreProbabilities(score: number): Record<string, number> {
+  const low = Math.floor(score);
+  const high = Math.ceil(score);
+  if (low === high) return { [String(low)]: 1 };
+  return { [String(low)]: high - score, [String(high)]: score - low };
+}
+
+function constrainedScore(
+  request: DecisionRequest,
+  model: string,
+): DecisionAnswer {
+  if (request.question.type !== "score") return parseFailure("expected a score question");
+  const levels = request.question.levels;
+  const maximum = levels.length - 1;
+  const scorePrompt = `${request.instructions}\n\nState and decision context:\n${stateText(request)}\n\n` +
+    "Return one numeric score for these ordered levels. Each level's index is its score:\n" +
+    JSON.stringify(levels.map((level, index) => ({ index, level })));
+  const responseFormat = {
+    type: "json_schema",
+    json_schema: {
+      name: "decision_score",
+      strict: true,
+      schema: {
+        type: "object",
+        properties: { score: { type: "number", minimum: 0, maximum } },
+        required: ["score"],
+        additionalProperties: false,
+      },
+    },
+  };
+  const completion = requestCompletion(
+    model,
+    messages("Return JSON with a numeric score in the declared range.", scorePrompt),
+    null,
+    responseFormat,
+  );
+  const parsed = parseStructuredContent(completion);
+  const scoreValue = parsed.score;
+  if (typeof scoreValue !== "number" || !Number.isFinite(scoreValue) || scoreValue < 0 || scoreValue > maximum) {
+    return parseFailure("constrained score is outside the declared range");
+  }
+  approximateModels.add(model);
+  return {
+    type: "score",
+    score: scoreValue,
+    probabilities: pointScoreProbabilities(scoreValue),
+    confidence: null,
+  };
+}
+
 function score(request: DecisionRequest): DecisionAnswer {
   if (request.question.type !== "score") return parseFailure("expected a score question");
-  if (!request.question.levels.length) return parseFailure("score levels are empty");
-  const answer = choose(request, optionRecord(request)) as Extract<DecisionAnswer, { type: "choice" }>;
-  const probabilities: Record<string, number> = {};
+  const levels = request.question.levels;
+  if (!levels.length) return parseFailure("score levels are empty");
+  const options = optionRecord(request);
+  const labels = Object.keys(options);
+  const model = selectedModel();
+  if (hasSharedLeadingWord(labels)) return constrainedScore(request, model);
+
+  const count = Math.min(MAX_TOP_LOGPROBS, Math.max(5, labels.length * 3));
+  const completion = requestCompletion(
+    model,
+    messages(
+      "Answer with the first token of exactly one supplied option key. Do not explain.",
+      choicePrompt(request, options),
+    ),
+    count,
+  );
+  const entries = firstContentLogprobs(completion);
+  if (!entries) return constrainedScore(request, model);
+
+  let probabilities: Record<string, number>;
+  try {
+    probabilities = choiceProbabilitiesFromLogs(labels, entries);
+  } catch (error) {
+    if (String(error && (error as Error).message || error).includes("shared candidate token prefixes")) {
+      return constrainedScore(request, model);
+    }
+    throw error;
+  }
   let expectedScore = 0;
-  for (const [index, probability] of Object.entries(answer.probabilities)) {
-    probabilities[index] = probability;
+  for (const [index, probability] of Object.entries(probabilities)) {
     expectedScore += Number(index) * probability;
   }
+  const selected = answerChoice(probabilities);
   return {
     type: "score",
     score: expectedScore,
     probabilities,
-    confidence: answer.confidence,
+    confidence: selected.confidence,
   };
 }
 

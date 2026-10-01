@@ -1,7 +1,7 @@
 {
-  "id": "chatcmpl-fixture-constrained",
+  "id": "chatcmpl-owner-mlx-whitespace",
   "object": "chat.completion",
-  "model": "fixture-model",
+  "model": "jev-style-qwen3.5-2b-decision-mlx",
   "choices": [
     {
       "index": 0,
@@ -9,7 +9,7 @@
       "finish_reason": "stop",
       "message": {
         "role": "assistant",
-        "content": "{\"choice\":\"alternate\",\"confidence\":80}"
+        "content": "\n\nYes"
       }
     }
   ]
