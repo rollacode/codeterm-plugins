@@ -1832,7 +1832,9 @@ test("decision_choice_shared_prefix_falls_back_constrained", () => {
   }));
 
   assert(answer.type === "choice" && answer.choice === "alternate", "constrained label is returned");
-  assertJsonEqual(answer.probabilities, { allow: 0.1, alternate: 0.8, deny: 0.1 }, "confidence remainder is spread evenly");
+  closeTo(answer.probabilities.allow, 0.1, "confidence remainder is spread evenly (allow)");
+  closeTo(answer.probabilities.alternate, 0.8, "constrained label keeps its confidence");
+  closeTo(answer.probabilities.deny, 0.1, "confidence remainder is spread evenly (deny)");
   closeTo(answer.confidence, 0.8, "constrained confidence");
   assert(fetchCalls.length === 1, "shared first-token prefixes use the constrained request directly");
   const body = JSON.parse(fetchCalls[0].body);
