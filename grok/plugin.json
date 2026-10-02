@@ -8,7 +8,6 @@
   "readme": "README.md",
   "binaryName": "grok",
   "cliBinary": "grok",
-  "iconColor": "var(--ct-fg)",
   "entry": "plugin.js",
   "spawn": {
     "readinessStrategy": {
