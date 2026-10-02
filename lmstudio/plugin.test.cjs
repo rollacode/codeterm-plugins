@@ -410,6 +410,30 @@ test("openSession seeds the system prompt as a user message carrying the system_
   );
 });
 
+test("lmstudio_open_session_uses_session_config_system_prompt_and_model", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  assert(manifest.capabilities.chatBackend.sessionConfig === true, "chatBackend declares sessionConfig support");
+  assert(manifest.capabilities.decisionModel === true, "decisionModel remains in the backward-compatible bare form");
+  assert(manifest.hostApi === 2, "manifest remains compatible with host API 2");
+  assert(manifest.minCodeterm === "1.12.3", "chatBackend session config remains available on CodeTerm 1.12.3");
+  const endpoint = "http://eight.tail0e459c.ts.net:1234";
+  reset({ baseUrl: endpoint, model: "settings-model", defaultPreset: "codeterm", presets: [] });
+  const ctx = {
+    tabId: "session-config",
+    config: {},
+    systemPrompt: "Host-composed system prompt",
+    model: "host-selected-model",
+  };
+
+  const body = openAndStartBody(ctx);
+  assert(body.model === "host-selected-model", "openSession uses the model from host session config");
+  assert(body.system_prompt === "Host-composed system prompt", "openSession uses the system prompt from host session config");
+  assert(
+    streamCalls[0].url === `${endpoint}/api/v1/chat`,
+    "chat request uses the configured server address",
+  );
+});
+
 test("sendMessage sends stream:true and streams a growing assistant message with one stable id", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({ tabId: "stream", config: {}, systemPrompt: "sys" });
@@ -1258,8 +1282,9 @@ test("tri-state: a thrown host.toolcall.parse is handled as a normal message, no
 });
 
 test("listPresets returns configured presets and listModels uses /api/v1/models", () => {
+  const endpoint = "http://eight.tail0e459c.ts.net:1234";
   reset({
-    baseUrl: "http://localhost:1234/",
+    baseUrl: `${endpoint}/`,
     defaultPreset: "codeterm",
     presets: [
       { id: "codeterm", name: "CodeTerm", systemPrompt: "sys" },
@@ -1272,7 +1297,7 @@ test("listPresets returns configured presets and listModels uses /api/v1/models"
   // Native shape: { models: [{ key, ... }] }.
   fetchHandler = (opts) => {
     assert(opts.method === "GET", "GET");
-    assert(opts.url === "http://localhost:1234/api/v1/models", "native models url, got " + opts.url);
+    assert(opts.url === `${endpoint}/api/v1/models`, "native model list uses the configured server address, got " + opts.url);
     return JSON.stringify({
       status: 200,
       body: JSON.stringify({ models: [{ key: "llama-3" }, { key: "qwen2.5" }, { bogus: true }] }),
@@ -1546,10 +1571,17 @@ test("settings schema and config expose presets/defaultPreset", () => {
   const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));
   const schemaText = JSON.stringify(schema);
   assert(schemaText.includes("baseUrl"), "schema exposes baseUrl");
+  const serverSection = schema.find((section) => section.title === "LM Studio server");
+  const baseUrlField = serverSection && serverSection.fields.find((field) => field.key === "baseUrl");
+  assert(baseUrlField && baseUrlField.label === "Server address", "SchemaRenderer exposes a labeled Server address field");
+  assert(baseUrlField.description.includes("tailnet"), "Server address describes remote Tailscale endpoints");
   assert(schemaText.includes("defaultPreset"), "schema exposes defaultPreset");
   assert(schemaText.includes("presets"), "schema exposes presets");
 
   const config = readFileSync(join(__dirname, "config.yaml"), "utf8");
+  assert(/# Server address, e\.g\. http:\/\/localhost:1234/.test(config), "config documents the server address");
+  assert(config.includes("<mac>.<tailnet>.ts.net:1234"), "config documents a remote Tailscale address");
+  assert(/^baseUrl:\s*http:\/\/localhost:1234$/m.test(config), "config keeps the localhost default");
   assert(/defaultPreset:\s*codeterm/.test(config), "config has defaultPreset");
   assert(/systemPrompt:\s*\|/.test(config), "config seeds block systemPrompt");
   assert(/charters:/.test(config), "config exposes charters map");
@@ -2020,10 +2052,11 @@ test("decision_score_mlx_defaults_to_one_constrained_json_request", () => {
 });
 
 test("decision_models_returns_nonempty_server_catalog_through_async_marker_without_hardcoded_ids", () => {
-  reset({ baseUrl: "http://localhost:1234/v1" });
+  const endpoint = "http://eight.tail0e459c.ts.net:1234/v1";
+  reset({ baseUrl: endpoint });
   const catalog = decisionFixture("models.fixture.json");
   asyncFetchHandler = (opts) => {
-    assert(opts.url === "http://localhost:1234/v1/models", "OpenAI-compatible model endpoint");
+    assert(opts.url === `${endpoint}/models`, "OpenAI-compatible model endpoint uses the configured server address");
     return { status: 200, body: JSON.stringify(catalog) };
   };
 
@@ -2036,6 +2069,18 @@ test("decision_models_returns_nonempty_server_catalog_through_async_marker_witho
     { id: "owner/model-b", display_name: "owner/model-b" },
   ], "server model ids and display names returned as listed");
   assert(fetchCalls.length === 1 && asyncFetchJobs[0].resumed, "non-empty catalogue is parsed after the marker resumes");
+});
+
+test("decision_completion_uses_configured_remote_server_address", () => {
+  const endpoint = "http://eight.tail0e459c.ts.net:1234";
+  reset({ baseUrl: endpoint, decision: { model: "owner/model-a", logprobsMode: "constrained" } });
+  asyncFetchHandler = (opts) => {
+    assert(opts.url === `${endpoint}/v1/chat/completions`, "decision endpoint uses the configured server address");
+    return { status: 200, body: JSON.stringify(decisionFixture("constrained-noul-confidence.fixture.json")) };
+  };
+
+  const answer = decide(decisionRequest({ type: "noul" }));
+  assert(answer.type === "noul", "decision request completes against the configured endpoint");
 });
 
 test("decision_models_marks_models_after_approximate_fallback", () => {

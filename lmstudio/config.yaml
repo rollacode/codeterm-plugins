@@ -1,7 +1,9 @@
 # LM Studio plugin configuration.
 #
-# Start LM Studio, load a model, and start the Developer server. The plugin uses
-# LM Studio's native v1 API: POST /api/v1/chat and GET /api/v1/models.
+# Start LM Studio, load a model, and start the Developer server.
+# Server address, e.g. http://localhost:1234 or
+# http://<mac>.<tailnet>.ts.net:1234. This shared address is used by chat and
+# decision requests; a remote host needs a grant in CodeTerm plugin settings.
 
 baseUrl: http://localhost:1234
 
