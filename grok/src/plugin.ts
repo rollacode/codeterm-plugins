@@ -322,7 +322,7 @@ const plugin: PluginModule = {
     const parts = ["grok"];
     appendLaunchFlags(parts, p);
     const task = starterTask(p);
-    if (task) parts.push(quote(task));
+    if (task) parts.push("--", quote(task));
     return parts.join(" ");
   },
 

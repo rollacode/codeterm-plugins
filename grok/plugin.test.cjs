@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync, realpathSync } = require("node:fs");
-const { tmpdir } = require("node:os");
+const { tmpdir, homedir } = require("node:os");
 const { spawnSync } = require("node:child_process");
 const { join, dirname } = require("node:path");
 const vm = require("node:vm");
@@ -52,7 +52,7 @@ const tests = [
     const dir = mkdtempSync(join(tmpdir(), "grok-argv-"));
     const fixture = join(dir, "argv.cjs");
     writeFileSync(fixture, "process.stdout.write(JSON.stringify(process.argv.slice(2)))");
-    const text = "first\r\nsecond\n'quoted' \"double\" $HOME `literal` $(throw 'executed') \\ путь ☃\n"
+    const text = "-=opaque\r\nsecond\n'quoted' \"double\" $HOME `literal` $(throw 'executed') \\ путь ☃\n"
       + String.raw`one\"two\\"three` + "\n"
       + "\u2018single\u2019 \u201cdouble\u201d -= marker \u201a \u201b \u201e \u201f\n";
     const shells = process.platform === "win32"
@@ -64,7 +64,7 @@ const tests = [
         const host = hostFor({ platform });
         const plugin = load(host);
         const cases = [
-          [plugin.buildLaunchCommand({ task: text }), ["--always-approve", text]],
+          [plugin.buildLaunchCommand({ task: text }), ["--always-approve", "--", text]],
           [plugin.buildResumeCommandWithContext({ sessionId: "fixture-session", systemPrompt: text }),
             ["--always-approve", "--resume", "fixture-session", "--system-prompt-override", text.trim()]],
         ];
@@ -85,6 +85,27 @@ const tests = [
       assert.equal(dirname(realpathSync(dir)), realpathSync(tmpdir()));
       rmSync(dir, { recursive: true, force: true });
     }
+  }],
+  ["native Grok parser keeps option-shaped prompts positional", () => {
+    const executable = join(homedir(), ".grok", "bin", process.platform === "win32" ? "grok.exe" : "grok");
+    if (!existsSync(executable)) return;
+    const platform = process.platform === "win32" ? "windows" : "linux";
+    const host = hostFor({ platform });
+    const plugin = load(host);
+    const invalidMode = "__parser_probe_invalid__";
+    const command = plugin.buildLaunchCommand({ args: ["--permission-mode", invalidMode], task: "-=opaque-fixture" });
+    const invocation = command.replace(/^grok/, `${platform === "windows" ? "& " : ""}${host.shell.quoteFor(executable, platform)}`);
+    const result = spawnSync(platform === "windows" ? "powershell.exe" : "bash",
+      platform === "windows" ? ["-NoProfile", "-NonInteractive", "-Command", invocation + "; exit $LASTEXITCODE"] : ["-c", invocation],
+      { encoding: "utf8", windowsHide: true, timeout: 15000 });
+    assert.equal(result.status, 2, result.stderr || result.error);
+    assert.ok(result.stderr.includes(invalidMode), result.stderr);
+    assert.ok(result.stderr.includes("--permission-mode"), result.stderr);
+    assert.doesNotMatch(result.stderr, /unexpected argument/);
+    const control = spawnSync(executable, ["--permission-mode", invalidMode, "-=opaque-fixture"],
+      { encoding: "utf8", windowsHide: true, timeout: 15000 });
+    assert.equal(control.status, 2);
+    assert.match(control.stderr, /unexpected argument/);
   }],
   ["manifest versions agree with channel", () => {
     const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
