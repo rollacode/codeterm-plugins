@@ -1,6 +1,8 @@
 const assert = require("node:assert/strict");
-const { readFileSync } = require("node:fs");
-const { join } = require("node:path");
+const { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync, realpathSync } = require("node:fs");
+const { tmpdir } = require("node:os");
+const { spawnSync } = require("node:child_process");
+const { join, dirname } = require("node:path");
 const vm = require("node:vm");
 
 const pluginPath = join(__dirname, "plugin.js");
@@ -29,7 +31,7 @@ function hostFor(over = {}) {
       toNative: (p) => (over.platform === "windows" ? String(p).replace(/\//g, "\\") : p),
     },
     shell: {
-      quoteFor: (v) => `'${v}'`,
+      quoteFor: (v, platform) => "'" + String(v).replace(/'/g, platform === "windows" ? "''" : "'\\''") + "'",
     },
     fs: {
       fileExists: (p) => Object.prototype.hasOwnProperty.call(files, p) || Object.prototype.hasOwnProperty.call(dirs, p),
@@ -46,6 +48,43 @@ function hostFor(over = {}) {
 }
 
 const tests = [
+  ["multiline launch and resume keep exact native arguments in one shell line", () => {
+    const dir = mkdtempSync(join(tmpdir(), "grok-argv-"));
+    const fixture = join(dir, "argv.cjs");
+    writeFileSync(fixture, "process.stdout.write(JSON.stringify(process.argv.slice(2)))");
+    const text = "first\r\nsecond\n'quoted' \"double\" $HOME `literal` $(throw 'executed') \\ путь ☃\n"
+      + String.raw`one\"two\\"three` + "\n";
+    const shells = process.platform === "win32"
+      ? [["windows", "powershell.exe"], ["windows", "pwsh.exe"], ["linux", "C:/Program Files/Git/bin/bash.exe"]]
+      : [["linux", "bash"], ...(process.platform === "darwin" ? [["macos", "zsh"]] : [])];
+    try {
+      for (const [platform, shell] of shells) {
+        if (shell.includes("/") && !existsSync(shell)) continue;
+        const host = hostFor({ platform });
+        const plugin = load(host);
+        const cases = [
+          [plugin.buildLaunchCommand({ task: text }), ["--always-approve", text]],
+          [plugin.buildResumeCommandWithContext({ sessionId: "fixture-session", systemPrompt: text }),
+            ["--always-approve", "--resume", "fixture-session", "--system-prompt-override", text.trim()]],
+        ];
+        for (const [command, expected] of cases) {
+          assert.doesNotMatch(command, /[\r\n]/, shell);
+          const exe = host.shell.quoteFor(process.execPath.replace(/\\/g, "/"), platform);
+          const script = host.shell.quoteFor(fixture.replace(/\\/g, "/"), platform);
+          const invocation = command.replace(/^grok/, `${platform === "windows" ? "& " : ""}${exe} ${script}`);
+          const args = platform === "windows"
+            ? ["-NoProfile", "-NonInteractive", "-Command", invocation] : ["-c", invocation];
+          const result = spawnSync(shell, args, { encoding: "utf8", windowsHide: true, timeout: 20000 });
+          if (result.error?.code === "ENOENT" && shell === "pwsh.exe") continue;
+          assert.equal(result.status, 0, `${shell}: ${result.stderr || result.error}`);
+          assert.deepEqual(JSON.parse(result.stdout), expected, shell);
+        }
+      }
+    } finally {
+      assert.equal(dirname(realpathSync(dir)), realpathSync(tmpdir()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }],
   ["manifest versions agree with channel", () => {
     const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
     const pkg = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf8"));
