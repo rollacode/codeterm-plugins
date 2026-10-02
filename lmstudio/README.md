@@ -126,9 +126,13 @@ The plugin also provides the `decisionModel` capability through LM Studio's
 OpenAI-compatible `POST /v1/chat/completions` endpoint. `models()` reads loaded
 ids from `GET /v1/models`; it does not bundle model ids. `decision.model` selects
 a model explicitly, otherwise the general `model` setting or first loaded id is
-used. The default `decision.maxTokens` is 64 so engines can emit leading
-whitespace before their first answer token. The configured value is clamped to
-8–128 tokens.
+used. A model selected by the host through `selectModel` takes precedence for
+subsequent decision requests; `modelId` reports that selection, and `metadata`
+reports the adapter name and configured server address. This selection is
+independent of a chat pane's model and does not change `decision.model` in the
+plugin configuration. The default `decision.maxTokens` is 64 so engines can
+emit leading whitespace before their first answer token. The configured value
+is clamped to 8–128 tokens.
 
 When a response includes token `top_logprobs`, the adapter skips whitespace-only
 generated tokens and derives noul and choice probabilities from the first content
@@ -163,6 +167,7 @@ may not reach callers.
 
 ```sh
 node scripts/build-plugin.mjs lmstudio
-node lmstudio/plugin.test.cjs
-npx tsc --noEmit
+npx tsx lmstudio/plugin.test.cjs
+npm run typecheck
+npm run check:icons
 ```

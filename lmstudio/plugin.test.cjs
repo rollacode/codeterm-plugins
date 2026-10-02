@@ -2113,6 +2113,44 @@ test("decision_select_model_applies_without_a_fetch_and_reports_the_model_id", (
   assert(plugin.metadata().display_name === "LM Studio", "metadata names the adapter");
 });
 
+test("decision_selected_model_reaches_remote_requests_independently_of_chat_session_model", () => {
+  const endpoint = "http://eight.tail0e459c.ts.net:1234";
+  reset({ baseUrl: endpoint, model: "general-model", decision: { model: "configured-decision", logprobsMode: "constrained" }, presets: [] });
+  const adapter = loadPlugin();
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-noul-confidence.fixture.json")) });
+  adapter.openSession({ tabId: "independent-selection", config: {}, model: "chat-model" });
+  assert(adapter.selectModel("supporter-model") === true, "Supporter model selection is accepted");
+
+  const answer = settleFetchExport(adapter.decide(decisionRequest({ type: "noul" })), "selected model decision");
+  assert(answer.type === "noul", "selected model produces a decision through the async continuation");
+  assert(fetchCalls.length === 1, "selected model needs no extra catalogue request");
+  assert(fetchCalls[0].url === `${endpoint}/v1/chat/completions`, "selection retains the remote endpoint");
+  assert(JSON.parse(fetchCalls[0].body).model === "supporter-model", "request uses the selection ahead of configured models");
+  assert(!Object.keys(fetchCalls[0].headers).some((key) => key.toLowerCase() === "authorization"), "plugin request requires no token setting; the host owns optional authentication");
+  assert(adapter.sessionInfo("independent-selection").model === "chat-model", "Supporter selection preserves the chat model");
+
+  adapter.setModel("independent-selection", "next-chat-model");
+  adapter.sendMessage("independent-selection", "hello");
+  assert(JSON.parse(streamCalls[0].body).model === "next-chat-model", "chat stream uses the changed chat model");
+  assert(adapter.modelId() === "supporter-model", "chat model switch preserves Supporter selection");
+  assert(adapter.selectModel("") === false && adapter.modelId() === "supporter-model", "refused selection preserves the applied model");
+  settleFetchExport(adapter.decide(decisionRequest({ type: "noul" })), "decision after chat switch");
+  assert(JSON.parse(fetchCalls[1].body).model === "supporter-model", "later decisions retain Supporter selection after chat changes");
+  assert(settingsObj.decision.model === "configured-decision" && settingsObj.model === "general-model", "selection leaves configured model defaults intact");
+  adapter.closeSession("independent-selection");
+});
+
+test("decision_model_id_reports_catalogue_fallback_and_metadata_normalizes_remote_address", () => {
+  const endpoint = "http://eight.tail0e459c.ts.net:1234";
+  reset({ baseUrl: ` ${endpoint}/v1/// ` });
+  const adapter = loadPlugin();
+  assert(adapter.modelId() === null, "no selected, configured or discovered model initially");
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("models.fixture.json")) });
+  const models = settleFetchExport(adapter.models(), "catalogue fallback models");
+  assert(models.length > 0 && adapter.modelId() === models[0].id, "modelId reports the first discovered model fallback");
+  assert(adapter.metadata().server_address === endpoint, "metadata reports the normalized configured server address");
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try { fn(); console.log(`✓ ${name}`); }
