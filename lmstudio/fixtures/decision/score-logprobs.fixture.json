@@ -1,0 +1,25 @@
+{
+  "id": "chatcmpl-fixture-score",
+  "object": "chat.completion",
+  "model": "fixture-model",
+  "choices": [
+    {
+      "index": 0,
+      "logprobs": {
+        "content": [
+          {
+            "token": "2",
+            "logprob": -0.6931471805599453,
+            "top_logprobs": [
+              { "token": "0", "logprob": -1.6094379124341003 },
+              { "token": "1", "logprob": -1.2039728043259361 },
+              { "token": "2", "logprob": -0.6931471805599453 }
+            ]
+          }
+        ]
+      },
+      "finish_reason": "length",
+      "message": { "role": "assistant", "content": "2" }
+    }
+  ]
+}

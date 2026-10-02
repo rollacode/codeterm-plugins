@@ -53,6 +53,10 @@ must not be reused.
   content-hashed `ui/app-<hash>.js` + a tiny `ui/index.html` that loads it. The
   `__CT_NONCE__` placeholders are swapped per-load by the host's view route.
 
+### Build troubleshooting
+
+If `npm run check:icons` reports that a manifest still carries `iconColor`, an obsolete inline icon field remains beside the supported SVG `icon` reference. Remove the legacy field, retain the SVG reference, and rerun `npm run check:icons` before publishing.
+
 ## Channel
 
 `channel.json` is the manifest CodeTerm reads when the channel is added. Keep

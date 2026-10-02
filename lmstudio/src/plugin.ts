@@ -1,4 +1,4 @@
-// LM Studio plugin — open agent shell (capability: chatBackend).
+// LM Studio plugin — open agent shell and decisionModel capabilities.
 //
 // The shell talks to LM Studio's native /api/v1/chat endpoint, streams via the
 // host fetch-stream bridge, and runs the CodeTerm text-tool protocol itself.
@@ -15,6 +15,7 @@ import type {
   WatcherTickInput,
 } from "@codeterm/plugin-sdk";
 import { assembleChat, assembleMachine, type EngineMessage } from "@codeterm/chat-engine";
+import decisionModel from "./decision";
 import watcherOrchestrationCharter from "../prompts/watcher-orchestration.md";
 
 interface Preset {
@@ -1410,4 +1411,4 @@ const plugin: ChatBackend & {
   },
 };
 
-export default plugin;
+export default { ...plugin, ...decisionModel };

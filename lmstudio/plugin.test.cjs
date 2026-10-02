@@ -6,6 +6,8 @@ const { join } = require("node:path");
 const vm = require("node:vm");
 
 const fetchCalls = [];
+const asyncFetchJobs = [];
+let nextAsyncFetchJob = 0;
 const streamCalls = [];
 const streamJobs = [];
 const execCalls = [];
@@ -28,6 +30,7 @@ let pendingExecPolls = null;
 let forceParse = null;
 let settingsObj = {};
 let fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
+let asyncFetchHandler = () => ({ status: 500, error: "no async fetch handler set" });
 const lastModelPath = "/tmp/codeterm-home/.codeterm/plugins/lmstudio/last-model.json";
 
 function parseLooseJson(raw) {
@@ -100,15 +103,26 @@ function mockToolcallParse(rawText, schemaJson) {
   return JSON.stringify({ status: "ok", ...candidates[0] });
 }
 
+function mockHostFetch(optsJson) {
+  const opts = JSON.parse(optsJson);
+  fetchCalls.push(opts);
+  return fetchHandler(opts);
+}
+mockHostFetch.async = (opts, then) => {
+  fetchCalls.push(opts);
+  const jobId = `fetch-${nextAsyncFetchJob++}`;
+  const continuationId = String(nextAsyncFetchJob);
+  asyncFetchJobs.push({ jobId, continuationId, opts, then, resumed: false });
+  // Match host.awaitJob: the export yields now; the host invokes `then` only
+  // after the job finishes and serializes whatever that continuation returns.
+  return { __ctAwait__: { job: jobId, k: continuationId } };
+};
+
 globalThis.host = {
   homeDir: () => "/tmp/codeterm-home",
   makeDirs: () => true,
   settingsJson: () => JSON.stringify(settingsObj),
-  fetch: (optsJson) => {
-    const opts = JSON.parse(optsJson);
-    fetchCalls.push(opts);
-    return fetchHandler(opts);
-  },
+  fetch: mockHostFetch,
   fetchStream: (optsJson) => {
     const opts = JSON.parse(optsJson);
     streamCalls.push(opts);
@@ -215,6 +229,8 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
 
 function reset(settings) {
   fetchCalls.length = 0;
+  asyncFetchJobs.length = 0;
+  nextAsyncFetchJob = 0;
   streamCalls.length = 0;
   streamJobs.length = 0;
   execCalls.length = 0;
@@ -232,6 +248,7 @@ function reset(settings) {
   settingsObj = settings || {};
   for (const key of Object.keys(fileStore)) delete fileStore[key];
   fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
+  asyncFetchHandler = () => ({ status: 500, error: "no async fetch handler set" });
 }
 
 // Queue the poll responses the in-flight authoring ticket hands back, in order.
@@ -270,6 +287,37 @@ function assertJsonEqual(actual, expected, msg) {
   assert(a === e, `${msg}\nactual: ${a}\nexpected: ${e}`);
 }
 
+function settleFetchExport(value, method) {
+  assert(
+    value && typeof value === "object" && value.__ctAwait__ &&
+      Object.keys(value).length === 1 &&
+      typeof value.__ctAwait__.job === "string" && typeof value.__ctAwait__.k === "string",
+    method + " returns the host.fetch.async await marker before a result exists",
+  );
+  let result = value;
+  let resumed = 0;
+  while (result && typeof result === "object" && result.__ctAwait__) {
+    assert(resumed++ < 20, method + " exceeded async continuation limit");
+    const marker = result.__ctAwait__;
+    const job = asyncFetchJobs.find((entry) =>
+      entry.jobId === marker.job && entry.continuationId === marker.k,
+    );
+    assert(job && !job.resumed, method + " returned an unknown or already-resumed fetch marker");
+    job.resumed = true;
+    result = job.then(asyncFetchHandler(job.opts));
+  }
+  assert(asyncFetchJobs.every((job) => job.resumed), method + " left a fetch continuation unawaited");
+  return result;
+}
+
+function decide(request) {
+  return settleFetchExport(plugin.decide(request), "decision export");
+}
+
+function decisionModels() {
+  return settleFetchExport(plugin.models(), "models export");
+}
+
 // The engine owns the verdict-contract wording; this plugin owns only the fact
 // that a machine turn renders assembleMachine's two messages as one string,
 // carrying THIS caller's charter and state. Copying the engine's prose here made
@@ -299,6 +347,18 @@ function assertMachineMessages(messages, charter, state, tickInput, name) {
 
 function renderEngineMessages(messages) {
   return messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
+}
+
+function decisionFixture(name) {
+  return JSON.parse(readFileSync(join(__dirname, "fixtures", "decision", name), "utf8"));
+}
+
+function decisionRequest(question, instructions = "Evaluate the supplied state.") {
+  return { state: { candidate: "fixture" }, instructions, question };
+}
+
+function closeTo(actual, expected, message) {
+  assert(Math.abs(actual - expected) < 1e-10, `${message}: expected ${expected}, got ${actual}`);
 }
 
 function openAndStartBody(ctx) {
@@ -347,6 +407,30 @@ test("openSession seeds the system prompt as a user message carrying the system_
   assert(
     p.messages[0].content.includes("You answer only in rhymes."),
     "seed payload is the system prompt body",
+  );
+});
+
+test("lmstudio_open_session_uses_session_config_system_prompt_and_model", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  assert(manifest.capabilities.chatBackend.sessionConfig === true, "chatBackend declares sessionConfig support");
+  assert(manifest.capabilities.decisionModel === true, "decisionModel remains in the backward-compatible bare form");
+  assert(manifest.hostApi === 2, "manifest remains compatible with host API 2");
+  assert(manifest.minCodeterm === "1.12.3", "chatBackend session config remains available on CodeTerm 1.12.3");
+  const endpoint = "http://eight.tail0e459c.ts.net:1234";
+  reset({ baseUrl: endpoint, model: "settings-model", defaultPreset: "codeterm", presets: [] });
+  const ctx = {
+    tabId: "session-config",
+    config: {},
+    systemPrompt: "Host-composed system prompt",
+    model: "host-selected-model",
+  };
+
+  const body = openAndStartBody(ctx);
+  assert(body.model === "host-selected-model", "openSession uses the model from host session config");
+  assert(body.system_prompt === "Host-composed system prompt", "openSession uses the system prompt from host session config");
+  assert(
+    streamCalls[0].url === `${endpoint}/api/v1/chat`,
+    "chat request uses the configured server address",
   );
 });
 
@@ -1198,8 +1282,9 @@ test("tri-state: a thrown host.toolcall.parse is handled as a normal message, no
 });
 
 test("listPresets returns configured presets and listModels uses /api/v1/models", () => {
+  const endpoint = "http://eight.tail0e459c.ts.net:1234";
   reset({
-    baseUrl: "http://localhost:1234/",
+    baseUrl: `${endpoint}/`,
     defaultPreset: "codeterm",
     presets: [
       { id: "codeterm", name: "CodeTerm", systemPrompt: "sys" },
@@ -1212,7 +1297,7 @@ test("listPresets returns configured presets and listModels uses /api/v1/models"
   // Native shape: { models: [{ key, ... }] }.
   fetchHandler = (opts) => {
     assert(opts.method === "GET", "GET");
-    assert(opts.url === "http://localhost:1234/api/v1/models", "native models url, got " + opts.url);
+    assert(opts.url === `${endpoint}/api/v1/models`, "native model list uses the configured server address, got " + opts.url);
     return JSON.stringify({
       status: 200,
       body: JSON.stringify({ models: [{ key: "llama-3" }, { key: "qwen2.5" }, { bogus: true }] }),
@@ -1486,10 +1571,17 @@ test("settings schema and config expose presets/defaultPreset", () => {
   const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));
   const schemaText = JSON.stringify(schema);
   assert(schemaText.includes("baseUrl"), "schema exposes baseUrl");
+  const serverSection = schema.find((section) => section.title === "LM Studio server");
+  const baseUrlField = serverSection && serverSection.fields.find((field) => field.key === "baseUrl");
+  assert(baseUrlField && baseUrlField.label === "Server address", "SchemaRenderer exposes a labeled Server address field");
+  assert(baseUrlField.description.includes("tailnet"), "Server address describes remote Tailscale endpoints");
   assert(schemaText.includes("defaultPreset"), "schema exposes defaultPreset");
   assert(schemaText.includes("presets"), "schema exposes presets");
 
   const config = readFileSync(join(__dirname, "config.yaml"), "utf8");
+  assert(/# Server address, e\.g\. http:\/\/localhost:1234/.test(config), "config documents the server address");
+  assert(config.includes("<mac>.<tailnet>.ts.net:1234"), "config documents a remote Tailscale address");
+  assert(/^baseUrl:\s*http:\/\/localhost:1234$/m.test(config), "config keeps the localhost default");
   assert(/defaultPreset:\s*codeterm/.test(config), "config has defaultPreset");
   assert(/systemPrompt:\s*\|/.test(config), "config seeds block systemPrompt");
   assert(/charters:/.test(config), "config exposes charters map");
@@ -1691,6 +1783,372 @@ test("requestPromptAuthoring on an unknown session or one without a model is a s
   const res = plugin.requestPromptAuthoring("no-such-session", "x");
   assert(res && res.ok === false, "unknown session reports not-ok, got " + JSON.stringify(res));
   assert(agentSpawns.length === 0 && workspaceCalls.length === 0, "no agent spawned for unknown session");
+});
+
+test("decision_noul_chains_model_discovery_from_the_async_continuation", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "", decision: { model: "" } });
+  asyncFetchHandler = (opts) => {
+    if (opts.url.endsWith("/models")) {
+      return { status: 200, body: JSON.stringify(decisionFixture("models.fixture.json")) };
+    }
+    return { status: 200, body: JSON.stringify(decisionFixture("noul-variants.fixture.json")) };
+  };
+
+  const answer = decide(decisionRequest({ type: "noul", criteria: null }));
+
+  assert(answer.type === "noul", "noul result type after discovery");
+  closeTo(answer.p, 0.8, "model discovery chains to the logprob request");
+  assert(fetchCalls.length === 2, "model list and completion requests both settle");
+  assert(fetchCalls[0].method === "GET" && fetchCalls[0].url.endsWith("/models"), "first continuation loads model ids");
+  assert(JSON.parse(fetchCalls[1].body).model === "owner/model-a", "completion uses the first server model");
+});
+
+test("decision_noul_ratio_from_logprobs merges variants after leading whitespace tokens", () => {
+  reset({ baseUrl: "http://localhost:1234", decision: { model: "fixture-model", maxTokens: 1, timeoutMs: 2400 } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("noul-variants.fixture.json")) });
+
+  const answer = decide(decisionRequest({
+    type: "noul",
+    criteria: { true: "the candidate matches", false: "the candidate does not match" },
+  }));
+
+  assert(answer.type === "noul", "noul result type");
+  closeTo(answer.p, 0.8, "yes mass divided by yes and no mass");
+  const body = JSON.parse(fetchCalls[0].body);
+  assert(fetchCalls[0].timeoutMs === 2400, "configured request timeout passed to async fetch");
+  assert(body.max_tokens === 8 && body.logprobs === true && body.top_logprobs === 5, "bounded request leaves room for leading whitespace");
+});
+
+test("decision_noul_null_logprobs_uses_confidence_schema_fallback", () => {
+  reset({ decision: { model: "fixture-model" } });
+  const responses = [
+    decisionFixture("mlx-null-logprobs-whitespace.fixture.json"),
+    decisionFixture("constrained-noul-confidence.fixture.json"),
+  ];
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
+
+  const answer = decide(decisionRequest({ type: "noul", criteria: null }));
+
+  assert(answer.type === "noul", "noul fallback result type");
+  closeTo(answer.p, 0.8, "yes confidence maps to yes probability");
+  assert(fetchCalls.length === 2, "null logprobs triggers one constrained retry");
+  const body = JSON.parse(fetchCalls[1].body);
+  assert(body.logprobs === undefined, "constrained retry does not claim token logprobs");
+  const schema = body.response_format.json_schema.schema;
+  assert(schema.properties.answer.enum.join(",") === "yes,no", "fallback constrains yes/no answer");
+  assert(schema.properties.confidence.minimum === 0 && schema.properties.confidence.maximum === 100, "fallback constrains integer confidence");
+  assert(JSON.parse(fetchCalls[0].body).max_tokens === 64, "default token budget reaches past leading whitespace");
+});
+
+test("decision_noul_empty_null_logprobs_retries_instead_of_guessing", () => {
+  reset({ decision: { model: "fixture-model" } });
+  const noAnswer = decisionFixture("constrained-noul-confidence.fixture.json");
+  noAnswer.choices[0].message.content = JSON.stringify({ answer: "no", confidence: 80 });
+  const responses = [decisionFixture("mlx-null-logprobs-empty.fixture.json"), noAnswer];
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
+
+  const answer = decide(decisionRequest({ type: "noul", criteria: null }));
+
+  assert(answer.type === "noul", "noul fallback result type");
+  closeTo(answer.p, 0.2, "no confidence maps to the complementary yes probability");
+  assert(fetchCalls.length === 2, "empty content with null logprobs makes a constrained request");
+});
+
+test("decision_noul_mlx_defaults_to_one_constrained_json_request", () => {
+  reset({ decision: { model: "owner/jev-style-qwen3.5-2b-decision-mlx-bf16" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-noul-confidence.fixture.json")) });
+
+  const answer = decide(decisionRequest({ type: "noul", criteria: null }));
+
+  assert(answer.type === "noul", "MLX noul result type");
+  closeTo(answer.p, 0.8, "MLX constrained confidence maps to yes probability");
+  assert(fetchCalls.length === 1, "known null-logprobs model avoids a speculative completion");
+  const body = JSON.parse(fetchCalls[0].body);
+  assert(body.logprobs === undefined && body.response_format.json_schema.schema.properties.answer.enum.join(",") === "yes,no", "first MLX request is constrained JSON");
+});
+
+test("decision_noul_present_logprobs_without_yes_no_tokens_is_parse_error", () => {
+  reset({ decision: { model: "fixture-model" } });
+  const response = decisionFixture("noul-variants.fixture.json");
+  response.choices[0].logprobs.content[1].top_logprobs = [
+    { token: "maybe", logprob: -0.10536051565782628 },
+  ];
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(response) });
+
+  let error = "";
+  try {
+    decide(decisionRequest({ type: "noul", criteria: null }));
+  } catch (caught) {
+    error = String(caught && caught.message || caught);
+  }
+  assert(/parse error: candidate tokens are absent/.test(error), "missing yes/no logprobs produce parse error, got " + error);
+  assert(fetchCalls.length === 1, "present but incomplete logprobs do not trigger a guessed fallback");
+});
+
+test("decision_choice_normalizes_label_logprobs", () => {
+  reset({ decision: { model: "fixture-model" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("choice-logprobs.fixture.json")) });
+
+  const answer = decide(decisionRequest({
+    type: "choice",
+    options: { keep: "Retain the candidate", drop: "Discard the candidate" },
+  }));
+
+  assert(answer.type === "choice" && answer.choice === "drop", "highest normalized label selected");
+  closeTo(answer.probabilities.keep, 0.25, "keep probability");
+  closeTo(answer.probabilities.drop, 0.75, "drop probability");
+  closeTo(answer.confidence, 0.75, "choice confidence");
+});
+
+test("decision_choice_null_logprobs_uses_confidence_and_spreads_remainder", () => {
+  reset({ decision: { model: "fixture-model" } });
+  const constrainedChoice = {
+    id: "chatcmpl-fixture-choice-confidence",
+    choices: [{
+      logprobs: null,
+      message: { role: "assistant", content: JSON.stringify({ choice: "drop", confidence: 75 }) },
+    }],
+  };
+  const responses = [decisionFixture("mlx-null-logprobs-empty.fixture.json"), constrainedChoice];
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
+
+  const answer = decide(decisionRequest({
+    type: "choice",
+    options: { keep: "Retain the candidate", drop: "Discard the candidate" },
+  }));
+
+  assert(answer.type === "choice" && answer.choice === "drop", "constrained label is returned");
+  assertJsonEqual(answer.probabilities, { keep: 0.25, drop: 0.75 }, "confidence maps to selected label and remainder");
+  closeTo(answer.confidence, 0.75, "fallback confidence");
+  const schema = JSON.parse(fetchCalls[1].body).response_format.json_schema.schema;
+  assert(schema.properties.choice.enum.join(",") === "keep,drop", "JSON schema constrains supplied labels");
+  assert(schema.properties.confidence.minimum === 0 && schema.properties.confidence.maximum === 100, "JSON schema constrains confidence");
+});
+
+test("decision_choice_mlx_defaults_to_one_constrained_json_request", () => {
+  reset({ decision: { model: "owner/jev-style-qwen3.5-2b-decision-mlx-bf16" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-choice.fixture.json")) });
+
+  const answer = decide(decisionRequest({
+    type: "choice",
+    options: { allow: "Allow the action", alternate: "Choose an alternative", deny: "Deny the action" },
+  }));
+
+  assert(answer.type === "choice" && answer.choice === "alternate", "MLX constrained label is returned");
+  assert(fetchCalls.length === 1, "known null-logprobs model uses one constrained request");
+  assert(JSON.parse(fetchCalls[0].body).logprobs === undefined, "MLX constrained request does not request token logprobs");
+});
+
+test("decision_choice_batches_36_candidates_in_three_constrained_requests", () => {
+  reset({ decision: { model: "owner/jev-style-qwen3.5-2b-decision-mlx-bf16" } });
+  const options = Object.fromEntries(Array.from({ length: 36 }, (_, index) => [
+    `candidate-${String(index).padStart(2, "0")}`,
+    `Candidate ${index}`,
+  ]));
+  let batchIndex = 0;
+  asyncFetchHandler = (opts) => {
+    const body = JSON.parse(opts.body);
+    const schema = body.response_format.json_schema.schema;
+    const keys = Object.keys(schema.properties.scores.properties);
+    assert(keys.length > 0 && keys.length <= 12, "each constrained request scores at most twelve candidates");
+    const scores = {};
+    keys.forEach((key, index) => { scores[key] = batchIndex * 12 + index + 1; });
+    batchIndex += 1;
+    return {
+      status: 200,
+      body: JSON.stringify({
+        choices: [{ message: { role: "assistant", content: JSON.stringify({ scores }) } }],
+      }),
+    };
+  };
+
+  const answer = decide(decisionRequest({ type: "choice", options }));
+
+  assert(answer.type === "choice" && answer.choice === "candidate-35", "highest batch score selects the final candidate");
+  closeTo(answer.probabilities["candidate-35"], 36 / 666, "batch scores normalize over the complete candidate set");
+  assert(fetchCalls.length === 3, "36 candidates require three serialized model calls");
+  assert(fetchCalls.every((call) => JSON.parse(call.body).logprobs === undefined), "known null-logprobs model uses constrained requests only");
+});
+
+test("decision_choice_batch_rejects_more_than_36_labels_without_a_guess", () => {
+  reset({ decision: { model: "owner/jev-style-qwen3.5-2b-decision-mlx-bf16" } });
+  const options = Object.fromEntries(Array.from({ length: 37 }, (_, index) => [`candidate-${index}`, `Candidate ${index}`]));
+
+  let error = "";
+  try {
+    decide(decisionRequest({ type: "choice", options }));
+  } catch (caught) {
+    error = String(caught && caught.message || caught);
+  }
+
+  assert(/parse error: choice supports at most 36 labels/.test(error), "oversized batch fails explicitly, got " + error);
+  assert(fetchCalls.length === 0, "oversized batch sends no partial or guessed requests");
+});
+
+test("decision_choice_shared_prefix_falls_back_constrained", () => {
+  reset({ decision: { model: "fixture-model" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-choice.fixture.json")) });
+
+  const answer = decide(decisionRequest({
+    type: "choice",
+    options: { allow: "Allow the action", alternate: "Choose an alternative", deny: "Deny the action" },
+  }));
+
+  assert(answer.type === "choice" && answer.choice === "alternate", "constrained label is returned");
+  closeTo(answer.probabilities.allow, 0.1, "confidence remainder is spread evenly (allow)");
+  closeTo(answer.probabilities.alternate, 0.8, "constrained label keeps its confidence");
+  closeTo(answer.probabilities.deny, 0.1, "confidence remainder is spread evenly (deny)");
+  closeTo(answer.confidence, 0.8, "constrained confidence");
+  assert(fetchCalls.length === 1, "shared first-token prefixes use the constrained request directly");
+  const body = JSON.parse(fetchCalls[0].body);
+  const schema = body.response_format.json_schema.schema;
+  assert(body.logprobs === undefined, "constrained response does not claim token logprobs");
+  assert(schema.properties.choice.enum.join(",") === "allow,alternate,deny", "JSON schema constrains supplied labels");
+  assert(body.max_tokens >= 32, "schema response has enough output budget for JSON");
+});
+
+test("decision_score_index_keyed_map", () => {
+  reset({ decision: { model: "fixture-model" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("score-logprobs.fixture.json")) });
+
+  const answer = decide(decisionRequest({ type: "score", levels: ["low", "medium", "high"] }));
+
+  assert(answer.type === "score", "score result type");
+  assertJsonEqual(Object.keys(answer.probabilities), ["0", "1", "2"], "probabilities use level indexes");
+  closeTo(answer.probabilities["0"], 0.2, "low level probability");
+  closeTo(answer.probabilities["1"], 0.3, "medium level probability");
+  closeTo(answer.probabilities["2"], 0.5, "high level probability");
+  closeTo(answer.score, 1.3, "score is the probability-weighted level index");
+});
+
+test("decision_score_null_logprobs_uses_constrained_point_and_interpolated_index_map", () => {
+  reset({ decision: { model: "fixture-model" } });
+  const responses = [
+    decisionFixture("mlx-null-logprobs-empty.fixture.json"),
+    decisionFixture("constrained-score.fixture.json"),
+  ];
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
+
+  const answer = decide(decisionRequest({ type: "score", levels: ["low", "medium", "high"] }));
+
+  assert(answer.type === "score", "score fallback result type");
+  closeTo(answer.score, 1.25, "constrained score point");
+  assertJsonEqual(answer.probabilities, { "1": 0.75, "2": 0.25 }, "interpolation preserves the point estimate");
+  assert(answer.confidence === null, "point-score interpolation is not model confidence");
+  const schema = JSON.parse(fetchCalls[1].body).response_format.json_schema.schema;
+  assert(schema.properties.score.minimum === 0 && schema.properties.score.maximum === 2, "schema constrains the declared level range");
+});
+
+test("decision_score_mlx_defaults_to_one_constrained_json_request", () => {
+  reset({ decision: { model: "owner/jev-style-qwen3.5-2b-decision-mlx-bf16" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-score.fixture.json")) });
+
+  const answer = decide(decisionRequest({ type: "score", levels: ["low", "medium", "high"] }));
+
+  assert(answer.type === "score", "MLX score result type");
+  closeTo(answer.score, 1.25, "MLX constrained score point");
+  assert(fetchCalls.length === 1, "known null-logprobs model uses one constrained request");
+  assert(JSON.parse(fetchCalls[0].body).logprobs === undefined, "MLX score request does not claim token logprobs");
+});
+
+test("decision_models_returns_nonempty_server_catalog_through_async_marker_without_hardcoded_ids", () => {
+  const endpoint = "http://eight.tail0e459c.ts.net:1234/v1";
+  reset({ baseUrl: endpoint });
+  const catalog = decisionFixture("models.fixture.json");
+  asyncFetchHandler = (opts) => {
+    assert(opts.url === `${endpoint}/models`, "OpenAI-compatible model endpoint uses the configured server address");
+    return { status: 200, body: JSON.stringify(catalog) };
+  };
+
+  const pending = plugin.models();
+  assert(pending && pending.__ctAwait__, "models export yields the host.fetch.async marker");
+  const models = settleFetchExport(pending, "models export");
+
+  assertJsonEqual(models, [
+    { id: "owner/model-a", display_name: "Model A" },
+    { id: "owner/model-b", display_name: "owner/model-b" },
+  ], "server model ids and display names returned as listed");
+  assert(fetchCalls.length === 1 && asyncFetchJobs[0].resumed, "non-empty catalogue is parsed after the marker resumes");
+});
+
+test("decision_completion_uses_configured_remote_server_address", () => {
+  const endpoint = "http://eight.tail0e459c.ts.net:1234";
+  reset({ baseUrl: endpoint, decision: { model: "owner/model-a", logprobsMode: "constrained" } });
+  asyncFetchHandler = (opts) => {
+    assert(opts.url === `${endpoint}/v1/chat/completions`, "decision endpoint uses the configured server address");
+    return { status: 200, body: JSON.stringify(decisionFixture("constrained-noul-confidence.fixture.json")) };
+  };
+
+  const answer = decide(decisionRequest({ type: "noul" }));
+  assert(answer.type === "noul", "decision request completes against the configured endpoint");
+});
+
+test("decision_models_marks_models_after_approximate_fallback", () => {
+  reset({ decision: { model: "catalog-model" } });
+  const responses = [
+    decisionFixture("mlx-null-logprobs-empty.fixture.json"),
+    decisionFixture("constrained-noul-confidence.fixture.json"),
+  ];
+  asyncFetchHandler = (opts) => {
+    if (opts.url.endsWith("/chat/completions")) {
+      return { status: 200, body: JSON.stringify(responses.shift()) };
+    }
+    return { status: 200, body: JSON.stringify({ data: [{ id: "catalog-model", name: "Catalog Model" }] }) };
+  };
+
+  decide(decisionRequest({ type: "noul", criteria: null }));
+  const models = decisionModels();
+
+  assert(models.length === 1 && models[0].id === "catalog-model", "loaded model id remains selectable");
+  assert(models[0].display_name === "Catalog Model (approximate fallback)", "model info marks constrained fallback as approximate");
+});
+
+test("decision_select_model_applies_without_a_fetch_and_reports_the_model_id", () => {
+  reset({ decision: { model: "configured-model" } });
+  asyncFetchHandler = () => { throw new Error("selectModel must not fetch"); };
+  assert(plugin.modelId() === "configured-model", "configured model is reported before selection");
+  assert(plugin.selectModel("other-model") === true, "a host-verified id is applied");
+  assert(plugin.modelId() === "other-model", "the applied model is reported back");
+  assert(plugin.selectModel("") === false, "an empty id is refused");
+  assert(plugin.metadata().display_name === "LM Studio", "metadata names the adapter");
+});
+
+test("decision_selected_model_reaches_remote_requests_independently_of_chat_session_model", () => {
+  const endpoint = "http://eight.tail0e459c.ts.net:1234";
+  reset({ baseUrl: endpoint, model: "general-model", decision: { model: "configured-decision", logprobsMode: "constrained" }, presets: [] });
+  const adapter = loadPlugin();
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-noul-confidence.fixture.json")) });
+  adapter.openSession({ tabId: "independent-selection", config: {}, model: "chat-model" });
+  assert(adapter.selectModel("supporter-model") === true, "Supporter model selection is accepted");
+
+  const answer = settleFetchExport(adapter.decide(decisionRequest({ type: "noul" })), "selected model decision");
+  assert(answer.type === "noul", "selected model produces a decision through the async continuation");
+  assert(fetchCalls.length === 1, "selected model needs no extra catalogue request");
+  assert(fetchCalls[0].url === `${endpoint}/v1/chat/completions`, "selection retains the remote endpoint");
+  assert(JSON.parse(fetchCalls[0].body).model === "supporter-model", "request uses the selection ahead of configured models");
+  assert(!Object.keys(fetchCalls[0].headers).some((key) => key.toLowerCase() === "authorization"), "plugin request requires no token setting; the host owns optional authentication");
+  assert(adapter.sessionInfo("independent-selection").model === "chat-model", "Supporter selection preserves the chat model");
+
+  adapter.setModel("independent-selection", "next-chat-model");
+  adapter.sendMessage("independent-selection", "hello");
+  assert(JSON.parse(streamCalls[0].body).model === "next-chat-model", "chat stream uses the changed chat model");
+  assert(adapter.modelId() === "supporter-model", "chat model switch preserves Supporter selection");
+  assert(adapter.selectModel("") === false && adapter.modelId() === "supporter-model", "refused selection preserves the applied model");
+  settleFetchExport(adapter.decide(decisionRequest({ type: "noul" })), "decision after chat switch");
+  assert(JSON.parse(fetchCalls[1].body).model === "supporter-model", "later decisions retain Supporter selection after chat changes");
+  assert(settingsObj.decision.model === "configured-decision" && settingsObj.model === "general-model", "selection leaves configured model defaults intact");
+  adapter.closeSession("independent-selection");
+});
+
+test("decision_model_id_reports_catalogue_fallback_and_metadata_normalizes_remote_address", () => {
+  const endpoint = "http://eight.tail0e459c.ts.net:1234";
+  reset({ baseUrl: ` ${endpoint}/v1/// ` });
+  const adapter = loadPlugin();
+  assert(adapter.modelId() === null, "no selected, configured or discovered model initially");
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("models.fixture.json")) });
+  const models = settleFetchExport(adapter.models(), "catalogue fallback models");
+  assert(models.length > 0 && adapter.modelId() === models[0].id, "modelId reports the first discovered model fallback");
+  assert(adapter.metadata().server_address === endpoint, "metadata reports the normalized configured server address");
 });
 
 let failed = 0;

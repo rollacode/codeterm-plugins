@@ -25,7 +25,7 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
-// ../codeterm/packages/chat-engine/src/index.ts
+// ../../codeterm/packages/chat-engine/src/index.ts
 var VERDICT_CONTRACT = [
   "Respond ONLY with a JSON object of this exact shape (no markdown fences, no surrounding prose):",
   "{",
@@ -60,8 +60,632 @@ ${VERDICT_CONTRACT}`
   ];
 }
 
+// lmstudio/src/decision.ts
+var DEFAULT_BASE_URL = "http://localhost:1234";
+var DEFAULT_TIMEOUT_MS = 3e4;
+var DEFAULT_MAX_TOKENS = 64;
+var MAX_TOP_LOGPROBS = 20;
+var CONSTRAINED_CHOICE_BATCH_SIZE = 12;
+var MAX_CONSTRAINED_CHOICE_LABELS = 36;
+var defaultLoadedModel = "";
+var selectedModel = "";
+var approximateModels = /* @__PURE__ */ new Set();
+function settings() {
+  try {
+    const parsed = JSON.parse(host.settingsJson() || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+function apiUrl(path) {
+  const configured = settings().baseUrl;
+  const base = typeof configured === "string" && configured.trim() ? configured.trim().replace(/\/+$/, "") : DEFAULT_BASE_URL;
+  return `${base.endsWith("/v1") ? base : `${base}/v1`}${path}`;
+}
+function maxTokens() {
+  const configured = settings().decision?.maxTokens;
+  return typeof configured === "number" && Number.isInteger(configured) && configured > 0 ? Math.max(8, Math.min(configured, 128)) : DEFAULT_MAX_TOKENS;
+}
+function timeoutMs() {
+  const configured = settings().decision?.timeoutMs;
+  return typeof configured === "number" && Number.isFinite(configured) && configured > 0 ? Math.min(Math.ceil(configured), DEFAULT_TIMEOUT_MS) : DEFAULT_TIMEOUT_MS;
+}
+function useTokenLogprobs(model) {
+  const configured = settings().decision?.logprobsMode;
+  if (configured === "constrained") return false;
+  if (configured === "logprobs") return true;
+  return !/(?:^|[-_/.])mlx(?:$|[-_/.])/i.test(model);
+}
+function parseModelList(response) {
+  if (response.error || typeof response.status === "number" && response.status >= 400 || !response.body) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(response.body);
+    if (!Array.isArray(parsed.data)) return [];
+    const models = [];
+    for (const row of parsed.data) {
+      if (!row || typeof row !== "object") continue;
+      const item = row;
+      if (typeof item.id !== "string" || !item.id) continue;
+      const name = typeof item.name === "string" ? item.name : item.id;
+      models.push({
+        id: item.id,
+        display_name: approximateModels.has(item.id) ? `${name} (approximate fallback)` : name
+      });
+    }
+    defaultLoadedModel = models.length ? models[0].id : "";
+    return models;
+  } catch {
+    return [];
+  }
+}
+function requestModelList(then) {
+  return host.fetch.async(
+    {
+      url: apiUrl("/models"),
+      method: "GET",
+      headers: { accept: "application/json" },
+      timeoutMs: timeoutMs()
+    },
+    (response) => then(parseModelList(response))
+  );
+}
+function modelList() {
+  return requestModelList((models) => models);
+}
+function configuredModel() {
+  const config = settings();
+  const decisionModel2 = config.decision?.model;
+  if (typeof decisionModel2 === "string" && decisionModel2.trim()) return decisionModel2.trim();
+  if (typeof config.model === "string" && config.model.trim()) return config.model.trim();
+  return "";
+}
+function withSelectedModel(then) {
+  if (selectedModel) return then(selectedModel);
+  const config = settings();
+  const decisionModel2 = config.decision?.model;
+  if (typeof decisionModel2 === "string" && decisionModel2.trim()) return then(decisionModel2.trim());
+  if (typeof config.model === "string" && config.model.trim()) return then(config.model.trim());
+  if (defaultLoadedModel) return then(defaultLoadedModel);
+  return requestModelList((models) => {
+    if (!models.length) throw new Error("LM Studio decision model unavailable: load a model or set decision.model");
+    defaultLoadedModel = models[0].id;
+    return then(defaultLoadedModel);
+  });
+}
+function stateText(request) {
+  return JSON.stringify(request.state);
+}
+function normalizeToken(token) {
+  return token.replace(/^\s+/, "").toLowerCase();
+}
+function firstTextWord(label) {
+  return normalizeToken(label).split(/\s+/, 1)[0] || "";
+}
+function hasSharedFirstTokenPrefix(labels) {
+  const seen = /* @__PURE__ */ new Set();
+  for (const label of labels) {
+    const firstCharacter = Array.from(firstTextWord(label))[0];
+    if (firstCharacter && seen.has(firstCharacter)) return true;
+    if (firstCharacter) seen.add(firstCharacter);
+  }
+  return false;
+}
+function parseFailure(message) {
+  throw new Error(`decision parse error: ${message}`);
+}
+function firstContentLogprobs(completion) {
+  const content = completion.choices?.[0]?.logprobs?.content;
+  if (!Array.isArray(content)) return null;
+  const firstAnswerToken = content.find(
+    (entry) => typeof entry.token === "string" && entry.token.trim().length > 0
+  );
+  if (!firstAnswerToken || !Array.isArray(firstAnswerToken.top_logprobs)) return null;
+  return firstAnswerToken.top_logprobs.filter(
+    (entry) => !!entry && typeof entry.token === "string" && Number.isFinite(entry.logprob)
+  );
+}
+function probabilitiesFromGroups(groups) {
+  const entries = Array.from(groups.entries());
+  const allLogs = entries.flatMap(([, values]) => values);
+  if (!allLogs.length || entries.some(([, values]) => !values.length)) {
+    return parseFailure("candidate tokens are absent from top_logprobs");
+  }
+  const maxLog = Math.max(...allLogs);
+  const weights = entries.map(([label, values]) => ({
+    label,
+    weight: values.reduce((sum, logprob) => sum + Math.exp(logprob - maxLog), 0)
+  }));
+  const total = weights.reduce((sum, item) => sum + item.weight, 0);
+  if (!(total > 0) || !Number.isFinite(total)) return parseFailure("candidate logprobs are invalid");
+  const probabilities = {};
+  for (const item of weights) probabilities[item.label] = item.weight / total;
+  return probabilities;
+}
+function answerChoice(probabilities) {
+  const labels = Object.keys(probabilities);
+  if (!labels.length) return parseFailure("no candidate probabilities");
+  let choice = labels[0];
+  for (const label of labels.slice(1)) {
+    if (probabilities[label] > probabilities[choice]) choice = label;
+  }
+  return { choice, confidence: probabilities[choice] };
+}
+function messages(system, user) {
+  return [
+    { role: "system", content: system },
+    { role: "user", content: user }
+  ];
+}
+function requestCompletion(model, conversation, topLogprobs, then, responseFormat) {
+  const outputLimit = responseFormat ? Math.max(32, maxTokens()) : maxTokens();
+  const body = {
+    model,
+    messages: conversation,
+    temperature: 0,
+    max_tokens: outputLimit,
+    stream: false
+  };
+  if (topLogprobs !== null) {
+    body.logprobs = true;
+    body.top_logprobs = topLogprobs;
+  }
+  if (responseFormat) body.response_format = responseFormat;
+  return host.fetch.async(
+    {
+      url: apiUrl("/chat/completions"),
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      timeoutMs: timeoutMs()
+    },
+    (result) => {
+      if (result.error) throw new Error(`LM Studio decision request failed: ${result.error}`);
+      if (typeof result.status === "number" && result.status >= 400) {
+        throw new Error(`LM Studio decision request failed: HTTP ${result.status}`);
+      }
+      if (!result.body) return parseFailure("LM Studio returned an empty completion");
+      let completion;
+      try {
+        completion = JSON.parse(result.body);
+      } catch {
+        return parseFailure("LM Studio returned invalid JSON");
+      }
+      return then(completion);
+    }
+  );
+}
+function parseStructuredContent(completion) {
+  const raw = completion.choices?.[0]?.message?.content;
+  if (typeof raw !== "string") return parseFailure("constrained response has no JSON content");
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return parseFailure("constrained response is invalid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return parseFailure("constrained response is not a JSON object");
+  }
+  return parsed;
+}
+function integerConfidence(value) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) {
+    return parseFailure("constrained confidence is outside the integer range 0-100");
+  }
+  return value / 100;
+}
+function noulFallback(model, conversation) {
+  const responseFormat = {
+    type: "json_schema",
+    json_schema: {
+      name: "decision_noul",
+      strict: true,
+      schema: {
+        type: "object",
+        properties: {
+          answer: { type: "string", enum: ["yes", "no"] },
+          confidence: { type: "integer", minimum: 0, maximum: 100 }
+        },
+        required: ["answer", "confidence"],
+        additionalProperties: false
+      }
+    }
+  };
+  return requestCompletion(
+    model,
+    messages(
+      "Return JSON with answer yes or no and confidence as an integer from 0 to 100. Confidence is your certainty that the chosen answer is correct.",
+      conversation[1].content
+    ),
+    null,
+    (completion) => {
+      const parsed = parseStructuredContent(completion);
+      if (parsed.answer !== "yes" && parsed.answer !== "no") {
+        return parseFailure("constrained response is not yes or no");
+      }
+      const confidence = integerConfidence(parsed.confidence);
+      approximateModels.add(model);
+      return {
+        type: "noul",
+        p: parsed.answer === "yes" ? confidence : 1 - confidence
+      };
+    },
+    responseFormat
+  );
+}
+function noul(request) {
+  const question = request.question;
+  if (question.type !== "noul") return parseFailure("expected a noul question");
+  const criteria = question.criteria;
+  const conversation = messages(
+    "Answer the yes/no decision with exactly one token: yes or no. Do not explain.",
+    `${request.instructions}
+
+State and decision context:
+${stateText(request)}
+
+` + (criteria ? `A yes means: ${criteria.true}
+A no means: ${criteria.false}
+` : "Answer yes when the stated condition is satisfied; otherwise answer no.\n") + "Answer yes or no."
+  );
+  return withSelectedModel((model) => {
+    if (!useTokenLogprobs(model)) return noulFallback(model, conversation);
+    return requestCompletion(model, conversation, 5, (completion) => {
+      const entries = firstContentLogprobs(completion);
+      if (!entries) return noulFallback(model, conversation);
+      const groups = /* @__PURE__ */ new Map([["yes", []], ["no", []]]);
+      for (const entry of entries) {
+        const token = normalizeToken(entry.token);
+        if (token === "yes" || token === "no") groups.get(token).push(entry.logprob);
+      }
+      const probabilities = probabilitiesFromGroups(groups);
+      return { type: "noul", p: probabilities.yes };
+    });
+  });
+}
+function optionRecord(request) {
+  if (request.question.type === "choice") return request.question.options;
+  if (request.question.type === "score") {
+    const indexed = {};
+    request.question.levels.forEach((level, index) => {
+      indexed[String(index)] = level;
+    });
+    return indexed;
+  }
+  return parseFailure("expected a choice or score question");
+}
+function choicePrompt(request, options) {
+  return `${request.instructions}
+
+State and decision context:
+${stateText(request)}
+
+Choose exactly one option. The option key is the answer; use its first token as your answer.
+` + JSON.stringify(options);
+}
+function confidenceProbabilities(choice, labels, confidence) {
+  if (labels.length === 1) return { [choice]: 1 };
+  const chosenProbability = confidence;
+  const otherProbability = (1 - confidence) / (labels.length - 1);
+  const probabilities = {};
+  for (const label of labels) probabilities[label] = label === choice ? chosenProbability : otherProbability;
+  return probabilities;
+}
+function constrainedChoice(request, options, model) {
+  const labels = Object.keys(options);
+  const responseFormat = {
+    type: "json_schema",
+    json_schema: {
+      name: "decision_choice",
+      strict: true,
+      schema: {
+        type: "object",
+        properties: {
+          choice: { type: "string", enum: labels },
+          confidence: { type: "integer", minimum: 0, maximum: 100 }
+        },
+        required: ["choice", "confidence"],
+        additionalProperties: false
+      }
+    }
+  };
+  return requestCompletion(
+    model,
+    messages(
+      "Return JSON with one supplied choice and confidence as an integer from 0 to 100. Confidence is your certainty that the selected choice is correct.",
+      choicePrompt(request, options)
+    ),
+    null,
+    (completion) => {
+      const parsed = parseStructuredContent(completion);
+      const choice = parsed.choice;
+      if (typeof choice !== "string" || !Object.prototype.hasOwnProperty.call(options, choice)) {
+        return parseFailure("constrained response is not one of the supplied labels");
+      }
+      const confidence = integerConfidence(parsed.confidence);
+      approximateModels.add(model);
+      return {
+        type: "choice",
+        choice,
+        probabilities: confidenceProbabilities(choice, labels, confidence),
+        confidence: labels.length === 1 ? 1 : confidence
+      };
+    },
+    responseFormat
+  );
+}
+function constrainedChoiceScoreFormat(keys) {
+  const scoreProperties = {};
+  for (const key of keys) {
+    scoreProperties[key] = { type: "integer", minimum: 0, maximum: 100 };
+  }
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: "decision_choice_batch_scores",
+      strict: true,
+      schema: {
+        type: "object",
+        properties: {
+          scores: {
+            type: "object",
+            properties: scoreProperties,
+            required: keys,
+            additionalProperties: false
+          }
+        },
+        required: ["scores"],
+        additionalProperties: false
+      }
+    }
+  };
+}
+function constrainedChoiceBatches(request, options, model) {
+  const labels = Object.keys(options);
+  if (labels.length > MAX_CONSTRAINED_CHOICE_LABELS) {
+    return parseFailure(`constrained choice supports at most ${MAX_CONSTRAINED_CHOICE_LABELS} labels`);
+  }
+  const scores = {};
+  const allOptions = labels.map((label) => ({ label, description: options[label] }));
+  const requestBatch = (offset) => {
+    if (offset >= labels.length) {
+      const total = labels.reduce((sum, label) => sum + scores[label], 0);
+      if (!(total > 0)) return parseFailure("constrained candidate scores contain no positive mass");
+      const probabilities = {};
+      for (const label of labels) probabilities[label] = scores[label] / total;
+      const selected = answerChoice(probabilities);
+      approximateModels.add(model);
+      return {
+        type: "choice",
+        choice: selected.choice,
+        probabilities,
+        confidence: selected.confidence
+      };
+    }
+    const batchLabels = labels.slice(offset, offset + CONSTRAINED_CHOICE_BATCH_SIZE);
+    const scoreKeys = batchLabels.map((_, index) => `s${index}`);
+    const batch = batchLabels.map((label, index) => ({
+      key: scoreKeys[index],
+      label,
+      description: options[label]
+    }));
+    const user = `${request.instructions}
+
+State and decision context:
+${stateText(request)}
+
+Evaluate the complete candidate set below using one consistent absolute 0-100 relevance scale. Return an independent integer score for every key in score_batch. Do not normalize scores within a batch.
+Complete candidate set: ${JSON.stringify(allOptions)}
+score_batch: ${JSON.stringify(batch)}`;
+    return requestCompletion(
+      model,
+      messages("Return JSON with an integer score from 0 to 100 for each requested candidate key.", user),
+      null,
+      (completion) => {
+        const parsed = parseStructuredContent(completion);
+        const batchScores = parsed.scores;
+        if (!batchScores || typeof batchScores !== "object" || Array.isArray(batchScores)) {
+          return parseFailure("constrained choice batch has no scores object");
+        }
+        const values = batchScores;
+        for (let index = 0; index < batchLabels.length; index += 1) {
+          const key = scoreKeys[index];
+          const value = values[key];
+          if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) {
+            return parseFailure(`constrained candidate score ${key} is outside the integer range 0-100`);
+          }
+          scores[batchLabels[index]] = value;
+        }
+        return requestBatch(offset + batchLabels.length);
+      },
+      constrainedChoiceScoreFormat(scoreKeys)
+    );
+  };
+  return requestBatch(0);
+}
+function constrainedChoiceFallback(request, options, model) {
+  return Object.keys(options).length > CONSTRAINED_CHOICE_BATCH_SIZE ? constrainedChoiceBatches(request, options, model) : constrainedChoice(request, options, model);
+}
+function choiceProbabilitiesFromLogs(labels, entries) {
+  const groups = new Map(labels.map((label) => [label, []]));
+  for (const entry of entries) {
+    const token = normalizeToken(entry.token);
+    if (!token) continue;
+    const matches = labels.filter((label) => normalizeToken(label).startsWith(token));
+    if (matches.length > 1) return parseFailure("shared candidate token prefixes");
+    if (matches.length === 1) groups.get(matches[0]).push(entry.logprob);
+  }
+  return probabilitiesFromGroups(groups);
+}
+function choose(request, options) {
+  const labels = Object.keys(options);
+  if (!labels.length || labels.some((label) => !label.trim())) {
+    return parseFailure("choice options must include non-empty labels");
+  }
+  if (labels.length > MAX_CONSTRAINED_CHOICE_LABELS) {
+    return parseFailure(`choice supports at most ${MAX_CONSTRAINED_CHOICE_LABELS} labels`);
+  }
+  return withSelectedModel((model) => {
+    if (!useTokenLogprobs(model) || labels.length > MAX_TOP_LOGPROBS) {
+      return constrainedChoiceFallback(request, options, model);
+    }
+    if (hasSharedFirstTokenPrefix(labels)) return constrainedChoiceFallback(request, options, model);
+    const count = Math.min(MAX_TOP_LOGPROBS, Math.max(5, labels.length * 3));
+    return requestCompletion(
+      model,
+      messages(
+        "Answer with the first token of exactly one supplied option key. Do not explain.",
+        choicePrompt(request, options)
+      ),
+      count,
+      (completion) => {
+        const entries = firstContentLogprobs(completion);
+        if (!entries) return constrainedChoiceFallback(request, options, model);
+        let probabilities;
+        try {
+          probabilities = choiceProbabilitiesFromLogs(labels, entries);
+        } catch (error) {
+          if (String(error && error.message || error).includes("shared candidate token prefixes")) {
+            return constrainedChoiceFallback(request, options, model);
+          }
+          throw error;
+        }
+        const selected = answerChoice(probabilities);
+        return {
+          type: "choice",
+          choice: selected.choice,
+          probabilities,
+          confidence: selected.confidence
+        };
+      }
+    );
+  });
+}
+function pointScoreProbabilities(score2) {
+  const low = Math.floor(score2);
+  const high = Math.ceil(score2);
+  if (low === high) return { [String(low)]: 1 };
+  return { [String(low)]: high - score2, [String(high)]: score2 - low };
+}
+function constrainedScore(request, model) {
+  if (request.question.type !== "score") return parseFailure("expected a score question");
+  const levels = request.question.levels;
+  const maximum = levels.length - 1;
+  const scorePrompt = `${request.instructions}
+
+State and decision context:
+${stateText(request)}
+
+Return one numeric score for these ordered levels. Each level's index is its score:
+` + JSON.stringify(levels.map((level, index) => ({ index, level })));
+  const responseFormat = {
+    type: "json_schema",
+    json_schema: {
+      name: "decision_score",
+      strict: true,
+      schema: {
+        type: "object",
+        properties: { score: { type: "number", minimum: 0, maximum } },
+        required: ["score"],
+        additionalProperties: false
+      }
+    }
+  };
+  return requestCompletion(
+    model,
+    messages("Return JSON with a numeric score in the declared range.", scorePrompt),
+    null,
+    (completion) => {
+      const parsed = parseStructuredContent(completion);
+      const scoreValue = parsed.score;
+      if (typeof scoreValue !== "number" || !Number.isFinite(scoreValue) || scoreValue < 0 || scoreValue > maximum) {
+        return parseFailure("constrained score is outside the declared range");
+      }
+      approximateModels.add(model);
+      return {
+        type: "score",
+        score: scoreValue,
+        probabilities: pointScoreProbabilities(scoreValue),
+        confidence: null
+      };
+    },
+    responseFormat
+  );
+}
+function score(request) {
+  if (request.question.type !== "score") return parseFailure("expected a score question");
+  const levels = request.question.levels;
+  if (!levels.length) return parseFailure("score levels are empty");
+  const options = optionRecord(request);
+  const labels = Object.keys(options);
+  return withSelectedModel((model) => {
+    if (!useTokenLogprobs(model) || labels.length > MAX_TOP_LOGPROBS) return constrainedScore(request, model);
+    if (hasSharedFirstTokenPrefix(labels)) return constrainedScore(request, model);
+    const count = Math.min(MAX_TOP_LOGPROBS, Math.max(5, labels.length * 3));
+    return requestCompletion(
+      model,
+      messages(
+        "Answer with the first token of exactly one supplied option key. Do not explain.",
+        choicePrompt(request, options)
+      ),
+      count,
+      (completion) => {
+        const entries = firstContentLogprobs(completion);
+        if (!entries) return constrainedScore(request, model);
+        let probabilities;
+        try {
+          probabilities = choiceProbabilitiesFromLogs(labels, entries);
+        } catch (error) {
+          if (String(error && error.message || error).includes("shared candidate token prefixes")) {
+            return constrainedScore(request, model);
+          }
+          throw error;
+        }
+        let expectedScore = 0;
+        for (const [index, probability] of Object.entries(probabilities)) {
+          expectedScore += Number(index) * probability;
+        }
+        const selected = answerChoice(probabilities);
+        return {
+          type: "score",
+          score: expectedScore,
+          probabilities,
+          confidence: selected.confidence
+        };
+      }
+    );
+  });
+}
+var decisionModel = {
+  decide(request) {
+    switch (request.question.type) {
+      case "noul":
+        return noul(request);
+      case "choice":
+        return choose(request, request.question.options);
+      case "score":
+        return score(request);
+      default:
+        return parseFailure("unsupported decision question");
+    }
+  },
+  models: modelList,
+  modelId: () => selectedModel || configuredModel() || defaultLoadedModel || null,
+  selectModel(id) {
+    if (!id) return false;
+    selectedModel = id;
+    return true;
+  },
+  metadata: () => ({ display_name: "LM Studio", server_address: apiUrl("").replace(/\/v1$/, "") }),
+  primitives: () => ({ choice: true, noul: true, score: true })
+};
+var decision_default = decisionModel;
+
 // lmstudio/prompts/watcher-orchestration.md
-var watcher_orchestration_default = '# Orchestration health watcher\r\n\r\nYou observe a **read-only snapshot** of an orchestration group (orchestrator + its managers and workers). Decide whether work is **progressing** or **stalled**. When stalled, you may request a **nudge** to the stuck pane.\r\n\r\nYou may investigate with tools when observations are insufficient, then you must finish with **ONLY the verdict JSON** as the final assistant message (no markdown fences, no prose before or after, and no tool block in the final message).\r\n\r\n## Tools\r\n\r\n**Tool discipline:** call at most ONE tool per tick, only when the snapshot is\r\ninsufficient. After a `tool_result` arrives, your NEXT message MUST be the\r\nverdict JSON \u2014 never another tool call for the same question.\r\n\r\n\r\nWhen the snapshot is ambiguous or missing key evidence, use at most the tools needed to clarify it. Available curated tools:\r\n\r\n- `exec`: run a shell command.\r\n- `read_file`: read a file.\r\n- `write_file`: write a file.\r\n- `codeterm`: run a CodeTerm command, such as `codeterm plan get` or `codeterm pane status --pane <id>`.\r\n- `mem_search`: search memory.\r\n- `spawn_agent`: start an agent only if explicitly needed for investigation.\r\n\r\nTool calls use fenced `codeterm-tool` JSON blocks. After each tool result, continue reasoning internally and either call another needed tool or finish with the verdict JSON. Use tools for facts you cannot infer reliably from `observations`, for example checking a pane\'s status or the current plan. Do not include a tool block in the final verdict message.\r\n\r\n## Input you receive each tick\r\n\r\nThe user message is JSON: `{ "state": <your prior state>, "input": { "tick", "nowMs", "state", "observations" } }`.\r\n\r\n`observations` is the host-assembled snapshot. Typical shape:\r\n\r\n```json\r\n{\r\n  "orchestrator_id": "abc123",\r\n  "panes": [\r\n    {\r\n      "pane_id": "abc123",\r\n      "title": "Orchestrator",\r\n      "role": "Orchestrator",\r\n      "status": "Working",\r\n      "last_activity_ms": 1700000000000\r\n    },\r\n    {\r\n      "pane_id": "def456",\r\n      "title": "Worker Alpha",\r\n      "role": "Worker",\r\n      "role_profile": null,\r\n      "status": "Working",\r\n      "last_activity_ms": 1700000005000,\r\n      "chatTail": [\r\n        { "id": "m1", "kind": "user", "content": "finish the task" },\r\n        { "id": "m2", "kind": "assistant", "content": "working on it\u2026" }\r\n      ]\r\n    }\r\n  ],\r\n  "reports": [\r\n    {\r\n      "id": "r1",\r\n      "from_pane_id": "def456",\r\n      "from_title": "Worker Alpha",\r\n      "message": "Completed step 1",\r\n      "timestamp": 1700000006000,\r\n      "status": "Done"\r\n    }\r\n  ]\r\n}\r\n```\r\n\r\nFields you care about on each pane:\r\n\r\n| Field | Meaning |\r\n|---|---|\r\n| `pane_id` | Target for nudge actions |\r\n| `title` | Human label |\r\n| `role` | `Orchestrator`, `Manager`, or `Worker` (may be absent) |\r\n| `role_profile` | Manager specialization (`planner`, `watcher`, \u2026) or null |\r\n| `status` | `Working`, `Waiting`, `Idle`, `Dead`, or `Unknown` |\r\n| `last_activity_ms` | Host clock when the pane last did something meaningful |\r\n| `chatTail` | Optional: last N parsed chat messages as `{id, kind, content}` objects |\r\n\r\nTop-level `orchestrator_id` identifies the orchestrator; the orchestrator also appears as a row in `panes[]`. `reports` is optional (when observation config enables it).\r\n\r\n## Progressing vs stalled\r\n\r\n**Progressing (`status: "ok"`)** \u2014 recent activity and forward motion:\r\n\r\n- `last_activity_ms` on key panes is within ~3 minutes of `nowMs`, **or**\r\n- worker/manager `status` values are advancing (e.g. `Waiting` \u2192 `Working`, `Working` with fresh `chatTail`), **or**\r\n- new agent reports arrive at the orchestrator with concrete progress.\r\n\r\n**Attention (`status: "attention"`)** \u2014 ambiguous or early warning:\r\n\r\n- activity is slowing but not clearly stuck yet, **or**\r\n- you lack enough data to judge (empty snapshot, missing tails).\r\n\r\n**Stalled (`status: "stalled"`)** \u2014 the group needs a kick:\r\n\r\n- no meaningful activity on workers for ~5+ minutes while tasks should be active, **or**\r\n- a worker sits on the same status with no `chatTail` movement, **or**\r\n- the orchestrator is `Idle` while workers are `Waiting`/`Idle` with no progress, **or**\r\n- unread reports pile up at the orchestrator with no follow-up.\r\n\r\nWhen stalled, emit **at most one nudge** to the most stuck pane. Nudges must be:\r\n\r\n- **Short** (1\u20132 sentences)\r\n- **Evidence-based** (cite what you saw: idle time, status, last `chatTail` line)\r\n- **Addressed to that pane** (use its `pane_id` in the action)\r\n\r\nDo not nudge watchers or the orchestrator unless the orchestrator itself is clearly idle with pending work.\r\n\r\n## State\r\n\r\nUse `state` to remember lightweight notes across ticks (e.g. `{ "last_nudged": { "def456": 1700000000000 } }`). Keep it small.\r\n\r\n## Worked example 1 \u2014 progressing (ok)\r\n\r\nObservation (abbreviated):\r\n\r\n```json\r\n{\r\n  "tick": 2,\r\n  "nowMs": 1700000120000,\r\n  "observations": {\r\n    "orchestrator_id": "o1",\r\n    "panes": [\r\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000110000 },\r\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "role_profile": null, "status": "Working", "last_activity_ms": 1700000118000 }\r\n    ],\r\n    "reports": [\r\n      { "id": "r1", "from_pane_id": "w1", "from_title": "Worker", "message": "Implemented tests", "timestamp": 1700000119000, "status": "Partial" }\r\n    ]\r\n  }\r\n}\r\n```\r\n\r\nYour verdict:\r\n\r\n```json\r\n{"status":"ok","summary":"Worker active in last minute with a progress report.","state":{"seen_ticks":2},"actions":[]}\r\n```\r\n\r\n## Worked example 2 \u2014 stalled worker (one nudge)\r\n\r\nObservation (abbreviated):\r\n\r\n```json\r\n{\r\n  "tick": 5,\r\n  "nowMs": 1700000420000,\r\n  "observations": {\r\n    "orchestrator_id": "o1",\r\n    "panes": [\r\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Idle", "last_activity_ms": 1700000200000 },\r\n      {\r\n        "pane_id": "w1",\r\n        "title": "Worker",\r\n        "role": "Worker",\r\n        "role_profile": null,\r\n        "status": "Waiting",\r\n        "last_activity_ms": 1700000000000,\r\n        "chatTail": [\r\n          { "id": "m1", "kind": "user", "content": "run the tests" },\r\n          { "id": "m2", "kind": "assistant", "content": "I\'ll get to it\u2026" }\r\n        ]\r\n      }\r\n    ]\r\n  }\r\n}\r\n```\r\n\r\nWorker `w1` has been silent ~7 minutes (`nowMs - last_activity_ms` = 420000 ms) with `status: Waiting` and no new `chatTail`.\r\n\r\nYour verdict:\r\n\r\n```json\r\n{"status":"stalled","summary":"Worker w1 Waiting with no activity for 7+ minutes.","state":{"seen_ticks":5,"last_nudged":{"w1":1700000420000}},"actions":[{"kind":"nudge","pane":"w1","message":"Stalled ~7m on \'run the tests\' \u2014 status Waiting, no new chat since \'I\'ll get to it\u2026\'. Please run tests and report STATUS."}]}\r\n```\r\n\r\n## Worked example 3 \u2014 investigate with a codeterm tool, then verdict\r\n\r\nObservation (abbreviated):\r\n\r\n```json\r\n{\r\n  "tick": 8,\r\n  "nowMs": 1700000600000,\r\n  "observations": {\r\n    "orchestrator_id": "o1",\r\n    "panes": [\r\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000580000 },\r\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "status": "Unknown", "last_activity_ms": 1700000200000 }\r\n    ]\r\n  }\r\n}\r\n```\r\n\r\nThe worker looks stale, but `status: Unknown` and missing `chatTail` are insufficient evidence. First check the pane:\r\n\r\n```codeterm-tool\r\n{"tool":"codeterm","args":{"args":"pane status --pane w1"}}\r\n```\r\n\r\nTool result (abbreviated): `{"status":"Working","last_activity_ms":1700000590000,"prompt":"running focused tests"}`\r\n\r\nYour final message:\r\n\r\n```json\r\n{"status":"ok","summary":"Worker w1 is active after status check and is running focused tests.","state":{"seen_ticks":8},"actions":[]}\r\n```\r\n';
+var watcher_orchestration_default = '# Orchestration health watcher\n\nYou observe a **read-only snapshot** of an orchestration group (orchestrator + its managers and workers). Decide whether work is **progressing** or **stalled**. When stalled, you may request a **nudge** to the stuck pane.\n\nYou may investigate with tools when observations are insufficient, then you must finish with **ONLY the verdict JSON** as the final assistant message (no markdown fences, no prose before or after, and no tool block in the final message).\n\n## Tools\n\n**Tool discipline:** call at most ONE tool per tick, only when the snapshot is\ninsufficient. After a `tool_result` arrives, your NEXT message MUST be the\nverdict JSON \u2014 never another tool call for the same question.\n\n\nWhen the snapshot is ambiguous or missing key evidence, use at most the tools needed to clarify it. Available curated tools:\n\n- `exec`: run a shell command.\n- `read_file`: read a file.\n- `write_file`: write a file.\n- `codeterm`: run a CodeTerm command, such as `codeterm plan get` or `codeterm pane status --pane <id>`.\n- `mem_search`: search memory.\n- `spawn_agent`: start an agent only if explicitly needed for investigation.\n\nTool calls use fenced `codeterm-tool` JSON blocks. After each tool result, continue reasoning internally and either call another needed tool or finish with the verdict JSON. Use tools for facts you cannot infer reliably from `observations`, for example checking a pane\'s status or the current plan. Do not include a tool block in the final verdict message.\n\n## Input you receive each tick\n\nThe user message is JSON: `{ "state": <your prior state>, "input": { "tick", "nowMs", "state", "observations" } }`.\n\n`observations` is the host-assembled snapshot. Typical shape:\n\n```json\n{\n  "orchestrator_id": "abc123",\n  "panes": [\n    {\n      "pane_id": "abc123",\n      "title": "Orchestrator",\n      "role": "Orchestrator",\n      "status": "Working",\n      "last_activity_ms": 1700000000000\n    },\n    {\n      "pane_id": "def456",\n      "title": "Worker Alpha",\n      "role": "Worker",\n      "role_profile": null,\n      "status": "Working",\n      "last_activity_ms": 1700000005000,\n      "chatTail": [\n        { "id": "m1", "kind": "user", "content": "finish the task" },\n        { "id": "m2", "kind": "assistant", "content": "working on it\u2026" }\n      ]\n    }\n  ],\n  "reports": [\n    {\n      "id": "r1",\n      "from_pane_id": "def456",\n      "from_title": "Worker Alpha",\n      "message": "Completed step 1",\n      "timestamp": 1700000006000,\n      "status": "Done"\n    }\n  ]\n}\n```\n\nFields you care about on each pane:\n\n| Field | Meaning |\n|---|---|\n| `pane_id` | Target for nudge actions |\n| `title` | Human label |\n| `role` | `Orchestrator`, `Manager`, or `Worker` (may be absent) |\n| `role_profile` | Manager specialization (`planner`, `watcher`, \u2026) or null |\n| `status` | `Working`, `Waiting`, `Idle`, `Dead`, or `Unknown` |\n| `last_activity_ms` | Host clock when the pane last did something meaningful |\n| `chatTail` | Optional: last N parsed chat messages as `{id, kind, content}` objects |\n\nTop-level `orchestrator_id` identifies the orchestrator; the orchestrator also appears as a row in `panes[]`. `reports` is optional (when observation config enables it).\n\n## Progressing vs stalled\n\n**Progressing (`status: "ok"`)** \u2014 recent activity and forward motion:\n\n- `last_activity_ms` on key panes is within ~3 minutes of `nowMs`, **or**\n- worker/manager `status` values are advancing (e.g. `Waiting` \u2192 `Working`, `Working` with fresh `chatTail`), **or**\n- new agent reports arrive at the orchestrator with concrete progress.\n\n**Attention (`status: "attention"`)** \u2014 ambiguous or early warning:\n\n- activity is slowing but not clearly stuck yet, **or**\n- you lack enough data to judge (empty snapshot, missing tails).\n\n**Stalled (`status: "stalled"`)** \u2014 the group needs a kick:\n\n- no meaningful activity on workers for ~5+ minutes while tasks should be active, **or**\n- a worker sits on the same status with no `chatTail` movement, **or**\n- the orchestrator is `Idle` while workers are `Waiting`/`Idle` with no progress, **or**\n- unread reports pile up at the orchestrator with no follow-up.\n\nWhen stalled, emit **at most one nudge** to the most stuck pane. Nudges must be:\n\n- **Short** (1\u20132 sentences)\n- **Evidence-based** (cite what you saw: idle time, status, last `chatTail` line)\n- **Addressed to that pane** (use its `pane_id` in the action)\n\nDo not nudge watchers or the orchestrator unless the orchestrator itself is clearly idle with pending work.\n\n## State\n\nUse `state` to remember lightweight notes across ticks (e.g. `{ "last_nudged": { "def456": 1700000000000 } }`). Keep it small.\n\n## Worked example 1 \u2014 progressing (ok)\n\nObservation (abbreviated):\n\n```json\n{\n  "tick": 2,\n  "nowMs": 1700000120000,\n  "observations": {\n    "orchestrator_id": "o1",\n    "panes": [\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000110000 },\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "role_profile": null, "status": "Working", "last_activity_ms": 1700000118000 }\n    ],\n    "reports": [\n      { "id": "r1", "from_pane_id": "w1", "from_title": "Worker", "message": "Implemented tests", "timestamp": 1700000119000, "status": "Partial" }\n    ]\n  }\n}\n```\n\nYour verdict:\n\n```json\n{"status":"ok","summary":"Worker active in last minute with a progress report.","state":{"seen_ticks":2},"actions":[]}\n```\n\n## Worked example 2 \u2014 stalled worker (one nudge)\n\nObservation (abbreviated):\n\n```json\n{\n  "tick": 5,\n  "nowMs": 1700000420000,\n  "observations": {\n    "orchestrator_id": "o1",\n    "panes": [\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Idle", "last_activity_ms": 1700000200000 },\n      {\n        "pane_id": "w1",\n        "title": "Worker",\n        "role": "Worker",\n        "role_profile": null,\n        "status": "Waiting",\n        "last_activity_ms": 1700000000000,\n        "chatTail": [\n          { "id": "m1", "kind": "user", "content": "run the tests" },\n          { "id": "m2", "kind": "assistant", "content": "I\'ll get to it\u2026" }\n        ]\n      }\n    ]\n  }\n}\n```\n\nWorker `w1` has been silent ~7 minutes (`nowMs - last_activity_ms` = 420000 ms) with `status: Waiting` and no new `chatTail`.\n\nYour verdict:\n\n```json\n{"status":"stalled","summary":"Worker w1 Waiting with no activity for 7+ minutes.","state":{"seen_ticks":5,"last_nudged":{"w1":1700000420000}},"actions":[{"kind":"nudge","pane":"w1","message":"Stalled ~7m on \'run the tests\' \u2014 status Waiting, no new chat since \'I\'ll get to it\u2026\'. Please run tests and report STATUS."}]}\n```\n\n## Worked example 3 \u2014 investigate with a codeterm tool, then verdict\n\nObservation (abbreviated):\n\n```json\n{\n  "tick": 8,\n  "nowMs": 1700000600000,\n  "observations": {\n    "orchestrator_id": "o1",\n    "panes": [\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000580000 },\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "status": "Unknown", "last_activity_ms": 1700000200000 }\n    ]\n  }\n}\n```\n\nThe worker looks stale, but `status: Unknown` and missing `chatTail` are insufficient evidence. First check the pane:\n\n```codeterm-tool\n{"tool":"codeterm","args":{"args":"pane status --pane w1"}}\n```\n\nTool result (abbreviated): `{"status":"Working","last_activity_ms":1700000590000,"prompt":"running focused tests"}`\n\nYour final message:\n\n```json\n{"status":"ok","summary":"Worker w1 is active after status check and is running focused tests.","state":{"seen_ticks":8},"actions":[]}\n```\n';
 
 // lmstudio/src/plugin.ts
 var CHARTER_REF_PREFIX = "charter:";
@@ -74,15 +698,15 @@ function resolveCharterRef(ref) {
   if (!id) return { charter: "", error: "charter reference is missing an id" };
   const shipped = SHIPPED_CHARTERS[id];
   if (shipped) return { charter: shipped };
-  const settings = readSettings();
-  const raw = settings.charters;
+  const settings2 = readSettings();
+  const raw = settings2.charters;
   const body = raw && typeof raw === "object" && !Array.isArray(raw) ? raw[id] : void 0;
   if (typeof body === "string" && body.trim() && !body.trim().endsWith(".md")) {
     return { charter: body.trim() };
   }
   return { charter: "", error: `unknown charter id: ${id}` };
 }
-var DEFAULT_BASE_URL = "http://localhost:1234";
+var DEFAULT_BASE_URL2 = "http://localhost:1234";
 var LAST_MODEL_PATH = ".codeterm/plugins/lmstudio/last-model.json";
 var AUTHORED_PROMPTS_PATH = ".codeterm/plugins/lmstudio/authored-prompts.json";
 var PROMPT_AUTHOR_WORKSPACE = "lmstudio-prompt-authoring";
@@ -216,7 +840,7 @@ function describeModelSwitch(sessionId, targetModel) {
 }
 function baseUrl() {
   const s = readSettings();
-  const url = s.baseUrl && s.baseUrl.trim() ? s.baseUrl.trim() : DEFAULT_BASE_URL;
+  const url = s.baseUrl && s.baseUrl.trim() ? s.baseUrl.trim() : DEFAULT_BASE_URL2;
   return url.replace(/\/+$/, "");
 }
 function presets() {
@@ -579,8 +1203,8 @@ function messagesAsEngineHistory(s) {
   }
   return history;
 }
-function requestInputFromMessages(messages) {
-  return messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
+function requestInputFromMessages(messages2) {
+  return messages2.map((m) => `${m.role}: ${m.content}`).join("\n\n");
 }
 function startLmStudioCall(s, input, opts) {
   if (!s.model) {
@@ -932,8 +1556,8 @@ var plugin = {
     s.malformedRetries = 0;
     s.done = false;
     if (s.engine && s.engine.kind === "machine") {
-      const messages = assembleMachine(s.charter, s.machineState, { query: text });
-      s.pendingInputs.push(JSON.stringify({ machineMessages: messages }));
+      const messages2 = assembleMachine(s.charter, s.machineState, { query: text });
+      s.pendingInputs.push(JSON.stringify({ machineMessages: messages2 }));
     } else {
       s.pendingInputs.push(text);
     }
@@ -943,9 +1567,9 @@ var plugin = {
     const s = sessions.get(sid);
     if (!s || s.mode !== "watcher") return;
     const tickInput = input;
-    const messages = assembleMachine(s.charter, tickInput.state, tickInput);
+    const messages2 = assembleMachine(s.charter, tickInput.state, tickInput);
     s.watcherTicks += 1;
-    append(s, "context_request", JSON.stringify(messages));
+    append(s, "context_request", JSON.stringify(messages2));
     s.currentRun = "watcher";
     s.previousResponseId = null;
     s.pendingInputs = [];
@@ -958,7 +1582,7 @@ var plugin = {
     s.watcherVerdictEmitted = false;
     s.watcherLastAssistant = "";
     s.done = false;
-    s.pendingInputs.push(JSON.stringify({ watcherMessages: messages }));
+    s.pendingInputs.push(JSON.stringify({ watcherMessages: messages2 }));
     startNextIfIdle(s);
   },
   pump(sid) {
@@ -1079,4 +1703,4 @@ var plugin = {
     s.previousResponseId = null;
   }
 };
-var plugin_default = plugin;
+var plugin_default = { ...plugin, ...decision_default };
