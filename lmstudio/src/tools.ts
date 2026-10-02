@@ -1,7 +1,3 @@
-// LM Studio text-tool parsing and execution bridge. Session scheduling and
-// transcript emission stay in plugin.ts; host access and JSON decoding are
-// injected so this helper does not own session state.
-
 export interface ToolCall {
   tool: string;
   args: Record<string, unknown>;
@@ -49,9 +45,6 @@ export function createToolRuntime(
     return `'${String(s).replace(/'/g, `'\\''`)}'`;
   }
 
-  // Build the `sh -lc` exec opts for an exec/codeterm tool call, or an error
-  // result if required args are missing. The command runs async (host.exec.start)
-  // so a multi-second tool exec never holds the shared VM lock.
   function execShellCmd(call: ToolCall): { shellCmd?: string; error?: string } {
     if (call.tool === "exec") {
       const cmd = typeof call.args.cmd === "string" ? call.args.cmd : "";
@@ -88,9 +81,6 @@ export function createToolRuntime(
     return parseJson<ExecPoll>(host.execPoll(jobId), { done: true, error: "host.exec.poll returned non-JSON" });
   }
 
-  // Shape the terminal poll into the same `{code, stdout, stderr}` (+ optional
-  // error) object the old blocking exec returned, so tool_result rendering is
-  // byte-for-byte identical from the user's view.
   function execResultFromPoll(poll: ExecPoll): Record<string, unknown> {
     const result: Record<string, unknown> = {};
     if (typeof poll.code === "number") result.code = poll.code;
@@ -104,9 +94,6 @@ export function createToolRuntime(
     return JSON.stringify({ tool: call.tool, args: call.args, result }, null, 2);
   }
 
-  // Mirrors the host's tri-state contract: "ok" carries entries to execute,
-  // "none" is a normal assistant message, "malformed" is a tool-call-shaped block
-  // that failed parse+repair and must be retried (never silently dropped).
   type ParseStatus = "ok" | "none" | "malformed";
 
   interface ParsedTools {
@@ -116,8 +103,6 @@ export function createToolRuntime(
     reason?: string;
   }
 
-  // Remove the given (executed) spans from the displayed text and tidy whitespace,
-  // so the user sees clean prose + the tool card instead of the raw call syntax.
   function stripSpans(text: string, spans: { start: number; end: number }[]): string {
     if (!spans.length) return text;
     const ordered = [...spans].sort((a, b) => a.start - b.start);
@@ -164,12 +149,6 @@ export function createToolRuntime(
     return { start, end };
   }
 
-  // Delegate extraction/repair/validation to the host's Rust parser. It returns a
-  // tri-state JSON string: {status:"ok",tool,args,span} for a validated call,
-  // {status:"none"} for plain prose, or {status:"malformed",reason} for a
-  // tool-call-shaped block that survived neither parse nor repair (-> retry, not
-  // drop). A parser throw is degraded to "none" so a single bad call never crashes
-  // the turn.
   function parseToolEntries(text: string): ParsedTools {
     let raw = "";
     try {
@@ -178,7 +157,6 @@ export function createToolRuntime(
       host.log("warn", `host.toolcall.parse failed: ${String(e)}`);
       return { entries: [], cleaned: text, status: "none" };
     }
-    // Tolerate the legacy "null"/non-JSON shapes by degrading to "none".
     const parsed = parseJson<ParsedToolCall | null>(raw, null);
     if (!parsed || typeof parsed !== "object") return { entries: [], cleaned: text, status: "none" };
 
@@ -207,8 +185,6 @@ export function createToolRuntime(
     return JSON.stringify(call.args);
   }
 
-  // Sync tools only. exec/codeterm are dispatched separately via the async
-  // host.exec.start/poll path (see advanceTools) so they never block the VM.
   function executeTool(call: ToolCall): unknown {
     switch (call.tool) {
       case "read_file": {
