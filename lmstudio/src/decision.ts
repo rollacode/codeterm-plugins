@@ -44,6 +44,7 @@ const MAX_TOP_LOGPROBS = 20;
 const CONSTRAINED_CHOICE_BATCH_SIZE = 12;
 const MAX_CONSTRAINED_CHOICE_LABELS = 36;
 let defaultLoadedModel = "";
+let selectedModel = "";
 const approximateModels = new Set<string>();
 
 function settings(): DecisionSettings {
@@ -133,7 +134,16 @@ function modelList(): DecisionModelInfo[] {
   return requestModelList((models) => models);
 }
 
+function configuredModel(): string {
+  const config = settings();
+  const decisionModel = config.decision?.model;
+  if (typeof decisionModel === "string" && decisionModel.trim()) return decisionModel.trim();
+  if (typeof config.model === "string" && config.model.trim()) return config.model.trim();
+  return "";
+}
+
 function withSelectedModel<T>(then: (model: string) => T): T {
+  if (selectedModel) return then(selectedModel);
   const config = settings();
   const decisionModel = config.decision?.model;
   if (typeof decisionModel === "string" && decisionModel.trim()) return then(decisionModel.trim());
@@ -714,6 +724,14 @@ const decisionModel: DecisionModelCapability = {
     }
   },
   models: modelList,
+  modelId: () => selectedModel || configuredModel() || defaultLoadedModel || null,
+  selectModel(id) {
+    // The host checks catalogue membership before calling; an empty id is the only refusal here.
+    if (!id) return false;
+    selectedModel = id;
+    return true;
+  },
+  metadata: () => ({ display_name: "LM Studio", server_address: apiUrl("").replace(/\/v1$/, "") }),
   primitives: () => ({ choice: true, noul: true, score: true }),
 };
 

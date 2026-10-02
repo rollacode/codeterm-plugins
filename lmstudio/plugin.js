@@ -68,6 +68,7 @@ var MAX_TOP_LOGPROBS = 20;
 var CONSTRAINED_CHOICE_BATCH_SIZE = 12;
 var MAX_CONSTRAINED_CHOICE_LABELS = 36;
 var defaultLoadedModel = "";
+var selectedModel = "";
 var approximateModels = /* @__PURE__ */ new Set();
 function settings() {
   try {
@@ -134,7 +135,15 @@ function requestModelList(then) {
 function modelList() {
   return requestModelList((models) => models);
 }
+function configuredModel() {
+  const config = settings();
+  const decisionModel2 = config.decision?.model;
+  if (typeof decisionModel2 === "string" && decisionModel2.trim()) return decisionModel2.trim();
+  if (typeof config.model === "string" && config.model.trim()) return config.model.trim();
+  return "";
+}
 function withSelectedModel(then) {
+  if (selectedModel) return then(selectedModel);
   const config = settings();
   const decisionModel2 = config.decision?.model;
   if (typeof decisionModel2 === "string" && decisionModel2.trim()) return then(decisionModel2.trim());
@@ -664,6 +673,13 @@ var decisionModel = {
     }
   },
   models: modelList,
+  modelId: () => selectedModel || configuredModel() || defaultLoadedModel || null,
+  selectModel(id) {
+    if (!id) return false;
+    selectedModel = id;
+    return true;
+  },
+  metadata: () => ({ display_name: "LM Studio", server_address: apiUrl("").replace(/\/v1$/, "") }),
   primitives: () => ({ choice: true, noul: true, score: true })
 };
 var decision_default = decisionModel;

@@ -2103,6 +2103,16 @@ test("decision_models_marks_models_after_approximate_fallback", () => {
   assert(models[0].display_name === "Catalog Model (approximate fallback)", "model info marks constrained fallback as approximate");
 });
 
+test("decision_select_model_applies_without_a_fetch_and_reports_the_model_id", () => {
+  reset({ decision: { model: "configured-model" } });
+  asyncFetchHandler = () => { throw new Error("selectModel must not fetch"); };
+  assert(plugin.modelId() === "configured-model", "configured model is reported before selection");
+  assert(plugin.selectModel("other-model") === true, "a host-verified id is applied");
+  assert(plugin.modelId() === "other-model", "the applied model is reported back");
+  assert(plugin.selectModel("") === false, "an empty id is refused");
+  assert(plugin.metadata().display_name === "LM Studio", "metadata names the adapter");
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try { fn(); console.log(`✓ ${name}`); }
