@@ -53,7 +53,8 @@ const tests = [
     const fixture = join(dir, "argv.cjs");
     writeFileSync(fixture, "process.stdout.write(JSON.stringify(process.argv.slice(2)))");
     const text = "first\r\nsecond\n'quoted' \"double\" $HOME `literal` $(throw 'executed') \\ путь ☃\n"
-      + String.raw`one\"two\\"three` + "\n";
+      + String.raw`one\"two\\"three` + "\n"
+      + "\u2018single\u2019 \u201cdouble\u201d -= marker \u201a \u201b \u201e \u201f\n";
     const shells = process.platform === "win32"
       ? [["windows", "powershell.exe"], ["windows", "pwsh.exe"], ["linux", "C:/Program Files/Git/bin/bash.exe"]]
       : [["linux", "bash"], ...(process.platform === "darwin" ? [["macos", "zsh"]] : [])];

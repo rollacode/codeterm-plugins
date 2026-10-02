@@ -55,10 +55,12 @@ interface ModelsCache {
 function quote(value: string): string {
   const text = String(value || "");
   const platform = host.platform();
-  if (!/[\r\n]/.test(text) && !(platform === "windows" && text.includes('"'))) {
+  const special = platform === "windows" ? /([\r\n\u2018-\u201f])/ : /([\r\n])/;
+  if (!special.test(text) && !(platform === "windows" && text.includes('"'))) {
     return host.shell.quoteFor(text, platform);
   }
-  const parts = text.split(/([\r\n])/).map((part) => {
+  const parts = text.split(special).map((part) => {
+    if (platform === "windows" && special.test(part)) return `[char]${part.charCodeAt(0)}`;
     if (part === "\n") return platform === "windows" ? "[char]10" : "$'\\n'";
     if (part === "\r") return platform === "windows" ? "[char]13" : "$'\\r'";
     return host.shell.quoteFor(part, platform);
