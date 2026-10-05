@@ -1,0 +1,10 @@
+{
+  "name": "@codeterm/plugin-telegram-client",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only Telegram account, chat, and bounded history access for CodeTerm.",
+  "devDependencies": {
+    "@codeterm/plugin-sdk": "^1.10.22"
+  }
+}

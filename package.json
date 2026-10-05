@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Andrey's CodeTerm capability plugins — Git, Transcriber, Bitwarden. Authored in TypeScript against @codeterm/plugin-sdk, built to QuickJS-compatible plugin.js + split UI bundles.",
+  "description": "Andrey's CodeTerm capability plugins — Git, Transcriber, Bitwarden, Telegram. Authored in TypeScript against @codeterm/plugin-sdk, built to QuickJS-compatible plugin.js + split UI bundles.",
   "license": "ISC",
   "repository": {
     "type": "git",
@@ -11,13 +11,13 @@
   },
   "scripts": {
     "build": "node scripts/build-plugin.mjs",
-    "build:all": "node scripts/build-plugin.mjs git && node scripts/build-plugin.mjs bitwarden && node scripts/build-plugin.mjs transcriber && node scripts/build-plugin.mjs lmstudio && node scripts/build-plugin.mjs chat-preprocessor",
+    "build:all": "node scripts/build-plugin.mjs git && node scripts/build-plugin.mjs bitwarden && node scripts/build-plugin.mjs transcriber && node scripts/build-plugin.mjs lmstudio && node scripts/build-plugin.mjs chat-preprocessor && node scripts/build-plugin.mjs telegram-client",
     "typecheck": "tsc --noEmit",
-    "test": "npx tsx git/plugin.test.cjs && npx tsx bitwarden/plugin.test.cjs && npx tsx lmstudio/plugin.test.cjs && npx tsx chat-preprocessor/plugin.test.cjs && npx tsx transcriber/plugin.test.cjs"
+    "test": "npx tsx git/plugin.test.cjs && npx tsx bitwarden/plugin.test.cjs && npx tsx lmstudio/plugin.test.cjs && npx tsx chat-preprocessor/plugin.test.cjs && npx tsx transcriber/plugin.test.cjs && npx tsx telegram-client/plugin.test.cjs"
   },
   "devDependencies": {
-    "@codeterm/chat-engine": "file:../codeterm-canvas/packages/chat-engine",
-    "@codeterm/plugin-sdk": "file:../codeterm-canvas/packages/plugin-sdk",
+    "@codeterm/chat-engine": "file:../codeterm/packages/chat-engine",
+    "@codeterm/plugin-sdk": "file:../codeterm/packages/plugin-sdk",
     "@git-diff-view/react": "^0.1.5",
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.14",
