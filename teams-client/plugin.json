@@ -1,0 +1,63 @@
+{
+  "id": "teams-client",
+  "version": "1.0.0",
+  "minCodeterm": "1.0.0",
+  "hostApi": 2,
+  "displayName": "Teams Client",
+  "description": "Sign in to Microsoft Teams and let agents list chats and read bounded recent history. Sending is disabled in this slice.",
+  "readme": "README.md",
+  "iconHint": "💬",
+  "iconColor": "#6264A7",
+  "entry": "plugin.js",
+  "capabilities": {
+    "view": true,
+    "glanceView": true
+  },
+  "permissions": {
+    "subprocess": {
+      "allow": [
+        "m365",
+        "m365.cmd",
+        "npm",
+        "npm.cmd",
+        "node",
+        "node.exe",
+        "open",
+        "xdg-open",
+        "powershell.exe",
+        "chmod",
+        "icacls.exe",
+        "whoami.exe"
+      ]
+    }
+  },
+  "sessions": {
+    "rootDir": "~/.local/share/codeterm-plugins/teams-client"
+  },
+  "credentials": [
+    {
+      "id": "teams-m365-msal-cache",
+      "file": "~/.local/share/codeterm-plugins/teams-client/m365-home/.cli-m365-msal.json",
+      "public": {},
+      "secret": {}
+    },
+    {
+      "id": "teams-m365-current-connection",
+      "file": "~/.local/share/codeterm-plugins/teams-client/m365-home/.cli-m365-connection.json",
+      "public": {
+        "accountId": "identityId",
+        "upn": "identityName",
+        "tenantId": "identityTenantId"
+      },
+      "secret": {}
+    },
+    {
+      "id": "teams-m365-all-connections",
+      "file": "~/.local/share/codeterm-plugins/teams-client/m365-home/.cli-m365-all-connections.json",
+      "public": {},
+      "secret": {}
+    }
+  ],
+  "settingsSchema": "settings.schema.json",
+  "configHelp": "Open the Teams Client view and click Sign in. The pinned m365 CLI installs into the plugin-owned runtime path during that action when Node.js 20+ and npm are available. Sign-in opens the browser for the owner's work/school account. Agent verbs: `accounts`; `use <account-id>`; `chats`; `history <chat-id> [n]`; `health`; `logout`. `send` and `preview` return an explicit refusal because sending is not enabled in this slice. History is capped at 50 messages and 32 KiB. Agent commands require the host grant `agent_commands` after plugin installation."
+}
