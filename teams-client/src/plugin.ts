@@ -4,9 +4,9 @@ const VERSION = "11.11.0";
 const PACKAGE = "@pnp/cli-microsoft365";
 const CLIENT_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
 const ROOT = "~/.local/share/codeterm-plugins/teams-client";
+const INITIAL_SEND_POLICY_MODE = "single-chat";
 const MAX_COUNT = 50;
 const MAX_BYTES = 32 * 1024;
-const SEND_DISABLED = "The send path is not enabled in this slice.";
 const PERSONAL_TENANT_ID = "9188040d-6c67-4c5b-b112-36a304b66dad";
 const SRI = "sha512-GXdN3Cw4lOEFixVfI6YZlGM9OzAlMbjGItT8yMn8FznlG6+aWGNI6xjgNJRbigykeSE6YI3KRai+fijMt24DMg==";
 const INTEGRITY_BY_TARGET: Record<string, string> = {
@@ -19,12 +19,20 @@ const INTEGRITY_BY_TARGET: Record<string, string> = {
 };
 const METADATA_READER = "const path=require('node:path');const {pathToFileURL}=require('node:url');const authFile=path.resolve(process.env.M365_RUNTIME,'node_modules/@pnp/cli-microsoft365/dist/Auth.js');import(pathToFileURL(authFile).href).then(async m=>{const a=m.default;await a.restoreAuth();const c=a.connection||{};const expiry=c.accessTokens&&c.accessTokens['https://graph.microsoft.com']&&c.accessTokens['https://graph.microsoft.com'].expiresOn;const all=await a.getAllConnections();const project=x=>({name:x.name||null,accountId:x.identityId||x.name||null,identityId:x.identityId||null,tenantId:x.identityTenantId||null,upn:x.identityName||null});process.stdout.write(JSON.stringify({active:c.active?project(c):null,expiresOn:expiry?String(expiry):null,connections:all.map(project)}));}).catch(()=>process.stdout.write(JSON.stringify({active:null,expiresOn:null,connections:[]})));";
 
-type Paths = { root: string; home: string; runtime: string; binary: string; npmCache: string; msal: string; current: string; all: string };
+type Paths = { root: string; home: string; runtime: string; binary: string; npmCache: string; msal: string; current: string; all: string; outbox: string; policy: string };
 type RunResult = { ok: true; stdout: string; stderr: string } | { ok: false; error: string; stderr: string; code?: number };
 type Target = { platform: string; arch: string; node: string; npm: string; m365: string; integrity: string };
 type StateResult = { state: string; message: string; accountId?: string | null; upn?: string | null; tenantId?: string | null; expiresOn?: string | null; accounts?: any[] };
 
 const loginJobs: Record<string, boolean> = {};
+const previewTokens: Record<string, any> = {};
+let cachedChats: { identityKey: string; chats: any[] } | null = null;
+let injectedClock: (() => number) | null = null;
+let lastSendState: { state: string; message: string; updatedAt: number } | null = null;
+
+function clearPreviewTokens(): void {
+  for (const id of Object.keys(previewTokens)) delete previewTokens[id];
+}
 
 function joinPath(...parts: string[]): string {
   return host.path.normalize(parts.join("/"));
@@ -50,6 +58,8 @@ function paths(): Paths | null {
       msal: joinPath(home, ".cli-m365-msal.json"),
       current: joinPath(home, ".cli-m365-connection.json"),
       all: joinPath(home, ".cli-m365-all-connections.json"),
+      outbox: joinPath(root, "outbox.json"),
+      policy: joinPath(root, "send-policy.json"),
     };
   } catch {
     return null;
@@ -222,8 +232,8 @@ function authState(text: string): { state: string; message: string } | null {
   if (/AADSTS50076|AADSTS50079|multi[ -]?factor|\bMFA\b|additional authentication is required/i.test(value)) {
     return { state: "mfa-required", message: "Complete the MFA step in the Microsoft browser sign-in, then click Sign in again in Teams Client." };
   }
-  if (/AADSTS65001|consent_required|consent (?:was )?not granted|admin consent/i.test(value)) {
-    return { state: "consent-not-granted", message: "The requested Microsoft Graph consent is not recorded. If your tenant allows user consent, click Sign in again and approve the prompt; if it restricts user consent, ask a tenant administrator to approve the m365 app's requested permissions, then click Sign in again." };
+  if (/AADSTS65001|AADSTS65004|consent_required|consent[^\n]*(?:not granted|withdrawn|revoked|removed)|(?:withdrawn|revoked|removed)[^\n]*consent|admin consent/i.test(value)) {
+    return { state: "consent-not-granted", message: "Microsoft Graph consent is missing or was withdrawn. If your tenant allows user consent, click Sign in again and review the consent prompt; otherwise ask a tenant administrator to approve the m365 app's requested permissions, then click Sign in again." };
   }
   if (/AADSTS50173|refresh token[^\n]*(?:revoked|invalidated)|(?:revoked|invalidated)[^\n]*refresh token/i.test(value)) {
     return { state: "refresh-token-revoked", message: "The Microsoft refresh token was revoked. Click Sign in again to create a new browser session." };
@@ -265,6 +275,188 @@ function credentialPublic(id: string, expectedFile: string, p: Paths): any | nul
 
 function currentPublic(p: Paths): any | null {
   return credentialPublic("teams-m365-current-connection", p.current, p);
+}
+
+function now(): number {
+  const value = injectedClock ? Number(injectedClock()) : Date.now();
+  return Number.isFinite(value) ? value : Date.now();
+}
+
+function sha256Hex(text: string): string {
+  const bytes: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    let code = text.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+      const low = text.charCodeAt(i + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) { code = 0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00); i++; }
+      else code = 0xfffd;
+    } else if (code >= 0xdc00 && code <= 0xdfff) code = 0xfffd;
+    if (code < 0x80) bytes.push(code);
+    else if (code < 0x800) bytes.push(0xc0 | (code >> 6), 0x80 | (code & 63));
+    else if (code < 0x10000) bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 63), 0x80 | (code & 63));
+    else bytes.push(0xf0 | (code >> 18), 0x80 | ((code >> 12) & 63), 0x80 | ((code >> 6) & 63), 0x80 | (code & 63));
+  }
+  const bitLength = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  const high = Math.floor(bitLength / 0x100000000);
+  const low = bitLength >>> 0;
+  for (let shift = 24; shift >= 0; shift -= 8) bytes.push((high >>> shift) & 255);
+  for (let shift = 24; shift >= 0; shift -= 8) bytes.push((low >>> shift) & 255);
+  const constants = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+  const state = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  const words = new Array<number>(64);
+  const rotate = (value: number, bits: number) => (value >>> bits) | (value << (32 - bits));
+  for (let offset = 0; offset < bytes.length; offset += 64) {
+    for (let i = 0; i < 16; i++) {
+      const at = offset + i * 4;
+      words[i] = ((bytes[at] << 24) | (bytes[at + 1] << 16) | (bytes[at + 2] << 8) | bytes[at + 3]) >>> 0;
+    }
+    for (let i = 16; i < 64; i++) {
+      const x = words[i - 15];
+      const y = words[i - 2];
+      const s0 = rotate(x, 7) ^ rotate(x, 18) ^ (x >>> 3);
+      const s1 = rotate(y, 17) ^ rotate(y, 19) ^ (y >>> 10);
+      words[i] = (words[i - 16] + s0 + words[i - 7] + s1) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, h] = state;
+    for (let i = 0; i < 64; i++) {
+      const sum1 = rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25);
+      const choice = (e & f) ^ (~e & g);
+      const t1 = (h + sum1 + choice + constants[i] + words[i]) >>> 0;
+      const sum0 = rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22);
+      const majority = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (sum0 + majority) >>> 0;
+      h = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+    }
+    state[0] = (state[0] + a) >>> 0; state[1] = (state[1] + b) >>> 0;
+    state[2] = (state[2] + c) >>> 0; state[3] = (state[3] + d) >>> 0;
+    state[4] = (state[4] + e) >>> 0; state[5] = (state[5] + f) >>> 0;
+    state[6] = (state[6] + g) >>> 0; state[7] = (state[7] + h) >>> 0;
+  }
+  return state.map((value) => value.toString(16).padStart(8, "0")).join("");
+}
+
+type Sender = { id: string; accountId: string; tenantId: string; upn: string; identityKey: string };
+
+function senderFromFields(fields: any): Sender | null {
+  const accountId = String(fields && fields.accountId || "");
+  const tenantId = String(fields && fields.tenantId || "");
+  const upn = String(fields && fields.upn || "");
+  if (!accountId || !tenantId || !upn) return null;
+  return { id: accountId, accountId, tenantId, upn, identityKey: JSON.stringify([accountId, tenantId]) };
+}
+
+function previewSender(): { sender: Sender } | { error: string } {
+  const p = paths();
+  const sender = p ? senderFromFields(currentPublic(p)) : null;
+  if (!sender) return { error: "not-logged-in: Sign in with the intended work or school account and confirm that its tenant is available before previewing." };
+  return { sender };
+}
+
+function liveSender(): { sender: Sender } | { error: string } {
+  const current = status();
+  const reauthStates = ["conditional-access-blocked", "mfa-required", "consent-not-granted", "refresh-token-revoked", "token-expired"];
+  if (reauthStates.includes(current.state)) return { error: `reauth-needed: ${current.state}. ${current.message}` };
+  if (current.state === "reauth-needed") return { error: `reauth-needed: session status needs attention. ${current.message} Review the tenant sign-in and click Sign in again.` };
+  if (["logged-out", "installed-not-configured"].includes(current.state)) return { error: "not-logged-in: Sign in to Teams Client with the intended work or school account before sending." };
+  if (current.state !== "logged-in") return { error: `upstream-rejected: ${current.message} Resolve the Teams Client prerequisite, then review the preview again before sending.` };
+  const sender = senderFromFields(current);
+  if (!sender) return { error: "upstream-rejected: The active account, UPN, and tenant could not all be resolved. Refresh Teams Client status before approving a send." };
+  if (sender.tenantId.toLowerCase() === PERSONAL_TENANT_ID) {
+    return { error: "upstream-rejected: Delegated Teams chat send requires a work or school tenant. Sign in with the intended work or school account, then preview again." };
+  }
+  return { sender };
+}
+
+function policySummary(): any {
+  const p = paths();
+  if (!p) return { configured: false, mode: null, senderAccountId: null, senderTenantId: null, allowedDestinations: [] };
+  let policy: any = null;
+  try { policy = parseJson<any>(host.fs.readFile(p.policy) || ""); } catch { policy = null; }
+  const destinations = policy && Array.isArray(policy.allowedDestinations) ? policy.allowedDestinations : [];
+  if (!policy || policy.approved !== true || policy.mode !== INITIAL_SEND_POLICY_MODE ||
+    typeof policy.senderAccountId !== "string" || !policy.senderAccountId ||
+    typeof policy.senderTenantId !== "string" || !policy.senderTenantId || destinations.length !== 1 ||
+    !destinations[0] || !validChatId(String(destinations[0].id || "")) || typeof destinations[0].label !== "string") {
+    return { configured: false, mode: null, senderAccountId: null, senderTenantId: null, allowedDestinations: [] };
+  }
+  return {
+    configured: true,
+    mode: INITIAL_SEND_POLICY_MODE,
+    senderAccountId: policy.senderAccountId,
+    senderTenantId: policy.senderTenantId,
+    allowedDestinations: [{ id: String(destinations[0].id), label: String(destinations[0].label) }],
+    approvedAt: Number(policy.approvedAt) || null,
+  };
+}
+
+function resolveDestination(id: string, sender: Sender): { destination: any } | { error: string } {
+  if (!validChatId(id)) return { error: "destination-not-permitted: Usage: preview <immutable-chat-id> <text>. Choose an id from chats; display labels are not ids." };
+  if (!cachedChats || cachedChats.identityKey !== sender.identityKey) {
+    return { error: "upstream-rejected: Refresh chats for this account and tenant, then preview an immutable chat id." };
+  }
+  const chat = cachedChats.chats.find((item: any) => item.id === id);
+  if (!chat) return { error: `destination-not-permitted: Chat id ${id} was not in the resolved chat list for tenant ${sender.tenantId}. Refresh chats and choose a listed id.` };
+  return { destination: { id: String(chat.id), label: String(chat.topic || chat.id) } };
+}
+
+let previewSequence = 0;
+function previewCommand(args: string[]): { result: string } | { error: string } {
+  if (args.length < 2 || !validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> <text>. Choose an id from chats; display labels are not accepted." };
+  const text = args.slice(1).join(" ");
+  if (!text.length) return { error: "upstream-rejected: Preview text must not be empty." };
+  const resolved = previewSender();
+  if ("error" in resolved) return resolved;
+  const found = resolveDestination(args[0], resolved.sender);
+  if ("error" in found) return found;
+  const idempotencyKey = sha256Hex(`${resolved.sender.identityKey}\u0000${found.destination.id}\u0000${text}`);
+  const previewId = sha256Hex(`${resolved.sender.identityKey}\u0000${found.destination.id}\u0000${text}\u0000${++previewSequence}`);
+  previewTokens[previewId] = { sender: resolved.sender, destination: found.destination, text };
+  return { result: JSON.stringify({
+    previewId,
+    idempotencyKey,
+    sender: resolved.sender,
+    tenant: { id: resolved.sender.tenantId },
+    destination: found.destination,
+    text,
+    policy: policySummary(),
+  }) };
+}
+
+function setSendPolicy(args: any): any {
+  if (!args || args.approveDestination !== true) return { error: "No send policy was changed. Review the full sender, tenant, destination, and text preview, then explicitly approve that single chat." };
+  const preview = previewTokens[String(args.previewId || "")];
+  if (!preview) return { error: "Preview is unavailable. Refresh chats and create a fresh preview before approving a destination." };
+  const current = liveSender();
+  if ("error" in current) return { error: current.error };
+  if (current.sender.identityKey !== preview.sender.identityKey || current.sender.upn !== preview.sender.upn) {
+    return { error: "destination-not-permitted: The signed-in account or tenant changed after preview. Confirm a fresh preview before approval." };
+  }
+  const p = paths();
+  if (!p) return { error: "upstream-rejected: The Teams Client data directory is unavailable; no policy was written." };
+  try {
+    if (!host.fs.makeDirs(p.root)) return { error: "upstream-rejected: The Teams Client data directory could not be created; no policy was written." };
+    const saved = host.fs.writeFile(p.policy, JSON.stringify({
+      approved: true,
+      mode: INITIAL_SEND_POLICY_MODE,
+      senderAccountId: preview.sender.accountId,
+      senderTenantId: preview.sender.tenantId,
+      allowedDestinations: [{ id: preview.destination.id, label: preview.destination.label }],
+      approvedAt: now(),
+    }));
+    if (saved !== true) return { error: "upstream-rejected: The single-chat policy could not be saved; no destination is enabled." };
+  } catch { return { error: "upstream-rejected: The single-chat policy could not be saved; no destination is enabled." }; }
+  return { result: JSON.stringify(policySummary()) };
 }
 
 function metadataFromM365(p: Paths): any | null {
@@ -401,17 +593,9 @@ function useAccount(id: string): { result: string } | { error: string } {
   const current = currentPublic(p) || {};
   const refreshed = metadataFromM365(p) || {};
   const active = refreshed.active || {};
+  cachedChats = null;
+  clearPreviewTokens();
   return { result: JSON.stringify({ accountId: String(current.accountId || active.accountId || selected.name), tenantId: String(current.tenantId || active.tenantId || ""), upn: String(current.upn || active.upn || selected.connectedAs || "") }) };
-}
-
-function sendRefusal(): string {
-  const p = paths();
-  const publicFields = p ? currentPublic(p) || {} : {};
-  const tenantId = String(publicFields.tenantId || "").toLowerCase();
-  if (tenantId === PERSONAL_TENANT_ID) {
-    return `${SEND_DISABLED} A personal Microsoft account is unsupported on POST /chats/{chat-id}/messages in Graph v1.0 with delegated ChatMessage.Send.`;
-  }
-  return SEND_DISABLED;
 }
 
 function validChatId(value: string): boolean {
@@ -433,6 +617,8 @@ function agentChats(): { result: string } | { error: string } {
       lastUpdatedDateTime: typeof raw.lastUpdatedDateTime === "string" ? raw.lastUpdatedDateTime : null,
     }];
   });
+  const sender = previewSender();
+  cachedChats = "sender" in sender ? { identityKey: sender.sender.identityKey, chats } : null;
   return { result: JSON.stringify({ chats }) };
 }
 
@@ -539,11 +725,267 @@ function agentHistory(args: string[]): { result: string } | { error: string } {
   return { result: JSON.stringify(result) };
 }
 
+type AttemptState = "pending" | "sent" | "rate_limited" | "failed" | "unknown";
+type SendFailure = "not-logged-in" | "reauth-needed" | "policy-not-set" | "destination-not-permitted" | "rate-limited" | "upstream-rejected" | "unknown";
+type Attempt = {
+  idempotencyKey: string;
+  sender: Sender;
+  destination: { id: string; label: string };
+  payloadHash: string;
+  state: AttemptState;
+  createdAt: number;
+  updatedAt: number;
+  sendCount: number;
+  failure?: SendFailure;
+  failureCause?: string;
+  failureMessage?: string;
+  retryAfter?: number;
+  graphMessageId?: string;
+};
+type Outbox = { schema: 1; attempts: Attempt[] };
+
+function failureMessage(kind: SendFailure, detail?: any, cause?: string): string {
+  switch (kind) {
+    case "not-logged-in": return "not-logged-in: Open Teams Client, sign in with the intended work or school account, and confirm its tenant before sending.";
+    case "reauth-needed": return `reauth-needed: ${String(cause || "reauth-needed")}. ${String(detail || "The Microsoft session needs a new sign-in. Click Sign in again and complete the tenant's required authentication step.")}`;
+    case "policy-not-set": return "policy-not-set: Review the resolved account, tenant, destination, and exact text in Teams Client, then explicitly approve that single chat before sending.";
+    case "destination-not-permitted": return `destination-not-permitted: Only the owner's approved immutable chat id is allowed (${String(detail || "no destination is approved")}). Select that exact chat or review a new preview before changing policy.`;
+    case "rate-limited": return `rate-limited: Microsoft 365 asked this account to wait until ${Number(detail) || 0}. Invoke send again after that recorded deadline; Teams Client will not wait or retry automatically.`;
+    case "upstream-rejected": return `upstream-rejected: m365 refused the operation (${String(detail || "inspect the Microsoft 365 error and correct its cause")}). Correct the permission or request issue, then invoke send again only if you still want delivery.`;
+    case "unknown": return "unknown: Microsoft 365 may have accepted this message but confirmation was lost. Do not retry this idempotency key; inspect the selected chat and decide manually.";
+  }
+  const exhaustive: never = kind;
+  return exhaustive;
+}
+
+function loadOutbox(p: Paths): { ledger?: Outbox; error?: string } {
+  try {
+    if (!host.fs.fileExists(p.outbox)) return { ledger: { schema: 1, attempts: [] } };
+    const value = parseJson<any>(host.fs.readFile(p.outbox) || "");
+    if (!value || value.schema !== 1 || !Array.isArray(value.attempts)) return { error: "the existing outbox ledger is unreadable" };
+    const states: AttemptState[] = ["pending", "sent", "rate_limited", "failed", "unknown"];
+    const valid = value.attempts.every((item: any) => item && typeof item.idempotencyKey === "string" &&
+      typeof item.payloadHash === "string" && /^[a-f0-9]{64}$/.test(item.payloadHash) && states.includes(item.state) &&
+      item.sender && typeof item.sender.accountId === "string" && typeof item.sender.tenantId === "string" &&
+      typeof item.sender.identityKey === "string" && item.destination && validChatId(String(item.destination.id || "")) &&
+      typeof item.destination.label === "string" && Number.isFinite(Number(item.createdAt)) &&
+      Number.isFinite(Number(item.updatedAt)) && Number.isInteger(item.sendCount) && item.sendCount >= 0 &&
+      (item.state !== "rate_limited" || Number.isFinite(Number(item.retryAfter))));
+    if (!valid) return { error: "the existing outbox ledger contains an invalid or unrecognized attempt state" };
+    return { ledger: value as Outbox };
+  } catch { return { error: "the existing outbox ledger could not be read" }; }
+}
+
+function persistOutbox(p: Paths, ledger: Outbox): boolean {
+  try {
+    if (!host.fs.makeDirs(p.root)) return false;
+    return host.fs.writeFile(p.outbox, JSON.stringify(ledger)) === true;
+  } catch { return false; }
+}
+
+function rememberSendFailure(kind: SendFailure, message: string): { error: string } {
+  lastSendState = { state: kind, message, updatedAt: now() };
+  return { error: message };
+}
+
+function sendFailureResult(kind: SendFailure, detail?: any, cause?: string): { error: string } {
+  return rememberSendFailure(kind, failureMessage(kind, detail, cause));
+}
+
+function rememberPrefixedFailure(message: string): { error: string } {
+  const state = message.slice(0, message.indexOf(":")) as SendFailure;
+  const allowed: SendFailure[] = ["not-logged-in", "reauth-needed", "policy-not-set", "destination-not-permitted", "rate-limited", "upstream-rejected", "unknown"];
+  return allowed.includes(state) ? rememberSendFailure(state, message) : sendFailureResult("upstream-rejected", "The command input could not be resolved; review its immutable ids and text.");
+}
+
+function parseSendArgs(args: string[]): { chatId: string; text: string; key?: string } | { error: string } {
+  if (args.length < 2 || !validChatId(args[0])) return { error: "destination-not-permitted: Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>. Choose an id from chats; labels are not ids." };
+  let start = 1;
+  let key: string | undefined;
+  if (args[1] === "--key") {
+    if (args.length < 4 || !/^[A-Za-z0-9._:-]{1,160}$/.test(args[2])) return { error: "upstream-rejected: --key needs a 1–160 character idempotency key, followed by message text." };
+    key = args[2];
+    start = 3;
+  }
+  const text = args.slice(start).join(" ");
+  if (!text.length) return { error: "upstream-rejected: Message text must not be empty." };
+  return { chatId: args[0], text, key };
+}
+
+function retryDeadline(message: string, currentTime: number): number | null {
+  const line = message.match(/retry[- ]after"?\s*["']?\s*[:=]\s*["']?([0-9]+(?:\.[0-9]+)?|[^\r\n]+)/i);
+  if (!line) return null;
+  const value = line[1].trim().replace(/^['"]|['"]$/g, "").replace(/[;,]+$/, "");
+  if (/^[0-9]+(?:\.[0-9]+)?$/.test(value)) return currentTime + Number(value) * 1000;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function failureForUpstream(message: string): { kind: SendFailure; detail?: string; cause?: string; retryAfter?: number } {
+  const auth = authState(message);
+  if (auth) return { kind: "reauth-needed", detail: auth.message, cause: auth.state };
+  if (/not signed in|not logged in|no active connection|logged out|run m365 login/i.test(message)) return { kind: "not-logged-in" };
+  if (/\b429\b|too many requests|throttl/i.test(message)) {
+    const deadline = retryDeadline(message, now());
+    return deadline === null
+      ? { kind: "upstream-rejected", detail: "m365 reported HTTP 429 but did not expose a usable Retry-After deadline; inspect Teams Client status before invoking again" }
+      : { kind: "rate-limited", retryAfter: deadline };
+  }
+  if (/timeout|timed out|deadline exceeded|connection reset|connection closed|unexpected EOF|\bEOF\b|broken pipe|lost response|context cancel+ed|terminated|signal|killed|did not finish|could not confirm|unconfirmed/i.test(message)) return { kind: "unknown" };
+  const code = message.match(/\b(?:HTTP|status(?: code)?)\s*[:=]?\s*(4\d\d|5\d\d)\b/i);
+  return { kind: "upstream-rejected", detail: code ? `HTTP ${code[1]}; inspect the Microsoft 365 permission or request detail, correct it, then review before retrying` : "m365 returned a definitive non-zero result; inspect Teams Client status and permissions before deciding whether to invoke again" };
+}
+
+function runTeamsSend(args: string[]): RunResult {
+  const target = targetState();
+  if (!target.paths) return { ok: false, error: target.message, stderr: "" };
+  if (target.state !== "ready") return { ok: false, error: target.message, stderr: "" };
+  const p = target.paths;
+  if (!host.fs.fileExists(p.binary)) return { ok: false, error: "m365 is not installed. Open Teams Client and sign in to install the pinned CLI.", stderr: "" };
+  const secured = protectStorage(p);
+  if (secured.error) return { ok: false, error: secured.message || "Could not secure the m365 runtime.", stderr: "" };
+  const securedCache = protectCacheFiles(p);
+  if (securedCache.error) return { ok: false, error: securedCache.message || "Could not protect m365 cache files before send.", stderr: "" };
+  let started: { jobId?: string; error?: string };
+  try { started = host.exec.start({ bin: nativePath(p.binary), args, env: envFor(p) }); }
+  catch (error) { return { ok: false, error: `Could not confirm m365 send process start: ${String(error)}`, stderr: "" }; }
+  if (!started || !started.jobId) return { ok: false, error: `Could not confirm m365 send process start: ${started && started.error || "no job id was returned"}`, stderr: "" };
+  let result: { done: boolean; code?: number; stdout?: string; stderr?: string; error?: string };
+  try { result = host.awaitJob(started.jobId, (value: any) => value); }
+  catch (error) { return { ok: false, error: `m365 send process outcome could not be confirmed: ${String(error)}`, stderr: "" }; }
+  if (!result || result.done === false) return { ok: false, error: "m365 send process did not finish; delivery outcome is unknown.", stderr: "" };
+  const stdout = String(result.stdout || "");
+  const stderr = String(result.stderr || "");
+  if (result.error) return { ok: false, error: `m365 send process returned an unconfirmed result: ${String(result.error)}`, stderr, code: result.code };
+  if (typeof result.code !== "number") return { ok: false, error: "m365 send process finished without an exit status; delivery outcome is unknown.", stderr };
+  if (result.code !== 0) return { ok: false, error: stderr || stdout || `m365 exited ${result.code}`, stderr, code: result.code };
+  return { ok: true, stdout, stderr };
+}
+
+function messageIdFromOutput(output: string): string | undefined {
+  const value = parseJson<any>(output.trim());
+  const data = value && (value.data || value);
+  const id = data && (data.id || data.messageId);
+  return id === undefined || id === null ? undefined : String(id);
+}
+
+function attemptResult(attempt: Attempt): { result: string } {
+  lastSendState = { state: "sent", message: "m365 confirmed the message and the sent result is recorded in the Teams Client outbox.", updatedAt: now() };
+  return { result: JSON.stringify({
+    status: "sent",
+    sender: attempt.sender,
+    tenant: { id: attempt.sender.tenantId },
+    destination: attempt.destination,
+    idempotencyKey: attempt.idempotencyKey,
+    graphMessageId: attempt.graphMessageId || null,
+    deliveryGuarantee: "The plugin returns a recorded success for a sent idempotency key and never resends that key. m365 does not surface the Graph message id on success; ambiguous outcomes remain unknown. This is not an exactly-once delivery guarantee.",
+  }) };
+}
+
+function persistFailure(p: Paths, ledger: Outbox, attempt: Attempt, kind: SendFailure, detail?: string, cause?: string, retryAfter?: number): { error: string } {
+  attempt.failure = kind;
+  attempt.failureCause = cause;
+  attempt.failureMessage = failureMessage(kind, kind === "rate-limited" ? retryAfter : detail, cause);
+  attempt.updatedAt = now();
+  if (kind === "rate-limited" && retryAfter !== undefined) {
+    attempt.state = "rate_limited";
+    attempt.retryAfter = retryAfter;
+  } else if (kind === "unknown") {
+    attempt.state = "unknown";
+    delete attempt.retryAfter;
+  } else {
+    attempt.state = "failed";
+    delete attempt.retryAfter;
+  }
+  if (!persistOutbox(p, ledger)) {
+    attempt.state = "unknown";
+    attempt.failure = "unknown";
+    attempt.failureCause = undefined;
+    attempt.failureMessage = failureMessage("unknown");
+    delete attempt.retryAfter;
+    persistOutbox(p, ledger);
+    return rememberSendFailure("unknown", attempt.failureMessage);
+  }
+  return rememberSendFailure(kind, attempt.failureMessage);
+}
+
+function sendCommand(sessionId: string, args: string[]): { result: string } | { error: string } {
+  const parsed = parseSendArgs(args);
+  if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
+  const policy = policySummary();
+  if (!policy.configured) return sendFailureResult("policy-not-set");
+  const permitted = policy.allowedDestinations.find((item: any) => item.id === parsed.chatId);
+  if (!permitted) return sendFailureResult("destination-not-permitted", policy.allowedDestinations[0]?.id);
+  const expectedIdentity = JSON.stringify([policy.senderAccountId, policy.senderTenantId]);
+  const key = parsed.key || sha256Hex(`${expectedIdentity}\u0000${parsed.chatId}\u0000${parsed.text}`);
+  const p = paths();
+  if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
+  const loaded = loadOutbox(p);
+  if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error || "the outbox could not be read");
+  const ledger = loaded.ledger;
+  let attempt = ledger.attempts.find((item) => item.idempotencyKey === key);
+  const payloadHash = sha256Hex(parsed.text);
+  if (attempt && (attempt.payloadHash !== payloadHash || attempt.destination.id !== parsed.chatId || attempt.sender.identityKey !== expectedIdentity)) {
+    return sendFailureResult("upstream-rejected", "this idempotency key is already bound to another tenant, sender, destination, or payload; choose a new key only for an intentional new send");
+  }
+  if (attempt && attempt.state === "sent") return attemptResult(attempt);
+  if (attempt && attempt.state === "unknown") return sendFailureResult("unknown");
+  if (attempt && attempt.state === "pending") return persistFailure(p, ledger, attempt, "unknown", "a previous invocation ended before its send result was recorded");
+  if (attempt && attempt.state === "rate_limited" && Number(attempt.retryAfter) > now()) return sendFailureResult("rate-limited", attempt.retryAfter);
+
+  const resolved = liveSender();
+  if ("error" in resolved) return rememberPrefixedFailure(resolved.error);
+  if (resolved.sender.accountId !== policy.senderAccountId || resolved.sender.tenantId !== policy.senderTenantId) {
+    return sendFailureResult("destination-not-permitted", `${permitted.id} for the approved account and tenant; the active account or tenant changed`);
+  }
+  const destination = { id: parsed.chatId, label: String(permitted.label || permitted.id) };
+  if (!attempt) {
+    attempt = {
+      idempotencyKey: key,
+      sender: resolved.sender,
+      destination,
+      payloadHash,
+      state: "pending",
+      createdAt: now(),
+      updatedAt: now(),
+      sendCount: 0,
+    };
+    ledger.attempts.push(attempt);
+  }
+  attempt.state = "pending";
+  attempt.updatedAt = now();
+  attempt.sendCount += 1;
+  delete attempt.failure;
+  delete attempt.failureCause;
+  delete attempt.failureMessage;
+  delete attempt.retryAfter;
+  if (!persistOutbox(p, ledger)) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; m365 was not contacted");
+
+  const run = runTeamsSend(["teams", "chat", "message", "send", "--chatId", parsed.chatId, "--message", parsed.text, "--output", "json"]);
+  if (!run.ok) {
+    const upstream = failureForUpstream(`${run.error}\n${run.stderr}`);
+    return persistFailure(p, ledger, attempt, upstream.kind, upstream.detail, upstream.cause, upstream.retryAfter);
+  }
+  attempt.graphMessageId = messageIdFromOutput(run.stdout);
+  attempt.state = "sent";
+  attempt.updatedAt = now();
+  delete attempt.failure;
+  delete attempt.failureCause;
+  delete attempt.failureMessage;
+  delete attempt.retryAfter;
+  if (!persistOutbox(p, ledger)) return persistFailure(p, ledger, attempt, "unknown");
+  return attemptResult(attempt);
+}
+
 function logout(): { result: string } | { error: string } {
   const target = targetState();
   if (target.state !== "ready") return { error: lifecycleMessage(target.state, target.message) };
   const p = target.paths!;
-  if (!host.fs.fileExists(p.binary)) return { result: "Logged out. No m365 runtime is installed." };
+  if (!host.fs.fileExists(p.binary)) {
+    cachedChats = null;
+    clearPreviewTokens();
+    return { result: "Logged out. No m365 runtime is installed." };
+  }
   const run = runM365(["logout"]);
   if (!run.ok) {
     const reauth = authState(`${run.error}\n${run.stderr}`);
@@ -553,6 +995,8 @@ function logout(): { result: string } | { error: string } {
   for (const file of [p.msal, p.current, p.all]) {
     if (host.fs.fileExists(file) && !host.fs.removeFile(file)) return { error: "m365 logged out, but a plugin-owned cache file could not be removed. Retry logout." };
   }
+  cachedChats = null;
+  clearPreviewTokens();
   return { result: "Logged out. The plugin-owned m365 token and connection files were removed." };
 }
 
@@ -563,11 +1007,10 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
     case "use": return args.length === 1 ? useAccount(args[0]) : { error: "Usage: use <account-id>." };
     case "chats": return agentChats();
     case "history": return agentHistory(args);
-    case "health": return { result: JSON.stringify(statusView()) };
+    case "health": return { result: JSON.stringify({ ...statusView(), sendPolicy: policySummary(), lastSend: lastSendState }) };
     case "logout": return logout();
-    case "send":
-      return { error: sendRefusal() };
-    case "preview": return { error: SEND_DISABLED };
+    case "send": return sendCommand(ctx.sessionId, args);
+    case "preview": return previewCommand(args);
     default: return { error: `Unknown Teams Client verb: ${ctx.verb}` };
   }
 }
@@ -620,6 +1063,11 @@ function viewCall(method: string, args: any): unknown {
   if (method === "loginPoll") return loginPoll(String(value.jobId || ""));
   if (method === "useAccount") return useAccount(String(value.id || ""));
   if (method === "logout") return logout();
+  if (method === "chats") return agentChats();
+  if (method === "policy") return policySummary();
+  if (method === "preview") return previewCommand([String(value.chatId || ""), String(value.text || "")]);
+  if (method === "approveSendPolicy") return setSendPolicy(value);
+  if (method === "send") return sendCommand("teams-client-view", [String(value.chatId || ""), "--key", String(value.idempotencyKey || ""), String(value.text || "")]);
   return { error: `Unknown Teams Client view method: ${method}` };
 }
 
@@ -631,6 +1079,9 @@ function renderGlance(): GlanceView {
   const connected = !!account.accountId;
   const nodes: ViewNode[] = [{ kind: "badge", label: connected ? "Connected" : installed ? "Sign-in needed" : "m365 not installed", tone: connected ? "ok" : installed ? "warn" : "muted" }];
   nodes.push({ kind: "text", text: connected ? `${account.upn || "Account resolved"} · ${account.tenantId || "tenant unavailable"}` : "Open Teams Client to check status or sign in.", style: { tone: "muted" } });
+  const policy = policySummary();
+  nodes.push({ kind: "text", text: policy.configured ? `Send policy: one chat · ${policy.allowedDestinations[0].id} · tenant ${policy.senderTenantId}` : "Send policy: not approved", style: { tone: policy.configured ? "warn" : "muted" } });
+  if (lastSendState) nodes.push({ kind: "text", text: `Last send: ${lastSendState.state} · ${lastSendState.message}`, style: { tone: lastSendState.state === "sent" ? "ok" : "warn" } });
   return { title: "Teams Client", nodes };
 }
 
@@ -646,7 +1097,16 @@ const plugin: PluginModule = {
   __test_envFor: envFor,
   __test_authState: authState,
   __test_personalTenantId: PERSONAL_TENANT_ID,
-  __test_sendRefusal: sendRefusal,
+  __test_failureMessage: failureMessage,
+  __test_failureForUpstream: failureForUpstream,
+  __test_retryDeadline: retryDeadline,
+  __test_setClock: (clock: (() => number) | null) => { injectedClock = clock; },
+  __test_policySummary: policySummary,
+  __test_previewCommand: previewCommand,
+  __test_setSendPolicy: setSendPolicy,
+  __test_sendCommand: sendCommand,
+  __test_agentChats: agentChats,
+  __test_sha256Hex: sha256Hex,
   __test_lifecycleMessage: lifecycleMessage,
   __test_accountRows: accountRows,
   __test_validChatId: validChatId,

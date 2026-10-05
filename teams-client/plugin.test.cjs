@@ -29,6 +29,7 @@ function mockHost(options = {}) {
   ];
   let currentName = options.currentName || (options.status === "logged-out" ? "" : connections[0]?.name || "");
   let nextJob = 0;
+  let sendMode = options.sendMode || "sent";
   const deniedFiles = new Set();
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "plugin.json"), "utf8"));
   const realUserM365 = normalize(`${home}/.cli-m365-connection.json`);
@@ -99,6 +100,17 @@ function mockHost(options = {}) {
       if (args[0] === "teams" && args[1] === "chat" && args[2] === "message" && args[3] === "list") {
         return { code: 0, stdout: JSON.stringify(options.messages || [{ id: "message-1", createdDateTime: "2026-10-05T10:00:00Z", from: "Owner", content: "A recent message" }]), stderr: "" };
       }
+      if (args[0] === "teams" && args[1] === "chat" && args[2] === "message" && args[3] === "send") {
+        if (typeof options.onSendStart === "function") options.onSendStart(plugin.__test_paths().outbox, args, envRecord);
+        if (sendMode === "timeout") return { code: 1, stdout: "", stderr: "request timed out after the Graph request was submitted" };
+        if (sendMode === "rate-limited") return { code: 1, stdout: "", stderr: "HTTP 429 Too Many Requests\nRetry-After: 30" };
+        if (sendMode === "refresh-token-revoked") return { code: 1, stdout: "", stderr: "AADSTS50173 refresh token was revoked" };
+        if (sendMode === "consent-withdrawn") return { code: 1, stdout: "", stderr: "AADSTS65001 Graph consent was withdrawn" };
+        if (sendMode === "conditional-access-blocked") return { code: 1, stdout: "", stderr: "AADSTS53003 Conditional Access blocked" };
+        if (sendMode === "mfa-required") return { code: 1, stdout: "", stderr: "AADSTS50076 MFA required" };
+        if (sendMode === "rejected") return { code: 1, stdout: "", stderr: "HTTP 403 Forbidden" };
+        return { code: 0, stdout: options.sendOutput || "", stderr: "" };
+      }
       if (args[0] === "logout") {
         currentName = "";
         for (const p of plugin.__test_paths() ? [plugin.__test_paths().msal, plugin.__test_paths().current, plugin.__test_paths().all] : []) files.delete(normalize(p));
@@ -111,6 +123,19 @@ function mockHost(options = {}) {
     }
     return { code: 0, stdout: "", stderr: "" };
   }
+
+  const envRecord = {
+    calls,
+    writes,
+    directories,
+    files,
+    deniedFiles,
+    realUserM365,
+    get currentName() { return currentName; },
+    setCurrentName(value) { currentName = value; },
+    setSendMode(value) { sendMode = value; },
+    cleanup() { globalThis.host = new Proxy({}, { get: () => () => { throw new Error("host called after test"); } }); },
+  };
 
   globalThis.host = {
     platform: () => platform,
@@ -149,6 +174,11 @@ function mockHost(options = {}) {
       expandHome,
       fileExists: (file) => files.has(normalize(file)),
       readFile: (file) => deniedFiles.has(expandHome(file)) ? null : (files.get(normalize(file)) || null),
+      readJson: (file) => {
+        const body = files.get(normalize(file));
+        if (body === undefined) return null;
+        return JSON.parse(body);
+      },
       writeFile: (file, body) => { writes.push(normalize(file)); files.set(normalize(file), body); return true; },
       removeFile: (file) => { files.delete(normalize(file)); return true; },
       makeDirs: (dir) => { directories.push(normalize(dir)); return true; },
@@ -165,17 +195,31 @@ function mockHost(options = {}) {
   if (!options.noInstalledBinary) files.set(normalize(initialPaths.binary), "pinned m365 shim");
   for (const item of manifest.credentials) deniedFiles.add(expandHome(item.file));
 
-  return {
-    calls,
-    writes,
-    directories,
-    files,
-    deniedFiles,
-    realUserM365,
-    get currentName() { return currentName; },
-    cleanup() { globalThis.host = new Proxy({}, { get: () => () => { throw new Error("host called after test"); } }); },
-  };
+  return envRecord;
 }
+
+function command(verb, args = [], sessionId = "send-test") {
+  return plugin.onAgentCommand({ sessionId, verb, args });
+}
+
+function approveSingleChat(chatId = "19:chat-a@thread.v2", text = "safe test message") {
+  const listed = command("chats");
+  assert.ok("result" in listed, listed.error || "chat list resolved");
+  const previewed = command("preview", [chatId, text]);
+  assert.ok("result" in previewed, previewed.error || "preview resolved");
+  const preview = JSON.parse(previewed.result);
+  const approved = plugin.viewCall("approveSendPolicy", { approveDestination: true, previewId: preview.previewId });
+  assert.ok(approved && approved.result, approved && approved.error || "single-chat policy saved");
+  return { preview, policy: JSON.parse(approved.result) };
+}
+
+function sendCalls(env) {
+  return env.calls.filter((call) => call.args[0] === "teams" && call.args[1] === "chat" && call.args[2] === "message" && call.args[3] === "send");
+}
+
+test("payload ledger hash uses SHA-256", () => {
+  assert.equal(plugin.__test_sha256Hex("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+});
 
 test("platform matrix resolves each OS and architecture with the pinned checksum", () => {
   for (const [os, arch] of [
@@ -210,6 +254,18 @@ test("Darwin never becomes Windows and Windows uses its platform path", () => {
     assert.equal(plugin.__test_platform(), "win32");
     assert.equal(plugin.__test_binaryNames(plugin.__test_platform()).m365, "m365.cmd");
   } finally { windows.cleanup(); }
+});
+
+test("Teams outbox and policy stay inside the Teams plugin data root", () => {
+  for (const platform of ["darwin", "linux", "win32"]) {
+    const env = mockHost({ platform, isWindows: platform === "win32" });
+    try {
+      const p = plugin.__test_paths();
+      assert.equal(path.posix.relative(normalize(p.root), normalize(p.outbox)), "outbox.json");
+      assert.equal(path.posix.relative(normalize(p.root), normalize(p.policy)), "send-policy.json");
+      assert.match(normalize(p.root), /teams-client$/);
+    } finally { env.cleanup(); }
+  }
 });
 
 test("pinned install uses the plugin prefix and verifies the selected target checksum", () => {
@@ -288,22 +344,20 @@ test("account id and tenant id remain separate across same-local-part accounts",
   assert.notEqual(rows[1].id, `${rows[1].accountId}:${rows[1].tenantId}`);
 });
 
-test("personal account refusal is limited to delegated chat send", () => {
+test("personal account is refused for delegated chat send before an attempt is recorded", () => {
   const env = mockHost({
     platform: "darwin",
     currentName: "personal-account",
     connections: [{ name: "personal-account", accountId: "consumer-identity", identityId: "consumer-identity", tenantId: plugin.__test_personalTenantId, upn: "owner@outlook.com" }],
   });
   try {
-    const result = plugin.__test_sendRefusal();
-    assert.match(result, /send path is not enabled/i);
-    assert.match(result, /personal Microsoft account is unsupported on POST \/chats\/\{chat-id\}\/messages/i);
-    assert.match(result, /delegated ChatMessage\.Send/);
-    assert.doesNotMatch(result, /personal accounts cannot use Teams/i);
-    const routed = plugin.onAgentCommand({ sessionId: "s", verb: "send", args: [] });
-    assert.ok("error" in routed);
-    assert.match(routed.error, /send path is not enabled/i);
-    assert.match(routed.error, /delegated ChatMessage\.Send/);
+    const p = plugin.__test_paths();
+    host.fs.writeFile(p.policy, JSON.stringify({ approved: true, mode: "single-chat", senderAccountId: "consumer-identity", senderTenantId: plugin.__test_personalTenantId, allowedDestinations: [{ id: "19:chat-a@thread.v2", label: "Project" }], approvedAt: 1 }));
+    const routed = command("send", ["19:chat-a@thread.v2", "personal send"]);
+    assert.match(routed.error, /^upstream-rejected:/i);
+    assert.match(routed.error, /work or school account/i);
+    assert.equal(env.calls.some((call) => call.args.includes("send")), false);
+    assert.equal(host.fs.fileExists(p.outbox), false);
   } finally { env.cleanup(); }
 });
 
@@ -377,7 +431,7 @@ test("lifecycle detection returns each installed and session state", () => {
   }
 });
 
-test("verb routing covers read and lifecycle verbs and refuses send and preview", () => {
+test("verb routing covers read, lifecycle, preview, and policy-gated send verbs", () => {
   const env = mockHost({ platform: "darwin" });
   try {
     for (const verb of ["accounts", "chats", "health", "logout"]) {
@@ -389,14 +443,380 @@ test("verb routing covers read and lifecycle verbs and refuses send and preview"
     assert.equal(env.currentName, "account-a", "account id resolves to the m365 connection without conflating tenant id");
     const displayName = plugin.onAgentCommand({ sessionId: "s", verb: "use", args: ["jordan@north.example"] });
     assert.ok("error" in displayName, "UPN display text is not accepted as an account id");
+    command("chats", [], "s");
     const history = plugin.onAgentCommand({ sessionId: "s", verb: "history", args: ["19:chat-a@thread.v2", "1"] });
     assert.ok("result" in history, "history reads a selected chat id");
     assert.ok("error" in plugin.onAgentCommand({ sessionId: "s", verb: "unknown", args: [] }));
-    for (const verb of ["send", "preview"]) {
-      const result = plugin.onAgentCommand({ sessionId: "s", verb, args: [] });
-      assert.ok("error" in result);
-      assert.match(result.error, /send path is not enabled/i);
-    }
+    const before = env.calls.length;
+    const preview = command("preview", ["19:chat-a@thread.v2", "exact message"]);
+    assert.ok("result" in preview, preview.error || "preview resolves after chats warmed the tenant cache");
+    assert.equal(env.calls.length, before, "preview does not execute m365 or fetch");
+    const refusal = command("send", ["19:chat-a@thread.v2", "exact message"]);
+    assert.match(refusal.error, /policy-not-set/i);
+  } finally { env.cleanup(); }
+});
+
+test("preview returns the resolved sender, tenant, immutable destination, and exact payload without an attempt or exec", () => {
+  const env = mockHost({ platform: "darwin" });
+  try {
+    const chats = command("chats");
+    assert.ok("result" in chats, chats.error || "chats resolved before preview");
+    const callsBefore = env.calls.length;
+    const writesBefore = env.writes.length;
+    const result = command("preview", ["19:chat-a@thread.v2", "exact", "payload"]);
+    assert.ok("result" in result, result.error || "preview resolved");
+    const preview = JSON.parse(result.result);
+    assert.equal(preview.sender.accountId, "identity-a");
+    assert.equal(preview.sender.upn, "jordan@north.example");
+    assert.equal(preview.sender.tenantId, "tenant-a");
+    assert.equal(preview.tenant.id, "tenant-a");
+    assert.equal(preview.destination.id, "19:chat-a@thread.v2");
+    assert.equal(preview.destination.label, "Project");
+    assert.equal(preview.text, "exact payload");
+    assert.equal(preview.policy.configured, false);
+    assert.equal(env.calls.length, callsBefore, "preview uses the resolved identity and chat list without another exec");
+    assert.equal(env.writes.length, writesBefore, "preview writes no policy or attempt");
+    assert.equal(env.files.has(normalize(plugin.__test_paths().outbox)), false);
+  } finally { env.cleanup(); }
+});
+
+test("preview resolves duplicate chat labels by immutable id and rejects a label as an id", () => {
+  const env = mockHost({ platform: "darwin", chats: [
+    { id: "19:chat-one@thread.v2", topic: "Alex" },
+    { id: "19:chat-two@thread.v2", topic: "Alex" },
+  ] });
+  try {
+    command("chats");
+    const selected = command("preview", ["19:chat-two@thread.v2", "hello"]);
+    assert.equal(JSON.parse(selected.result).destination.id, "19:chat-two@thread.v2");
+    const before = env.calls.length;
+    const rejected = command("preview", ["Alex", "hello"]);
+    assert.match(rejected.error, /^destination-not-permitted:/i);
+    assert.equal(rejected.result, undefined);
+    assert.equal(env.calls.length, before, "a chat label is rejected without another m365 command");
+  } finally { env.cleanup(); }
+});
+
+test("tenant is part of sender identity for accounts with the same UPN local part", () => {
+  const env = mockHost({
+    platform: "darwin",
+    connections: [
+      { name: "account-a", accountId: "identity-shared", identityId: "identity-shared", tenantId: "tenant-a", upn: "jordan@same.example" },
+      { name: "account-b", accountId: "identity-shared", identityId: "identity-shared", tenantId: "tenant-b", upn: "jordan@same.example" },
+    ],
+  });
+  try {
+    command("chats");
+    const north = JSON.parse(command("preview", ["19:chat-a@thread.v2", "hello"]).result);
+    env.setCurrentName("account-b");
+    command("chats");
+    const south = JSON.parse(command("preview", ["19:chat-a@thread.v2", "hello"]).result);
+    assert.equal(north.sender.upn, south.sender.upn);
+    assert.equal(north.sender.accountId, south.sender.accountId);
+    assert.notEqual(north.sender.tenantId, south.sender.tenantId);
+    assert.notEqual(north.sender.identityKey, south.sender.identityKey);
+    assert.equal(north.sender.tenantId, "tenant-a");
+    assert.equal(south.sender.tenantId, "tenant-b");
+    assert.ok(north.tenant.id && south.tenant.id, "both previews display tenant ids");
+  } finally { env.cleanup(); }
+});
+
+test("preview refuses an account when its tenant is unresolved", () => {
+  const env = mockHost({
+    platform: "darwin",
+    connections: [{ name: "account-a", accountId: "identity-a", identityId: "identity-a", tenantId: "", upn: "jordan@north.example" }],
+  });
+  try {
+    command("chats");
+    const callsBefore = env.calls.length;
+    const preview = command("preview", ["19:chat-a@thread.v2", "hello"]);
+    assert.match(preview.error, /^not-logged-in:/i);
+    assert.equal(env.calls.length, callsBefore);
+    assert.equal(preview.result, undefined, "no partial sender account is displayed without its tenant");
+  } finally { env.cleanup(); }
+});
+
+test("no policy means policy-not-set with no attempt record and no send exec", () => {
+  const env = mockHost({ platform: "darwin" });
+  try {
+    const result = command("send", ["19:chat-a@thread.v2", "hello"]);
+    assert.match(result.error, /^policy-not-set:/i);
+    assert.equal(env.files.has(normalize(plugin.__test_paths().outbox)), false);
+    assert.equal(env.calls.length, 0, "closed policy gate issues no m365 exec");
+    assert.equal(sendCalls(env).length, 0);
+  } finally { env.cleanup(); }
+});
+
+test("single-chat policy refuses other destination ids before exec", () => {
+  const env = mockHost({ platform: "darwin" });
+  try {
+    const { policy } = approveSingleChat();
+    assert.equal(policy.mode, "single-chat");
+    assert.deepEqual(policy.allowedDestinations, [{ id: "19:chat-a@thread.v2", label: "Project" }]);
+    const callsBefore = env.calls.length;
+    const refused = command("send", ["19:other-chat@thread.v2", "hello"]);
+    assert.match(refused.error, /^destination-not-permitted:/i);
+    assert.equal(env.calls.length, callsBefore);
+    assert.equal(sendCalls(env).length, 0);
+    assert.equal(env.files.has(normalize(plugin.__test_paths().outbox)), false);
+  } finally { env.cleanup(); }
+});
+
+test("view shows the resolved account, tenant, and destination before enabling the send control", () => {
+  const env = mockHost({ platform: "darwin" });
+  try {
+    const listed = plugin.viewCall("chats", {});
+    assert.ok(listed.result);
+    const before = env.calls.length;
+    const response = plugin.viewCall("preview", { chatId: "19:chat-a@thread.v2", text: "owner reviewed text" });
+    assert.ok(response.result);
+    assert.equal(env.calls.length, before, "view preview issues no m365 call");
+    const preview = JSON.parse(response.result);
+    assert.equal(preview.sender.accountId, "identity-a");
+    assert.equal(preview.tenant.id, "tenant-a");
+    assert.equal(preview.destination.id, "19:chat-a@thread.v2");
+    const source = fs.readFileSync(path.join(__dirname, "ui/src/main.tsx"), "utf8");
+    assert.match(source, /Sender account:/);
+    assert.match(source, /Tenant:/);
+    assert.match(source, /immutable chat id/);
+    assert.match(source, /previewMatches && policyMatches/);
+    assert.match(source, /disabled={!sendEnabled}/);
+  } finally { env.cleanup(); }
+});
+
+test("not-logged-in returns its named action before creating an attempt", () => {
+  const env = mockHost({ platform: "darwin", status: "logged-out" });
+  try {
+    const p = plugin.__test_paths();
+    host.fs.writeFile(p.policy, JSON.stringify({ approved: true, mode: "single-chat", senderAccountId: "identity-a", senderTenantId: "tenant-a", allowedDestinations: [{ id: "19:chat-a@thread.v2", label: "Project" }], approvedAt: 1 }));
+    const result = command("send", ["19:chat-a@thread.v2", "hello"]);
+    assert.match(result.error, /^not-logged-in:/i);
+    assert.match(result.error, /sign in/i);
+    assert.equal(env.files.has(normalize(p.outbox)), false);
+    assert.equal(sendCalls(env).length, 0);
+  } finally { env.cleanup(); }
+});
+
+test("read-slice reauth status is returned with its cause before creating an attempt", () => {
+  const env = mockHost({ platform: "darwin", statusError: "AADSTS50173 refresh token was revoked" });
+  try {
+    const p = plugin.__test_paths();
+    host.fs.writeFile(p.policy, JSON.stringify({ approved: true, mode: "single-chat", senderAccountId: "identity-a", senderTenantId: "tenant-a", allowedDestinations: [{ id: "19:chat-a@thread.v2", label: "Project" }], approvedAt: 1 }));
+    const result = command("send", ["19:chat-a@thread.v2", "hello"]);
+    assert.match(result.error, /^reauth-needed:/i);
+    assert.match(result.error, /refresh-token-revoked/i);
+    assert.match(result.error, /Sign in again/i);
+    assert.equal(env.files.has(normalize(p.outbox)), false);
+    assert.equal(sendCalls(env).length, 0);
+  } finally { env.cleanup(); }
+});
+
+test("outbox attempt is persisted as pending before the m365 send is issued", () => {
+  let stateBeforeExec = "";
+  const env = mockHost({
+    platform: "darwin",
+    onSendStart(outboxPath) {
+      const ledger = JSON.parse(fs.readFileSync(outboxPath, "utf8"));
+      stateBeforeExec = ledger.attempts[0].state;
+    },
+  });
+  try {
+    approveSingleChat();
+    const result = command("send", ["19:chat-a@thread.v2", "pending order", "checked"]);
+    assert.ok("result" in result, result.error || "m365 returned a confirmed result");
+    assert.equal(stateBeforeExec, "pending", "ledger write precedes the upstream m365 command");
+    const ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+    assert.equal(ledger.attempts.length, 1);
+    assert.equal(ledger.attempts[0].state, "sent");
+    assert.equal(sendCalls(env).length, 1);
+  } finally { env.cleanup(); }
+});
+
+test("same idempotency key keeps one sent record and returns its recorded result", () => {
+  const env = mockHost({ platform: "darwin" });
+  try {
+    approveSingleChat();
+    const args = ["19:chat-a@thread.v2", "--key", "sent-case", "hello safe chat"];
+    const first = command("send", args);
+    assert.ok("result" in first, first.error || "first send was confirmed");
+    const callsAfterFirst = sendCalls(env).length;
+    const second = command("send", args);
+    assert.deepEqual(JSON.parse(second.result), JSON.parse(first.result));
+    assert.equal(sendCalls(env).length, callsAfterFirst);
+    const ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+    assert.equal(ledger.attempts.length, 1);
+    assert.equal(ledger.attempts[0].state, "sent");
+    assert.equal(ledger.attempts[0].payloadHash.length, 64);
+    assert.equal(typeof ledger.attempts[0].createdAt, "number");
+    assert.equal(typeof ledger.attempts[0].updatedAt, "number");
+    assert.equal(JSON.parse(first.result).sender.tenantId, "tenant-a");
+    assert.equal(JSON.parse(first.result).graphMessageId, null, "the pinned m365 command does not expose the Graph id on success");
+    assert.match(JSON.parse(first.result).deliveryGuarantee, /not an exactly-once/i);
+  } finally { env.cleanup(); }
+});
+
+test("sent is terminal and never resent", () => {
+  const env = mockHost({ platform: "darwin" });
+  try {
+    approveSingleChat();
+    const args = ["19:chat-a@thread.v2", "--key", "terminal-case", "same text"];
+    const first = command("send", args);
+    assert.ok("result" in first);
+    const callsAfterFirst = sendCalls(env).length;
+    const repeat = command("send", args);
+    assert.equal(JSON.parse(repeat.result).status, "sent");
+    assert.equal(sendCalls(env).length, callsAfterFirst);
+  } finally { env.cleanup(); }
+});
+
+test("definitive m365 rejection is recorded as failed with upstream-rejected action", () => {
+  const env = mockHost({ platform: "darwin", sendMode: "rejected" });
+  try {
+    approveSingleChat();
+    const args = ["19:chat-a@thread.v2", "--key", "rejected-case", "hello"];
+    const first = command("send", args);
+    assert.match(first.error, /^upstream-rejected:/i);
+    let ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+    assert.equal(ledger.attempts[0].state, "failed");
+    assert.equal(ledger.attempts[0].failure, "upstream-rejected");
+    assert.equal(sendCalls(env).length, 1);
+    env.setSendMode("sent");
+    const later = command("send", args);
+    assert.equal(JSON.parse(later.result).status, "sent", "a definitive failure can be retried only by a later caller invocation");
+    ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+    assert.equal(ledger.attempts.length, 1);
+    assert.equal(ledger.attempts[0].sendCount, 2);
+    assert.equal(sendCalls(env).length, 2);
+  } finally { env.cleanup(); }
+});
+
+test("unknown send outcome is recorded and never automatically retried", () => {
+  let stateBeforeExec = "";
+  const env = mockHost({
+    platform: "darwin",
+    sendMode: "timeout",
+    onSendStart(outboxPath) { stateBeforeExec = JSON.parse(fs.readFileSync(outboxPath, "utf8")).attempts[0].state; },
+  });
+  try {
+    approveSingleChat();
+    const args = ["19:chat-a@thread.v2", "--key", "unknown-case", "hello"];
+    const first = command("send", args);
+    assert.equal(stateBeforeExec, "pending");
+    assert.match(first.error, /^unknown:/i);
+    let ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+    assert.equal(ledger.attempts.length, 1);
+    assert.equal(ledger.attempts[0].state, "unknown");
+    const callCount = sendCalls(env).length;
+    const second = command("send", args);
+    assert.match(second.error, /^unknown:/i);
+    assert.equal(sendCalls(env).length, callCount, "unknown key is refused before another m365 send");
+    ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+    assert.equal(ledger.attempts.length, 1);
+    assert.equal(ledger.attempts[0].state, "unknown");
+  } finally { env.cleanup(); }
+});
+
+test("derived idempotency key also prevents a duplicate exec in the same session", () => {
+  const env = mockHost({ platform: "darwin" });
+  try {
+    approveSingleChat();
+    const args = ["19:chat-a@thread.v2", "same derived request"];
+    const first = command("send", args, "derived-key-test");
+    const callsAfterFirst = sendCalls(env).length;
+    const second = command("send", args, "derived-key-test");
+    assert.deepEqual(JSON.parse(second.result), JSON.parse(first.result));
+    assert.equal(sendCalls(env).length, callsAfterFirst);
+    assert.equal(JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8")).attempts.length, 1);
+  } finally { env.cleanup(); }
+});
+
+test("rate limiting persists an upstream-derived deadline and retries only on a later invocation", () => {
+  let clock = 1000;
+  plugin.__test_setClock(() => clock);
+  const env = mockHost({ platform: "darwin", sendMode: "rate-limited" });
+  try {
+    approveSingleChat();
+    const args = ["19:chat-a@thread.v2", "--key", "rate-case", "hello"];
+    const first = command("send", args);
+    assert.match(first.error, /^rate-limited:/i);
+    let ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+    assert.equal(ledger.attempts[0].state, "rate_limited");
+    assert.equal(ledger.attempts[0].retryAfter, 31000);
+    const callCount = sendCalls(env).length;
+    const early = command("send", args);
+    assert.match(early.error, /^rate-limited:/i);
+    assert.equal(sendCalls(env).length, callCount);
+    clock = 31000;
+    env.setSendMode("sent");
+    const afterDeadline = command("send", args);
+    assert.equal(JSON.parse(afterDeadline.result).status, "sent");
+    ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+    assert.equal(ledger.attempts.length, 1);
+    assert.equal(ledger.attempts[0].state, "sent");
+    assert.equal(ledger.attempts[0].sendCount, 2);
+    assert.equal(sendCalls(env).length, 2);
+  } finally {
+    plugin.__test_setClock(null);
+    env.cleanup();
+  }
+});
+
+test("reauth failures retain the read taxonomy and never enter the rate-limit path", () => {
+  const cases = [
+    ["refresh-token-revoked", "refresh-token-revoked", /Sign in again/i],
+    ["consent-withdrawn", "consent-not-granted", /tenant administrator|user consent/i],
+    ["conditional-access-blocked", "conditional-access-blocked", /IT administrator/i],
+    ["mfa-required", "mfa-required", /Complete the MFA/i],
+  ];
+  for (const [mode, cause, action] of cases) {
+    const env = mockHost({ platform: "darwin" });
+    try {
+      approveSingleChat();
+      env.setSendMode(mode);
+      const result = command("send", ["19:chat-a@thread.v2", "--key", `reauth-${mode}`, "hello"]);
+      assert.match(result.error, /^reauth-needed:/i, cause);
+      assert.match(result.error, new RegExp(cause.replaceAll("-", "[- ]"), "i"));
+      assert.match(result.error, action);
+      const ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+      assert.equal(ledger.attempts[0].state, "failed");
+      assert.equal(ledger.attempts[0].failure, "reauth-needed");
+      assert.equal(ledger.attempts[0].failureCause, cause);
+      assert.equal(ledger.attempts[0].retryAfter, undefined);
+      assert.equal(sendCalls(env).length, 1, "reauth refusal is not retried as a transient failure");
+    } finally { env.cleanup(); }
+  }
+});
+
+test("all send failures have distinct actionable taxonomy and no generic failure text", () => {
+  const states = ["not-logged-in", "reauth-needed", "policy-not-set", "destination-not-permitted", "rate-limited", "upstream-rejected", "unknown"];
+  const messages = states.map((state) => plugin.__test_failureMessage(state, state === "rate-limited" ? 123 : "fixture detail", "mfa-required"));
+  const actions = [/sign in/i, /Sign in again|MFA/i, /explicitly approve/i, /approved immutable chat/i, /invoke send again/i, /Correct the permission|request issue/i, /inspect the selected chat/i];
+  assert.equal(new Set(messages).size, states.length);
+  states.forEach((state, index) => {
+    assert.ok(messages[index].startsWith(`${state}:`));
+    assert.ok(messages[index].length > state.length + 12);
+    assert.match(messages[index], actions[index]);
+  });
+  const source = fs.readFileSync(path.join(__dirname, "src/plugin.ts"), "utf8");
+  assert.equal(source.toLowerCase().includes(["send", "failed"].join(" ")), false);
+});
+
+test("send transport follows D5 through m365 with isolated environment and no credential in argv", () => {
+  const env = mockHost({ platform: "darwin" });
+  try {
+    approveSingleChat();
+    env.calls.length = 0;
+    const result = command("send", ["19:chat-a@thread.v2", "--key", "transport-case", "hello"]);
+    assert.ok("result" in result, result.error || "m365 confirmed the send");
+    const call = sendCalls(env)[0];
+    assert.ok(call, "the upstream call is the m365 Teams chat message send command");
+    assert.deepEqual(call.args, ["teams", "chat", "message", "send", "--chatId", "19:chat-a@thread.v2", "--message", "hello", "--output", "json"]);
+    assert.equal(normalize(call.env.HOME), plugin.__test_paths().home);
+    assert.equal(normalize(call.env.USERPROFILE), plugin.__test_paths().home);
+    for (const value of ["fixture-access-token", "fixture-password", "fixture-client-secret"]) assert.equal(call.args.some((arg) => arg.includes(value)), false);
+    const source = fs.readFileSync(path.join(__dirname, "src/plugin.ts"), "utf8");
+    assert.equal(source.includes("host.fetch"), false);
+    assert.equal(source.includes("credential: {"), false);
   } finally { env.cleanup(); }
 });
 

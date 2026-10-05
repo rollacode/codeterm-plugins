@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Read-only Microsoft Teams chats and bounded history for CodeTerm.",
+  "description": "Owner-gated Microsoft Teams chat preview, sending, and bounded history for CodeTerm.",
   "devDependencies": {
     "@codeterm/plugin-sdk": "^1.10.22"
   }
