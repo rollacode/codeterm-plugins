@@ -123,6 +123,23 @@ const tests = [
     assert.equal(manifest.spawn.systemPromptDelivery.kind, "external");
   }],
 
+  ["first-turn capability parses the Grok structured transcript fixture", () => {
+    const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+    assert.equal(manifest.spawn.sessionStartsOnFirstUserTurn, true);
+    const cwd = "/work/app";
+    const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const transcript = readFileSync(join(__dirname, "tests", "fixtures", "first-user-turn.jsonl"), "utf8");
+    const path = "/tmp/home/.grok/sessions/" + encodeURIComponent(cwd) + "/" + id + "/updates.jsonl";
+    const plugin = load(hostFor({ files: { [path]: transcript } }));
+    const chat = plugin.readStructuredChat(cwd, id, null);
+    const users = chat.messages.filter((message) => message.type === "user");
+    assert.equal(users.length, 1);
+    assert.equal(users[0].content, "Grok first turn exact marker 7f2a");
+    assert.equal(users[0].seq, 1);
+    assert.equal(chat.messages.filter((message) => message.type === "assistant").length, 1);
+    assert.equal(plugin.readStructuredChat(cwd, id, chat.cursor).messages.length, 0);
+  }],
+
   ["launch always includes --always-approve", () => {
     const plugin = load(hostFor());
     const cmd = plugin.buildLaunchCommand({ task: "fix it" });
