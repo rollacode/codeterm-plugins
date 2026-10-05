@@ -739,7 +739,6 @@ type Attempt = {
   failure?: SendFailure;
   failureCause?: string;
   failureMessage?: string;
-  retryAfter?: number;
   graphMessageId?: string;
 };
 type Outbox = { schema: 1; attempts: Attempt[] };
@@ -750,9 +749,9 @@ function failureMessage(kind: SendFailure, detail?: any, cause?: string): string
     case "reauth-needed": return `reauth-needed: ${String(cause || "reauth-needed")}. ${String(detail || "The Microsoft session needs a new sign-in. Click Sign in again and complete the tenant's required authentication step.")}`;
     case "policy-not-set": return "policy-not-set: Review the resolved account, tenant, destination, and exact text in Teams Client, then explicitly approve that single chat before sending.";
     case "destination-not-permitted": return `destination-not-permitted: Only the owner's approved immutable chat id is allowed (${String(detail || "no destination is approved")}). Select that exact chat or review a new preview before changing policy.`;
-    case "rate-limited": return `rate-limited: Microsoft 365 asked this account to wait until ${Number(detail) || 0}. Invoke send again after that recorded deadline; Teams Client will not wait or retry automatically.`;
+    case "rate-limited": return `rate-limited: Microsoft 365 throttled this operation. Review Teams Client status and the selected chat before deciding what to do.`;
     case "upstream-rejected": return `upstream-rejected: m365 refused the operation (${String(detail || "inspect the Microsoft 365 error and correct its cause")}). Correct the permission or request issue, then invoke send again only if you still want delivery.`;
-    case "unknown": return "unknown: Microsoft 365 may have accepted this message but confirmation was lost. Do not retry this idempotency key; inspect the selected chat and decide manually.";
+    case "unknown": return `unknown: ${String(detail || "Microsoft 365 may have accepted this message but confirmation was lost.")} Do not retry this idempotency key; inspect the selected chat and decide manually.`;
   }
   const exhaustive: never = kind;
   return exhaustive;
@@ -769,8 +768,7 @@ function loadOutbox(p: Paths): { ledger?: Outbox; error?: string } {
       item.sender && typeof item.sender.accountId === "string" && typeof item.sender.tenantId === "string" &&
       typeof item.sender.identityKey === "string" && item.destination && validChatId(String(item.destination.id || "")) &&
       typeof item.destination.label === "string" && Number.isFinite(Number(item.createdAt)) &&
-      Number.isFinite(Number(item.updatedAt)) && Number.isInteger(item.sendCount) && item.sendCount >= 0 &&
-      (item.state !== "rate_limited" || Number.isFinite(Number(item.retryAfter))));
+      Number.isFinite(Number(item.updatedAt)) && Number.isInteger(item.sendCount) && item.sendCount >= 0);
     if (!valid) return { error: "the existing outbox ledger contains an invalid or unrecognized attempt state" };
     return { ledger: value as Outbox };
   } catch { return { error: "the existing outbox ledger could not be read" }; }
@@ -812,24 +810,15 @@ function parseSendArgs(args: string[]): { chatId: string; text: string; key?: st
   return { chatId: args[0], text, key };
 }
 
-function retryDeadline(message: string, currentTime: number): number | null {
-  const line = message.match(/retry[- ]after"?\s*["']?\s*[:=]\s*["']?([0-9]+(?:\.[0-9]+)?|[^\r\n]+)/i);
-  if (!line) return null;
-  const value = line[1].trim().replace(/^['"]|['"]$/g, "").replace(/[;,]+$/, "");
-  if (/^[0-9]+(?:\.[0-9]+)?$/.test(value)) return currentTime + Number(value) * 1000;
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : null;
-}
-
-function failureForUpstream(message: string): { kind: SendFailure; detail?: string; cause?: string; retryAfter?: number } {
+function failureForUpstream(message: string): { kind: SendFailure; detail?: string; cause?: string } {
   const auth = authState(message);
   if (auth) return { kind: "reauth-needed", detail: auth.message, cause: auth.state };
   if (/not signed in|not logged in|no active connection|logged out|run m365 login/i.test(message)) return { kind: "not-logged-in" };
-  if (/\b429\b|too many requests|throttl/i.test(message)) {
-    const deadline = retryDeadline(message, now());
-    return deadline === null
-      ? { kind: "upstream-rejected", detail: "m365 reported HTTP 429 but did not expose a usable Retry-After deadline; inspect Teams Client status before invoking again" }
-      : { kind: "rate-limited", retryAfter: deadline };
+  // The pinned m365 CLI consumes Retry-After and retries 429/503 inside its
+  // subprocess. If that process ultimately surfaces throttling, this caller
+  // cannot know whether one of those internal requests already delivered.
+  if (/\b429\b|\b503\b|too many requests|throttl|service unavailable/i.test(message)) {
+    return { kind: "unknown", detail: "m365 may have retried this throttled send internally and may have delivered the message." };
   }
   if (/timeout|timed out|deadline exceeded|connection reset|connection closed|unexpected EOF|\bEOF\b|broken pipe|lost response|context cancel+ed|terminated|signal|killed|did not finish|could not confirm|unconfirmed/i.test(message)) return { kind: "unknown" };
   const code = message.match(/\b(?:HTTP|status(?: code)?)\s*[:=]?\s*(4\d\d|5\d\d)\b/i);
@@ -853,7 +842,7 @@ function runTeamsSend(args: string[]): RunResult {
   let result: { done: boolean; code?: number; stdout?: string; stderr?: string; error?: string };
   try { result = host.awaitJob(started.jobId, (value: any) => value); }
   catch (error) { return { ok: false, error: `m365 send process outcome could not be confirmed: ${String(error)}`, stderr: "" }; }
-  if (!result || result.done === false) return { ok: false, error: "m365 send process did not finish; delivery outcome is unknown.", stderr: "" };
+  if (!result || result.done !== true) return { ok: false, error: "m365 send process did not finish; delivery outcome is unknown.", stderr: "" };
   const stdout = String(result.stdout || "");
   const stderr = String(result.stderr || "");
   if (result.error) return { ok: false, error: `m365 send process returned an unconfirmed result: ${String(result.error)}`, stderr, code: result.code };
@@ -882,27 +871,22 @@ function attemptResult(attempt: Attempt): { result: string } {
   }) };
 }
 
-function persistFailure(p: Paths, ledger: Outbox, attempt: Attempt, kind: SendFailure, detail?: string, cause?: string, retryAfter?: number): { error: string } {
+function persistFailure(p: Paths, ledger: Outbox, attempt: Attempt, kind: SendFailure, detail?: string, cause?: string): { error: string } {
   attempt.failure = kind;
   attempt.failureCause = cause;
-  attempt.failureMessage = failureMessage(kind, kind === "rate-limited" ? retryAfter : detail, cause);
+  attempt.failureMessage = failureMessage(kind, detail, cause);
   attempt.updatedAt = now();
-  if (kind === "rate-limited" && retryAfter !== undefined) {
-    attempt.state = "rate_limited";
-    attempt.retryAfter = retryAfter;
-  } else if (kind === "unknown") {
+  delete (attempt as any).retryAfter;
+  if (kind === "unknown") {
     attempt.state = "unknown";
-    delete attempt.retryAfter;
   } else {
     attempt.state = "failed";
-    delete attempt.retryAfter;
   }
   if (!persistOutbox(p, ledger)) {
     attempt.state = "unknown";
     attempt.failure = "unknown";
     attempt.failureCause = undefined;
     attempt.failureMessage = failureMessage("unknown");
-    delete attempt.retryAfter;
     persistOutbox(p, ledger);
     return rememberSendFailure("unknown", attempt.failureMessage);
   }
@@ -931,7 +915,9 @@ function sendCommand(sessionId: string, args: string[]): { result: string } | { 
   if (attempt && attempt.state === "sent") return attemptResult(attempt);
   if (attempt && attempt.state === "unknown") return sendFailureResult("unknown");
   if (attempt && attempt.state === "pending") return persistFailure(p, ledger, attempt, "unknown", "a previous invocation ended before its send result was recorded");
-  if (attempt && attempt.state === "rate_limited" && Number(attempt.retryAfter) > now()) return sendFailureResult("rate-limited", attempt.retryAfter);
+  // Older ledger entries in rate_limited are not safe to resume: the pinned
+  // m365 CLI may already have retried the request internally.
+  if (attempt && attempt.state === "rate_limited") return persistFailure(p, ledger, attempt, "unknown");
 
   const resolved = liveSender();
   if ("error" in resolved) return rememberPrefixedFailure(resolved.error);
@@ -958,13 +944,12 @@ function sendCommand(sessionId: string, args: string[]): { result: string } | { 
   delete attempt.failure;
   delete attempt.failureCause;
   delete attempt.failureMessage;
-  delete attempt.retryAfter;
   if (!persistOutbox(p, ledger)) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; m365 was not contacted");
 
   const run = runTeamsSend(["teams", "chat", "message", "send", "--chatId", parsed.chatId, "--message", parsed.text, "--output", "json"]);
   if (!run.ok) {
     const upstream = failureForUpstream(`${run.error}\n${run.stderr}`);
-    return persistFailure(p, ledger, attempt, upstream.kind, upstream.detail, upstream.cause, upstream.retryAfter);
+    return persistFailure(p, ledger, attempt, upstream.kind, upstream.detail, upstream.cause);
   }
   attempt.graphMessageId = messageIdFromOutput(run.stdout);
   attempt.state = "sent";
@@ -972,7 +957,6 @@ function sendCommand(sessionId: string, args: string[]): { result: string } | { 
   delete attempt.failure;
   delete attempt.failureCause;
   delete attempt.failureMessage;
-  delete attempt.retryAfter;
   if (!persistOutbox(p, ledger)) return persistFailure(p, ledger, attempt, "unknown");
   return attemptResult(attempt);
 }
@@ -1099,7 +1083,6 @@ const plugin: PluginModule = {
   __test_personalTenantId: PERSONAL_TENANT_ID,
   __test_failureMessage: failureMessage,
   __test_failureForUpstream: failureForUpstream,
-  __test_retryDeadline: retryDeadline,
   __test_setClock: (clock: (() => number) | null) => { injectedClock = clock; },
   __test_policySummary: policySummary,
   __test_previewCommand: previewCommand,

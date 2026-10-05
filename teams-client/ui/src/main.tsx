@@ -57,6 +57,7 @@ function App() {
   const [policy, setPolicy] = useState<SendPolicy>({ configured: false, allowedDestinations: [] });
   const [sendResult, setSendResult] = useState("");
   const [blockedKey, setBlockedKey] = useState("");
+  const [sendInProgress, setSendInProgress] = useState(false);
   const [jobId, setJobId] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -193,7 +194,8 @@ function App() {
   async function sendPreview() {
     if (!preview) return;
     setBusy(true);
-    setMessage("");
+    setSendInProgress(true);
+    setMessage("Sending with m365. Throttling retries can take about 10 seconds or more without output; wait for this result before taking another action.");
     setSendResult("");
     try {
       const response = await window.ct!.invoke("send", {
@@ -210,6 +212,7 @@ function App() {
     } catch (error) {
       setMessage(String(error));
     } finally {
+      setSendInProgress(false);
       setBusy(false);
     }
   }
@@ -292,11 +295,12 @@ function App() {
           <p style={{ margin: "10px 0 4px", fontSize: 12, color: "var(--ct-muted, #9aa)" }}>Exact payload</p>
           <pre style={{ margin: 0, padding: 10, whiteSpace: "pre-wrap", overflowWrap: "anywhere", borderRadius: 4, background: "var(--ct-bg, #1d1d1d)", font: "inherit" }}>{preview.text}</pre>
           <p style={{ margin: "10px 0 4px", fontSize: 12 }}>Policy: {policyMatches ? "approved for this account, tenant, and one chat" : policy.configured ? "approved for a different sender, tenant, or chat" : "not set"}</p>
+          <p style={{ margin: "6px 0", color: "var(--ct-muted, #9aa)", fontSize: 12 }}>m365 handles throttling retries internally and may pause for about 10 seconds or more without output. Wait for the result; a surfaced 429 or 503 is recorded as unknown because the message may already have arrived.</p>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
             <button style={buttonStyle} disabled={busy || !previewMatches || policyMatches} onClick={() => void approveDestination()}>
               {policy.configured ? "Approve this one chat" : "Approve this one chat"}
             </button>
-            <button style={{ ...buttonStyle, background: "var(--ct-err, #b64d58)" }} disabled={!sendEnabled} onClick={() => void sendPreview()}>Send this exact message</button>
+            <button style={{ ...buttonStyle, background: "var(--ct-err, #b64d58)" }} disabled={!sendEnabled} onClick={() => void sendPreview()}>{sendInProgress ? "Sending — wait for m365" : "Send this exact message"}</button>
           </div>
           {sendResult && <pre role="status" style={{ marginTop: 12, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{sendResult}</pre>}
         </div>}

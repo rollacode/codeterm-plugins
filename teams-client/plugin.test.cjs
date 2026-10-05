@@ -104,6 +104,7 @@ function mockHost(options = {}) {
         if (typeof options.onSendStart === "function") options.onSendStart(plugin.__test_paths().outbox, args, envRecord);
         if (sendMode === "timeout") return { code: 1, stdout: "", stderr: "request timed out after the Graph request was submitted" };
         if (sendMode === "rate-limited") return { code: 1, stdout: "", stderr: "HTTP 429 Too Many Requests\nRetry-After: 30" };
+        if (sendMode === "service-unavailable") return { code: 1, stdout: "", stderr: "HTTP 503 Service Unavailable\nRetry-After: 30" };
         if (sendMode === "refresh-token-revoked") return { code: 1, stdout: "", stderr: "AADSTS50173 refresh token was revoked" };
         if (sendMode === "consent-withdrawn") return { code: 1, stdout: "", stderr: "AADSTS65001 Graph consent was withdrawn" };
         if (sendMode === "conditional-access-blocked") return { code: 1, stdout: "", stderr: "AADSTS53003 Conditional Access blocked" };
@@ -121,7 +122,7 @@ function mockHost(options = {}) {
         : { code: 0, stdout: "", stderr: "" };
       return { code: 1, stdout: "", stderr: `unexpected m365 args: ${args.join(" ")}` };
     }
-    return { code: 0, stdout: "", stderr: "" };
+    return { code: 1, stdout: "", stderr: `unmatched exec fixture command: ${bin} ${args.join(" ")}` };
   }
 
   const envRecord = {
@@ -164,7 +165,10 @@ function mockHost(options = {}) {
     exec: {
       start: (opts) => {
         const id = `job-${++nextJob}`;
-        jobs.set(id, { done: true, ...resultFor(opts) });
+        // Match the host's settled ExecResult shape exactly. m365's exit code
+        // and output determine a definite success/rejection; done records that
+        // the subprocess itself has completed.
+        jobs.set(id, { ...resultFor(opts), done: true });
         return { jobId: id };
       },
       poll: (id) => jobs.get(id) || { done: true, code: 1, error: "missing job" },
@@ -215,6 +219,12 @@ function approveSingleChat(chatId = "19:chat-a@thread.v2", text = "safe test mes
 
 function sendCalls(env) {
   return env.calls.filter((call) => call.args[0] === "teams" && call.args[1] === "chat" && call.args[2] === "message" && call.args[3] === "send");
+}
+
+function readOutbox(env, file = plugin.__test_paths().outbox) {
+  const contents = env.files.get(normalize(file));
+  assert.notEqual(contents, undefined, `expected host-owned fixture storage at ${normalize(file)}`);
+  return JSON.parse(contents);
 }
 
 test("payload ledger hash uses SHA-256", () => {
@@ -615,8 +625,8 @@ test("outbox attempt is persisted as pending before the m365 send is issued", ()
   let stateBeforeExec = "";
   const env = mockHost({
     platform: "darwin",
-    onSendStart(outboxPath) {
-      const ledger = JSON.parse(fs.readFileSync(outboxPath, "utf8"));
+    onSendStart(outboxPath, args, envRecord) {
+      const ledger = readOutbox(envRecord, outboxPath);
       stateBeforeExec = ledger.attempts[0].state;
     },
   });
@@ -625,7 +635,7 @@ test("outbox attempt is persisted as pending before the m365 send is issued", ()
     const result = command("send", ["19:chat-a@thread.v2", "pending order", "checked"]);
     assert.ok("result" in result, result.error || "m365 returned a confirmed result");
     assert.equal(stateBeforeExec, "pending", "ledger write precedes the upstream m365 command");
-    const ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+    const ledger = readOutbox(env);
     assert.equal(ledger.attempts.length, 1);
     assert.equal(ledger.attempts[0].state, "sent");
     assert.equal(sendCalls(env).length, 1);
@@ -643,7 +653,7 @@ test("same idempotency key keeps one sent record and returns its recorded result
     const second = command("send", args);
     assert.deepEqual(JSON.parse(second.result), JSON.parse(first.result));
     assert.equal(sendCalls(env).length, callsAfterFirst);
-    const ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+    const ledger = readOutbox(env);
     assert.equal(ledger.attempts.length, 1);
     assert.equal(ledger.attempts[0].state, "sent");
     assert.equal(ledger.attempts[0].payloadHash.length, 64);
@@ -676,14 +686,14 @@ test("definitive m365 rejection is recorded as failed with upstream-rejected act
     const args = ["19:chat-a@thread.v2", "--key", "rejected-case", "hello"];
     const first = command("send", args);
     assert.match(first.error, /^upstream-rejected:/i);
-    let ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+    let ledger = readOutbox(env);
     assert.equal(ledger.attempts[0].state, "failed");
     assert.equal(ledger.attempts[0].failure, "upstream-rejected");
     assert.equal(sendCalls(env).length, 1);
     env.setSendMode("sent");
     const later = command("send", args);
     assert.equal(JSON.parse(later.result).status, "sent", "a definitive failure can be retried only by a later caller invocation");
-    ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+    ledger = readOutbox(env);
     assert.equal(ledger.attempts.length, 1);
     assert.equal(ledger.attempts[0].sendCount, 2);
     assert.equal(sendCalls(env).length, 2);
@@ -695,7 +705,7 @@ test("unknown send outcome is recorded and never automatically retried", () => {
   const env = mockHost({
     platform: "darwin",
     sendMode: "timeout",
-    onSendStart(outboxPath) { stateBeforeExec = JSON.parse(fs.readFileSync(outboxPath, "utf8")).attempts[0].state; },
+    onSendStart(outboxPath, args, envRecord) { stateBeforeExec = readOutbox(envRecord, outboxPath).attempts[0].state; },
   });
   try {
     approveSingleChat();
@@ -703,14 +713,14 @@ test("unknown send outcome is recorded and never automatically retried", () => {
     const first = command("send", args);
     assert.equal(stateBeforeExec, "pending");
     assert.match(first.error, /^unknown:/i);
-    let ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+    let ledger = readOutbox(env);
     assert.equal(ledger.attempts.length, 1);
     assert.equal(ledger.attempts[0].state, "unknown");
     const callCount = sendCalls(env).length;
     const second = command("send", args);
     assert.match(second.error, /^unknown:/i);
     assert.equal(sendCalls(env).length, callCount, "unknown key is refused before another m365 send");
-    ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+    ledger = readOutbox(env);
     assert.equal(ledger.attempts.length, 1);
     assert.equal(ledger.attempts[0].state, "unknown");
   } finally { env.cleanup(); }
@@ -726,38 +736,30 @@ test("derived idempotency key also prevents a duplicate exec in the same session
     const second = command("send", args, "derived-key-test");
     assert.deepEqual(JSON.parse(second.result), JSON.parse(first.result));
     assert.equal(sendCalls(env).length, callsAfterFirst);
-    assert.equal(JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8")).attempts.length, 1);
+    assert.equal(readOutbox(env).attempts.length, 1);
   } finally { env.cleanup(); }
 });
 
-test("rate limiting persists an upstream-derived deadline and retries only on a later invocation", () => {
-  let clock = 1000;
-  plugin.__test_setClock(() => clock);
-  const env = mockHost({ platform: "darwin", sendMode: "rate-limited" });
-  try {
-    approveSingleChat();
-    const args = ["19:chat-a@thread.v2", "--key", "rate-case", "hello"];
-    const first = command("send", args);
-    assert.match(first.error, /^rate-limited:/i);
-    let ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
-    assert.equal(ledger.attempts[0].state, "rate_limited");
-    assert.equal(ledger.attempts[0].retryAfter, 31000);
-    const callCount = sendCalls(env).length;
-    const early = command("send", args);
-    assert.match(early.error, /^rate-limited:/i);
-    assert.equal(sendCalls(env).length, callCount);
-    clock = 31000;
-    env.setSendMode("sent");
-    const afterDeadline = command("send", args);
-    assert.equal(JSON.parse(afterDeadline.result).status, "sent");
-    ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
-    assert.equal(ledger.attempts.length, 1);
-    assert.equal(ledger.attempts[0].state, "sent");
-    assert.equal(ledger.attempts[0].sendCount, 2);
-    assert.equal(sendCalls(env).length, 2);
-  } finally {
-    plugin.__test_setClock(null);
-    env.cleanup();
+test("m365 internal Retry-After handling leaves a throttled outcome unknown and never retried", () => {
+  for (const mode of ["rate-limited", "service-unavailable"]) {
+    const env = mockHost({ platform: "darwin", sendMode: mode });
+    try {
+      approveSingleChat();
+      const args = ["19:chat-a@thread.v2", "--key", `throttle-${mode}`, "hello"];
+      const first = command("send", args);
+      assert.match(first.error, /^unknown:/i);
+      assert.match(first.error, /retried this throttled send internally/i);
+      let ledger = readOutbox(env);
+      assert.equal(ledger.attempts[0].state, "unknown");
+      assert.equal(ledger.attempts[0].retryAfter, undefined);
+      const callCount = sendCalls(env).length;
+      const repeat = command("send", args);
+      assert.match(repeat.error, /^unknown:/i);
+      assert.equal(sendCalls(env).length, callCount, "m365's internally retried outcome is never retried by the plugin");
+      ledger = readOutbox(env);
+      assert.equal(ledger.attempts.length, 1);
+      assert.equal(ledger.attempts[0].state, "unknown");
+    } finally { env.cleanup(); }
   }
 });
 
@@ -777,11 +779,10 @@ test("reauth failures retain the read taxonomy and never enter the rate-limit pa
       assert.match(result.error, /^reauth-needed:/i, cause);
       assert.match(result.error, new RegExp(cause.replaceAll("-", "[- ]"), "i"));
       assert.match(result.error, action);
-      const ledger = JSON.parse(fs.readFileSync(plugin.__test_paths().outbox, "utf8"));
+      const ledger = readOutbox(env);
       assert.equal(ledger.attempts[0].state, "failed");
       assert.equal(ledger.attempts[0].failure, "reauth-needed");
       assert.equal(ledger.attempts[0].failureCause, cause);
-      assert.equal(ledger.attempts[0].retryAfter, undefined);
       assert.equal(sendCalls(env).length, 1, "reauth refusal is not retried as a transient failure");
     } finally { env.cleanup(); }
   }
@@ -790,7 +791,7 @@ test("reauth failures retain the read taxonomy and never enter the rate-limit pa
 test("all send failures have distinct actionable taxonomy and no generic failure text", () => {
   const states = ["not-logged-in", "reauth-needed", "policy-not-set", "destination-not-permitted", "rate-limited", "upstream-rejected", "unknown"];
   const messages = states.map((state) => plugin.__test_failureMessage(state, state === "rate-limited" ? 123 : "fixture detail", "mfa-required"));
-  const actions = [/sign in/i, /Sign in again|MFA/i, /explicitly approve/i, /approved immutable chat/i, /invoke send again/i, /Correct the permission|request issue/i, /inspect the selected chat/i];
+  const actions = [/sign in/i, /Sign in again|MFA/i, /explicitly approve/i, /approved immutable chat/i, /inspect Teams Client status|selected chat/i, /Correct the permission|request issue/i, /inspect the selected chat/i];
   assert.equal(new Set(messages).size, states.length);
   states.forEach((state, index) => {
     assert.ok(messages[index].startsWith(`${state}:`));
