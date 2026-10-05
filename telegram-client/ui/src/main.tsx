@@ -15,6 +15,15 @@ type Health = {
   accounts?: Account[];
   currentAccount?: string | null;
   resolvedAccount?: unknown;
+  sendPolicy?: { configured: boolean; mode?: string | null; senderAccountId?: string; allowedDestinations?: Array<{ id: string; label: string }> };
+  sendState?: { state: string; failure?: string | null; message?: string | null; retryAfter?: number | null; destination?: unknown } | null;
+};
+type Preview = {
+  previewId: string;
+  sender: { id: string; displayName: string; username?: string | null; telegramUserId: string };
+  destination: { id: string; label: string };
+  text: string;
+  policy: Health["sendPolicy"];
 };
 
 const inputStyle: React.CSSProperties = {
@@ -38,6 +47,10 @@ function App() {
   const [loginOutput, setLoginOutput] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [chatId, setChatId] = useState("");
+  const [sendText, setSendText] = useState("");
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [sendReceipt, setSendReceipt] = useState("");
 
   async function refresh() {
     setBusy(true);
@@ -99,6 +112,8 @@ function App() {
 
   async function selectAccount(id: string) {
     setBusy(true);
+    setPreview(null);
+    setSendReceipt("");
     try {
       const result = await window.ct!.invoke("useAccount", { id }) as { error?: string };
       if (result.error) throw new Error(result.error);
@@ -118,6 +133,8 @@ function App() {
       setMessage(result.result || "Logged out.");
       setLoginOutput("");
       setJobId("");
+      setPreview(null);
+      setSendReceipt("");
       await refresh();
     } catch (error) {
       setMessage(String(error));
@@ -126,7 +143,72 @@ function App() {
     }
   }
 
+  async function previewSend() {
+    setBusy(true);
+    setMessage("");
+    setPreview(null);
+    setSendReceipt("");
+    try {
+      const result = await window.ct!.invoke("preview", { chatId, text: sendText }) as Preview | { error?: string; result?: string };
+      if ("error" in result && result.error) throw new Error(result.error);
+      const parsed = "result" in result && result.result ? JSON.parse(result.result) as Preview : result as Preview;
+      if (!parsed.sender?.id || !parsed.destination?.id || typeof parsed.text !== "string") throw new Error("Telegram did not return a complete resolved preview.");
+      setPreview(parsed);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function enableSavedMessagesPolicy() {
+    if (!preview || preview.destination.label !== "Saved Messages") return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const result = await window.ct!.invoke("setSendPolicy", { previewId: preview.previewId, approveSavedMessagesOnly: true }) as { result?: string; error?: string };
+      if (result.error) throw new Error(result.error);
+      if (result.result) {
+        const policy = JSON.parse(result.result);
+        setPreview((current) => current ? { ...current, policy } : current);
+      }
+      await refresh();
+      setMessage("Saved-Messages-only send policy is enabled for the resolved sender.");
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendPreview() {
+    if (!preview || !health?.sendPolicy?.configured) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const result = await window.ct!.invoke("send", {
+        chatId: preview.destination.id,
+        text: preview.text,
+        previewId: preview.previewId,
+        idempotencyKey: preview.previewId,
+      }) as { result?: string; error?: string };
+      if (result.error) throw new Error(result.error);
+      setSendReceipt(result.result || "");
+      await refresh();
+    } catch (error) {
+      const failure = String(error);
+      await refresh();
+      setMessage(failure);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const accounts = health?.accounts || [];
+  const policyAllowsPreview = !!preview && !!health?.sendPolicy?.configured &&
+    health.sendPolicy.senderAccountId === preview.sender.id &&
+    health.sendPolicy.allowedDestinations?.some((item) => item.id === preview.destination.id);
+  const previewMatchesInput = !!preview && preview.destination.id === chatId && preview.text === sendText;
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", maxWidth: 720, margin: "0 auto", padding: 20, color: "var(--ct-fg, #eee)", background: "var(--ct-bg, #14141c)" }}>
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16 }}>
@@ -140,6 +222,31 @@ function App() {
       {message && <p role="status" style={{ color: "var(--ct-warn, #e0a030)", whiteSpace: "pre-wrap" }}>{message}</p>}
       {health?.message && <p style={{ color: "var(--ct-muted, #9aa)" }}>{health.message}</p>}
       {health?.storage && <p style={{ fontSize: 12, color: "var(--ct-muted, #9aa)" }}>Session storage: {health.storage.name}. {health.storage.note}</p>}
+
+      <section style={{ marginTop: 22, padding: 16, border: "1px solid var(--ct-border-default, rgba(255,255,255,.12))", borderRadius: 8 }}>
+        <h2 style={{ margin: "0 0 8px", fontSize: 15 }}>Preview and send</h2>
+        <p style={{ margin: "0 0 12px", fontSize: 12, color: "var(--ct-muted, #9aa)" }}>
+          Sending is locked until you review a resolved sender and immutable destination. The initial owner policy permits Saved Messages only.
+        </p>
+        <label style={{ display: "block", marginBottom: 10, fontSize: 12 }}>Immutable chat id
+          <input style={inputStyle} value={chatId} autoComplete="off" placeholder="id:12345" onChange={(event) => { setChatId(event.target.value); setPreview(null); setSendReceipt(""); }} />
+        </label>
+        <label style={{ display: "block", marginBottom: 10, fontSize: 12 }}>Exact message text
+          <textarea style={{ ...inputStyle, minHeight: 82, resize: "vertical" }} value={sendText} onChange={(event) => { setSendText(event.target.value); setPreview(null); setSendReceipt(""); }} />
+        </label>
+        <button style={buttonStyle} disabled={busy || !chatId || !sendText} onClick={() => void previewSend()}>Preview resolved send</button>
+        {preview && <div style={{ marginTop: 12, padding: 12, border: "1px solid var(--ct-border-default, rgba(255,255,255,.12))", borderRadius: 6 }}>
+          <strong>Resolved sender and destination</strong>
+          <p style={{ margin: "8px 0" }}>Sender: <strong>{preview.sender.displayName}</strong> · account id <code>{preview.sender.id}</code> · Telegram user id <code>{preview.sender.telegramUserId}</code></p>
+          <p style={{ margin: "8px 0" }}>Destination: <strong>{preview.destination.label}</strong> · immutable id <code>{preview.destination.id}</code></p>
+          <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", padding: 10, borderRadius: 6, background: "rgba(0,0,0,.18)", fontSize: 12 }}>{preview.text}</pre>
+          <p style={{ margin: "8px 0", fontSize: 12 }}>Policy: {preview.policy?.configured ? "Saved Messages only is enabled" : "no owner-approved send policy is set"}</p>
+          {preview.destination.label === "Saved Messages" && !health?.sendPolicy?.configured && <button style={buttonStyle} disabled={busy || !previewMatchesInput} onClick={() => void enableSavedMessagesPolicy()}>Enable Saved-Messages-only policy</button>}
+          <button style={{ ...buttonStyle, marginLeft: 8 }} disabled={busy || !previewMatchesInput || !policyAllowsPreview} onClick={() => void sendPreview()}>{busy ? "Working" : "Send this preview"}</button>
+        </div>}
+        {sendReceipt && <pre role="status" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", padding: 10, borderRadius: 6, background: "rgba(0,0,0,.18)", fontSize: 11 }}>{sendReceipt}</pre>}
+        {health?.sendState && <p role="status" style={{ fontSize: 12, color: "var(--ct-muted, #9aa)" }}>Last send state: <strong>{health.sendState.state}</strong>{health.sendState.message ? ` · ${health.sendState.message}` : ""}</p>}
+      </section>
 
       <section style={{ marginTop: 22, padding: 16, border: "1px solid var(--ct-border-default, rgba(255,255,255,.12))", borderRadius: 8 }}>
         <h2 style={{ margin: "0 0 12px", fontSize: 15 }}>Sign in with QR</h2>
@@ -182,7 +289,7 @@ function App() {
       </section>
 
       <footer style={{ marginTop: 20, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-        <span style={{ fontSize: 11, color: "var(--ct-muted, #9aa)" }}>Agent verbs: accounts, use, chats, history, health, logout. Sending is disabled.</span>
+        <span style={{ fontSize: 11, color: "var(--ct-muted, #9aa)" }}>Agent verbs: accounts, use, chats, history, health, logout, preview, send.</span>
         <button style={{ ...buttonStyle, background: "var(--ct-err, #b64d58)" }} disabled={busy || !health?.currentAccount} onClick={() => void logout()}>Logout</button>
       </footer>
     </main>
