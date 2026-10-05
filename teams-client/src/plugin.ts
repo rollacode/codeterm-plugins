@@ -320,7 +320,7 @@ function authState(text: string): { state: string; message: string } | null {
   if (/AADSTS700082|AADSTS700084|login has expired|access token expired|token has expired|expired refresh token/i.test(value)) {
     return { state: "token-expired", message: "The Microsoft token expired. Click Sign in again to renew the browser session." };
   }
-  if (/Can't open the default browser|could not open.*browser|browser instance/i.test(value)) {
+  if (/can't open(?: the)? default browser|could not open.*browser|failed to (?:open|launch).*browser|browser instance/i.test(value)) {
     return { state: "browser-open-failed", message: "m365 could not open the default browser. Set a system default browser or start CodeTerm in a desktop session, then retry Sign in." };
   }
   return null;
@@ -1115,7 +1115,7 @@ function loginStart(authType: LoginAuthType = "browser"): any {
   if (target.state !== "ready" || !target.paths) return { error: lifecycleMessage(target.state, target.message) };
   const started = startBrowserLogin(target.paths, target.target!, authType);
   if (!started.jobId) return { error: started.error || "m365 browser sign-in did not start.", state: "install-failed" };
-  return { jobId: started.jobId, state: "login-in-progress", message: "Complete Microsoft work or school sign-in, then check sign-in status." };
+  return { jobId: started.jobId, state: "login-in-progress", message: "Complete Microsoft work or school sign-in in the browser, then check sign-in status." };
 }
 
 function loginPoll(jobId: string): any {

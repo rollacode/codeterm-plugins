@@ -238,9 +238,10 @@ test("agent preview cannot approve Saved Messages; a view preview can", () => {
 function drive(value) {
   while (value && value.__ctAwait__) {
     const { job, k } = value.__ctAwait__;
+    const result = JSON.parse(JSON.stringify(globalThis.host.exec.poll(job)));
+    assert.equal(result.done, true, "the mocked await job resolves before continuation resumes");
     const continuation = globalThis.__ct_await_take__(k);
     assert.equal(typeof continuation, "function", "await continuation is taken exactly once");
-    const result = globalThis.host.exec.poll(job);
     if (result.simulatedTimeout) value = continuation({ error: "simulated lost response timeout", done: true });
     else value = continuation(result);
   }
@@ -292,7 +293,8 @@ test("manifest exposes only Telegram capabilities and the helper binary", () => 
   assert.equal(manifest.permissions.secrets, true);
   assert.deepEqual(manifest.permissions.subprocess.allow, ["tg", "tg.exe"]);
   assert.match(manifest.configHelp, /accounts.*use.*chats.*history.*health.*logout/is);
-  assert.match(manifest.configHelp, /--set api_id=.*--set api_hash=/i);
+  assert.match(manifest.configHelp, /printf.*--secret api_id.*printf.*--secret api_hash/is);
+  assert.doesNotMatch(manifest.configHelp, /--set\s+api_(?:id|hash)/i);
   assert.match(manifest.configHelp, /returned qrPayload.*returned tgLink/i);
   assert.equal(manifest.configHelp.includes("0123456789abcdef"), false);
   const settings = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));

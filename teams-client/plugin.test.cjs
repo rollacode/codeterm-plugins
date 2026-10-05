@@ -242,9 +242,11 @@ function command(verb, args = [], sessionId = "send-test") {
 function drive(value) {
   while (value && value.__ctAwait__) {
     const { job, k } = value.__ctAwait__;
+    const result = JSON.parse(JSON.stringify(globalThis.host.exec.poll(job)));
+    assert.equal(result.done, true, "the mocked await job resolves before continuation resumes");
     const continuation = globalThis.__ct_await_take__(k);
     assert.equal(typeof continuation, "function", "await continuation is taken exactly once");
-    value = continuation(globalThis.host.exec.poll(job));
+    value = continuation(result);
   }
   return value;
 }
