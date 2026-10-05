@@ -24,7 +24,7 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 var VERSION = "0.11.0";
-var ROOT = "~/.local/share/codeterm-plugins/telegram-client";
+var ROOT = "~/.codeterm/telegram-client";
 var CONFIG_NAME = "gotd.cli.yaml";
 var INITIAL_SEND_POLICY_MODE = "saved-messages-only";
 var MAX_COUNT = 50;
@@ -33,6 +33,7 @@ var loginJobs = {};
 var loginPasswords = {};
 var loginLaunchPending = {};
 var loginLogPaths = {};
+var activeLoginJobId = null;
 var previewTokens = {};
 var injectedClock = null;
 var transientSendFailure = null;
@@ -93,6 +94,13 @@ function redact(text) {
   }
   return out;
 }
+function telegramLoginArtifacts(text) {
+  const safe = redact(String(text || "")).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, " ");
+  const match = safe.match(/tg:\/\/login\?token=[A-Za-z0-9_%=-]+/i);
+  if (!match) return {};
+  const link = match[0].replace(/[),.;]+$/, "");
+  return { qrPayload: link, tgLink: link };
+}
 function safeError(run) {
   if (run.ok) return "";
   const detail = redact(run.error || run.stderr || "tg command failed").trim();
@@ -115,21 +123,17 @@ function startTg(args, env, extra) {
     return { error: "Could not confirm whether tg started.", ambiguousStart: true };
   }
 }
-function awaitStarted(job) {
-  if (job.error || !job.jobId) return { ok: false, error: job.error || "tg did not start", stderr: "" };
-  try {
-    const result = host.awaitJob(job.jobId, (value) => value);
-    const stdout = redact(result.stdout || "");
-    const stderr = redact(result.stderr || "");
-    if (result.error) return { ok: false, error: redact(result.error), stderr };
-    if (result.code !== 0) return { ok: false, error: stderr || stdout || `tg exited ${result.code}`, stderr };
-    return { ok: true, stdout, stderr };
-  } catch (error) {
-    return { ok: false, error: redact(String(error)), stderr: "" };
-  }
-}
 function runTg(args, env) {
-  return awaitStarted(startTg(args, env));
+  const opts = options(args, env, { timeoutMs: 4500 });
+  if (!opts) return { ok: false, error: "tg is not installed. Run node telegram-client/scripts/install-tg.cjs from the plugins checkout.", stderr: "" };
+  const raw = host.exec(JSON.stringify(opts));
+  const result = parseJson(raw);
+  if (!result) return { ok: false, error: "tg returned an unreadable process result.", stderr: "" };
+  const stdout = redact(result.stdout || "");
+  const stderr = redact(result.stderr || "");
+  if (result.error) return { ok: false, error: redact(result.error), stderr };
+  if (result.code !== 0) return { ok: false, error: stderr || stdout || `tg exited ${result.code}`, stderr };
+  return { ok: true, stdout, stderr };
 }
 function jsonCommand(args) {
   const run = runTg(["--output", "json"].concat(args));
@@ -459,7 +463,7 @@ function resolveDestination(id, sender) {
   return { destination: { id: String(match.id), label: String(match.title || match.id) } };
 }
 var previewSequence = 0;
-function previewCommand(args) {
+function previewCommand(args, origin = "agent") {
   if (args.length < 2) return { error: "Usage: preview <immutable-chat-id> <text>." };
   if (!validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> <text>. Display names are not accepted; choose an id from chats." };
   const text = args.slice(1).join(" ");
@@ -468,8 +472,8 @@ function previewCommand(args) {
   if ("error" in resolved) return { error: resolved.error };
   const destination = resolveDestination(args[0], resolved.sender);
   if ("error" in destination) return { error: destination.error };
-  const previewId = sha256Hex(`${resolved.sender.id}\0${destination.destination.id}\0${text}\0${++previewSequence}`);
-  previewTokens[previewId] = { sender: resolved.sender, destination: destination.destination, text };
+  const previewId = sha256Hex(`preview\0${now()}\0${++previewSequence}`);
+  previewTokens[previewId] = { sender: resolved.sender, destination: destination.destination, text, origin, previewNonce: previewId };
   return { result: JSON.stringify({
     previewId,
     sender: resolved.sender,
@@ -500,7 +504,7 @@ function failureMessage(kind, detail) {
 function setSendPolicy(args) {
   if (args.approveSavedMessagesOnly !== true) return { error: "No send policy was changed. Use the explicit Saved Messages only approval control after reviewing its preview." };
   const preview = previewTokens[String(args.previewId || "")];
-  if (!preview) return { error: "Preview expired or was not resolved in this view. Preview the sender and destination again before enabling a policy." };
+  if (!preview || preview.origin !== "view") return { error: "Only a preview created in this view can enable a send policy. Review a fresh view preview first." };
   const expected = `id:${preview.sender.telegramUserId}`;
   if (preview.destination.id !== expected || preview.destination.label !== "Saved Messages") {
     return { error: "The initial send policy can permit only this sender's Saved Messages destination. Preview Saved Messages before approving it." };
@@ -554,7 +558,7 @@ function sendFailureResult(kind, detail) {
 function rememberPrefixedFailure(message) {
   const state = message.slice(0, message.indexOf(":"));
   const allowed = ["not-logged-in", "reauth-needed", "policy-not-set", "destination-not-permitted", "rate-limited", "upstream-rejected", "unknown"];
-  return allowed.indexOf(state) >= 0 ? rememberSendFailure(state, message) : rememberSendFailure("upstream-rejected", message);
+  return allowed.indexOf(state) >= 0 ? rememberSendFailure(state, message) : rememberSendFailure("unknown", "The command result could not be classified safely. Inspect Telegram before retrying.");
 }
 function parseSendArgs(args) {
   if (args.length < 2 || !validChatId(args[0])) return { error: "destination-not-permitted: Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>. Choose an id from chats; display names are not accepted." };
@@ -573,8 +577,9 @@ function failureForUpstream(message) {
   if (authFailure(message)) return "reauth-needed";
   if (/not logged in|no active session|run tg login/i.test(message)) return "not-logged-in";
   if (waitSeconds(message) !== null) return "rate-limited";
-  if (/timeout|timed out|deadline exceeded|connection reset|connection closed|unexpected EOF|\bEOF\b|broken pipe|lost response|context cancel+ed|terminated|signal|killed/i.test(message)) return "unknown";
-  return "upstream-rejected";
+  if (/MESSAGE_TOO_LONG|PEER_ID_INVALID|CHAT_WRITE_FORBIDDEN|USER_BANNED_IN_CHANNEL|USER_PRIVACY_RESTRICTED|CHAT_ADMIN_REQUIRED|WRITE_FORBIDDEN/i.test(message)) return "upstream-rejected";
+  if (/exec denied|spawn .*?(?:ENOENT|EACCES)|binary .*?not found|not installed/i.test(message)) return "upstream-rejected";
+  return "unknown";
 }
 function waitSeconds(message) {
   const match = message.match(/FLOOD_WAIT_(\d+)/i) || message.match(/wait of\s+(\d+)\s+seconds/i);
@@ -632,9 +637,12 @@ function recordedByCallerKey(key, chatId2, text) {
 function sendCommand(sessionId, args) {
   const parsed = parseSendArgs(args);
   if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
-  const key = parsed.key || sha256Hex(`${sessionId}\0${parsed.chatId}\0${parsed.text}`);
-  const recorded = recordedByCallerKey(key, parsed.chatId, parsed.text);
-  if (recorded) return recorded;
+  const matchingPreview = Object.values(previewTokens).reverse().find((token) => token.sender.id === policySummary().senderAccountId && token.destination.id === parsed.chatId && token.text === parsed.text);
+  const key = parsed.key || matchingPreview?.previewNonce;
+  if (key) {
+    const recorded = recordedByCallerKey(key, parsed.chatId, parsed.text);
+    if (recorded) return recorded;
+  }
   const policy = policySummary();
   if (!policy.configured) return sendFailureResult("policy-not-set");
   const resolved = resolveSender();
@@ -643,6 +651,7 @@ function sendCommand(sessionId, args) {
   if ("error" in found) return sendFailureResult("destination-not-permitted", policy.allowedDestinations[0] && policy.allowedDestinations[0].id);
   const permitted = policy.senderAccountId === resolved.sender.id && policy.allowedDestinations.some((entry) => entry.id === found.destination.id && found.destination.label === "Saved Messages");
   if (!permitted || found.destination.id !== `id:${resolved.sender.telegramUserId}`) return sendFailureResult("destination-not-permitted", policy.allowedDestinations[0] && policy.allowedDestinations[0].id);
+  if (!key) return sendFailureResult("upstream-rejected", "create a fresh preview before sending without an explicit idempotency key");
   const payloadHash = sha256Hex(parsed.text);
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
@@ -681,30 +690,24 @@ function sendCommand(sessionId, args) {
   delete attempt.failureMessage;
   delete attempt.retryAfter;
   if (!persistOutbox(p, ledger)) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; Telegram was not contacted");
-  const started = startTg(["--account", resolved.sender.id, "--output", "json", "send", "--", parsed.text]);
-  if (started.ambiguousStart) return failAttempt(p, ledger, attempt, "unknown");
-  if (started.error || !started.jobId) return failAttempt(p, ledger, attempt, "upstream-rejected", started.error || "tg did not start");
-  let result;
-  try {
-    result = host.awaitJob(started.jobId, (value) => value);
-  } catch {
-    return failAttempt(p, ledger, attempt, "unknown");
-  }
-  if (!result || result.done === false) return failAttempt(p, ledger, attempt, "unknown");
-  const output = redact(result.stdout || "");
-  const detail = redact(result.error || result.stderr || output).trim();
-  if (result.error || result.code !== 0) return failAttempt(p, ledger, attempt, failureForUpstream(detail), detail);
-  const response = parseJson(output.trim());
-  if (!response || response.schema !== 1 || response.data === void 0) return failAttempt(p, ledger, attempt, "unknown");
-  const message = response.data.message || response.data;
-  const upstreamId = message && (message.id !== void 0 ? message.id : message.message_id);
-  attempt.telegramMessageId = upstreamId === void 0 || upstreamId === null ? void 0 : String(upstreamId);
-  attempt.state = "sent";
-  attempt.updatedAt = now();
-  delete attempt.failure;
-  delete attempt.failureMessage;
-  if (!persistOutbox(p, ledger)) return sendFailureResult("unknown");
-  return attemptResult(attempt);
+  const opts = options(["--account", resolved.sender.id, "--output", "json", "send", "--", parsed.text], void 0, { timeoutMs: 5e3 });
+  if (!opts) return failAttempt(p, ledger, attempt, "upstream-rejected", "tg binary is unavailable before send");
+  return host.exec.async(opts, (result) => {
+    const output = redact(result.stdout || "");
+    const detail = redact(result.error || result.stderr || output).trim();
+    if (result.error || typeof result.code !== "number" || result.code !== 0) return failAttempt(p, ledger, attempt, failureForUpstream(detail), detail);
+    const response = parseJson(output.trim());
+    if (!response || response.schema !== 1 || response.data === void 0) return failAttempt(p, ledger, attempt, "unknown");
+    const message = response.data.message || response.data;
+    const upstreamId = message && (message.id !== void 0 ? message.id : message.message_id);
+    attempt.telegramMessageId = upstreamId === void 0 || upstreamId === null ? void 0 : String(upstreamId);
+    attempt.state = "sent";
+    attempt.updatedAt = now();
+    delete attempt.failure;
+    delete attempt.failureMessage;
+    if (!persistOutbox(p, ledger)) return sendFailureResult("unknown");
+    return attemptResult(attempt);
+  });
 }
 function agentHistory(args) {
   if (args.length < 1 || args.length > 2 || !validChatId(args[0])) return { error: "Usage: history id:<numeric-chat-id> [count]. Select an id from chats." };
@@ -853,16 +856,17 @@ function ensureAccount(label, apiId, apiHash) {
   }
   return {};
 }
-function loginStart(args) {
+function loginStart(args, fromAgent = false) {
   const p = paths();
   if (!p || !host.fs.fileExists(p.binary)) return { error: "tg is not installed. Run node telegram-client/scripts/install-tg.cjs from the plugins checkout." };
-  const apiId = String(args.apiId || "").trim();
-  const apiHash = String(args.apiHash || "").trim();
+  if (activeLoginJobId && loginJobs[activeLoginJobId]) return { jobId: activeLoginJobId, state: "login-in-progress", message: "Telegram login is already running. Open the plugin view to view its QR and progress." };
+  const apiId = String(fromAgent ? host.secretGet("api_id") || "" : args.apiId || "").trim();
+  const apiHash = String(fromAgent ? host.secretGet("api_hash") || "" : args.apiHash || "").trim();
   const label = String(args.accountLabel || "default").trim();
   const twoFactorPassword = String(args.twoFactorPassword || "");
   if (!/^[0-9]{1,12}$/.test(apiId) || !/^[A-Fa-f0-9]{32}$/.test(apiHash)) return { error: "Enter your own numeric Telegram API ID and 32-character API hash." };
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(label) || label === "all") return { error: "Account label must use letters, numbers, hyphens, or underscores." };
-  if (!host.secretSet("api_id", apiId) || !host.secretSet("api_hash", apiHash)) return { error: "Could not store Telegram API credentials in the host secret store." };
+  if (!fromAgent && (!host.secretSet("api_id", apiId) || !host.secretSet("api_hash", apiHash))) return { error: "Could not store Telegram API credentials in the host secret store." };
   const setup = ensureAccount(label, apiId, apiHash);
   if (setup.error) return { error: setup.error };
   const logFile = childPath(p.root, `login-${label}.log`);
@@ -873,6 +877,7 @@ function loginStart(args) {
   const job = startTg(["--account", label, "login", "--output", "json"], twoFactorPassword ? { TG_PASSWORD: twoFactorPassword } : {}, { detach: true, logFile });
   if (job.error || !job.jobId) return { error: job.error || "tg login did not start." };
   loginJobs[job.jobId] = label;
+  activeLoginJobId = job.jobId;
   loginLaunchPending[job.jobId] = true;
   loginLogPaths[job.jobId] = logFile;
   if (twoFactorPassword) loginPasswords[job.jobId] = twoFactorPassword;
@@ -893,13 +898,18 @@ function loginPoll(jobId) {
       let partial = host.fs.readFileTail(loginLogPaths[jobId], 8192) || "";
       const password = loginPasswords[jobId] || "";
       if (password) partial = partial.split(password).join("[redacted]");
-      return { done: false, output: redact(partial), state: "login-in-progress" };
+      return { done: false, output: redact(partial), state: "login-in-progress", ...telegramLoginArtifacts(partial) };
+    }
+    try {
+      host.exec.close(jobId);
+    } catch {
     }
     delete loginLaunchPending[jobId];
     if (launch.error || launch.code !== 0) {
       delete loginJobs[jobId];
       delete loginPasswords[jobId];
       delete loginLogPaths[jobId];
+      if (activeLoginJobId === jobId) activeLoginJobId = null;
       return { done: true, output: redact(launch.stderr || ""), error: redact(launch.error || launch.stderr || "tg login could not start."), state: "reauth-needed" };
     }
   }
@@ -909,10 +919,12 @@ function loginPoll(jobId) {
   output = redact(output);
   const label = loginJobs[jobId];
   const verified = jsonCommand(["--account", label, "whoami"]);
-  if (verified.error) return { done: false, output, state: "login-in-progress", message: "Scan the QR, then refresh progress. Telegram session authorization is still pending." };
+  const artifacts = telegramLoginArtifacts(output);
+  if (verified.error) return { done: false, output, state: "login-in-progress", message: "Scan the QR, then refresh progress. Telegram session authorization is still pending.", ...artifacts };
   const selected = runTg(["accounts", "default", label]);
-  if (!selected.ok) return { done: false, output, state: "login-in-progress", message: safeError(selected) };
+  if (!selected.ok) return { done: false, output, state: "login-in-progress", message: safeError(selected), ...artifacts };
   delete loginJobs[jobId];
+  if (activeLoginJobId === jobId) activeLoginJobId = null;
   delete loginPasswords[jobId];
   delete loginLogPaths[jobId];
   try {
@@ -923,7 +935,7 @@ function loginPoll(jobId) {
     host.secretSet("configured_once", "true");
   } catch {
   }
-  return { done: true, output, state: "logged-in", currentAccount: label };
+  return { done: true, output, state: "logged-in", currentAccount: label, ...artifacts };
 }
 function removeFiles(p) {
   const entries = host.fs.readDir(p.root) || [];
@@ -969,6 +981,34 @@ function logout() {
 function onAgentCommand(ctx) {
   const args = Array.isArray(ctx.args) ? ctx.args : [];
   switch (ctx.verb) {
+    case "login": {
+      if (args.length) return { error: "Usage: login. Enter API credentials in the Telegram Client view first." };
+      const started = loginStart({}, true);
+      if (started.error) return { error: "Telegram login could not start. Check the Telegram Client view for details." };
+      const current = loginPoll(started.jobId);
+      if (current.error) return { error: "Telegram login status needs attention. Check the Telegram Client view for details." };
+      return { result: JSON.stringify({
+        state: String(current.state || started.state),
+        jobId: started.jobId,
+        qrPayload: current.qrPayload,
+        tgLink: current.tgLink,
+        message: current.qrPayload ? "Scan the QR payload or open the tg:// link from Telegram Settings \u2192 Devices \u2192 Link Desktop Device." : "Telegram login started. Poll login-status for the QR payload and tg:// link."
+      }) };
+    }
+    case "login-status": {
+      if (args.length) return { error: "Usage: login-status." };
+      if (!activeLoginJobId) return { result: JSON.stringify({ state: status().state, done: true }) };
+      const current = loginPoll(activeLoginJobId);
+      if (current.error) return { error: "Telegram login status needs attention. Check the Telegram Client view for details." };
+      return { result: JSON.stringify({
+        done: current.done === true,
+        state: String(current.state || "login-in-progress"),
+        currentAccount: current.currentAccount,
+        qrPayload: current.qrPayload,
+        tgLink: current.tgLink,
+        message: current.done ? "Telegram login status is complete." : current.qrPayload ? "Scan the QR payload or open the tg:// link from Telegram Settings \u2192 Devices \u2192 Link Desktop Device." : "Login is still pending; poll again for the QR payload and tg:// link."
+      }) };
+    }
     case "accounts":
       return agentAccounts();
     case "use":
@@ -989,7 +1029,7 @@ function onAgentCommand(ctx) {
     case "send":
       return sendCommand(ctx.sessionId, args);
     case "preview":
-      return previewCommand(args);
+      return previewCommand(args, "agent");
     default:
       return { error: `Unknown Telegram verb: ${ctx.verb}` };
   }
@@ -1041,11 +1081,12 @@ function viewCall(method, args) {
   args = args || {};
   if (method === "status") {
     const current = status();
+    current.loginJobId = activeLoginJobId;
     current.sendPolicy = policySummary();
     current.sendState = latestSendState();
     return current;
   }
-  if (method === "preview") return previewCommand([String(args.chatId || ""), String(args.text || "")]);
+  if (method === "preview") return previewCommand([String(args.chatId || ""), String(args.text || "")], "view");
   if (method === "setSendPolicy") return setSendPolicy(args);
   if (method === "send") {
     const request = [String(args.chatId || "")];
@@ -1055,6 +1096,7 @@ function viewCall(method, args) {
     if (!token || token.destination.id !== request[0] || token.text !== String(args.text || "")) {
       return rememberSendFailure("destination-not-permitted", "destination-not-permitted: This view has no matching resolved preview. Review the sender, immutable destination, and exact text again before sending.");
     }
+    request.push("--key", token.previewNonce);
     return sendCommand("plugin-view", request);
   }
   if (method === "loginStart") return loginStart(args);
@@ -1087,6 +1129,7 @@ var plugin = {
   __test_sha256Hex: sha256Hex,
   __test_policySummary: policySummary,
   __test_latestSendState: latestSendState,
-  __test_failureMessage: failureMessage
+  __test_failureMessage: failureMessage,
+  __test_failureForUpstream: failureForUpstream
 };
 var plugin_default = plugin;

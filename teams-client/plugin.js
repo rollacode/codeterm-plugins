@@ -26,7 +26,7 @@ module.exports = __toCommonJS(plugin_exports);
 var VERSION = "11.11.0";
 var PACKAGE = "@pnp/cli-microsoft365";
 var CLIENT_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
-var ROOT = "~/.local/share/codeterm-plugins/teams-client";
+var ROOT = "~/.codeterm/teams-client";
 var INITIAL_SEND_POLICY_MODE = "single-chat";
 var MAX_COUNT = 50;
 var MAX_BYTES = 32 * 1024;
@@ -42,6 +42,10 @@ var INTEGRITY_BY_TARGET = {
 };
 var METADATA_READER = "const path=require('node:path');const {pathToFileURL}=require('node:url');const authFile=path.resolve(process.env.M365_RUNTIME,'node_modules/@pnp/cli-microsoft365/dist/Auth.js');import(pathToFileURL(authFile).href).then(async m=>{const a=m.default;await a.restoreAuth();const c=a.connection||{};const expiry=c.accessTokens&&c.accessTokens['https://graph.microsoft.com']&&c.accessTokens['https://graph.microsoft.com'].expiresOn;const all=await a.getAllConnections();const project=x=>({name:x.name||null,accountId:x.identityId||x.name||null,identityId:x.identityId||null,tenantId:x.identityTenantId||null,upn:x.identityName||null});process.stdout.write(JSON.stringify({active:c.active?project(c):null,expiresOn:expiry?String(expiry):null,connections:all.map(project)}));}).catch(()=>process.stdout.write(JSON.stringify({active:null,expiresOn:null,connections:[]})));";
 var loginJobs = {};
+var activeLoginJobId = null;
+var runtimeInfoCache = {};
+var storageProtectionCache = {};
+var cacheProtectionCache = {};
 var previewTokens = {};
 var cachedChats = null;
 var injectedClock = null;
@@ -114,23 +118,16 @@ function envFor(p) {
   };
 }
 function runProcess(bin, args, env) {
-  let started;
-  try {
-    started = host.exec.start({ bin, args, env });
-  } catch (error) {
-    return { ok: false, error: String(error), stderr: "" };
-  }
-  if (!started.jobId) return { ok: false, error: started.error || `Could not start ${bin}.`, stderr: "" };
   let result;
   try {
-    result = host.awaitJob(started.jobId, (value) => value);
+    result = parseJson(host.exec(JSON.stringify({ bin, args, env, timeoutMs: 4500 })));
   } catch (error) {
     return { ok: false, error: String(error), stderr: "" };
   }
+  if (!result) return { ok: false, error: `${bin} returned an unreadable process result.`, stderr: "" };
   const stdout = String(result.stdout || "");
   const stderr = String(result.stderr || "");
   if (result.error) return { ok: false, error: String(result.error), stderr, code: result.code };
-  if (!result.done) return { ok: false, error: `${bin} did not finish.`, stderr, code: result.code };
   if (result.code !== 0) return { ok: false, error: stderr || stdout || `${bin} exited ${result.code}.`, stderr, code: result.code };
   return { ok: true, stdout, stderr };
 }
@@ -142,6 +139,12 @@ function parseJson(value) {
   }
 }
 function runtimeInfo(p) {
+  if (runtimeInfoCache[p.root]) return runtimeInfoCache[p.root];
+  const result = computeRuntimeInfo(p);
+  runtimeInfoCache[p.root] = result;
+  return result;
+}
+function computeRuntimeInfo(p) {
   const platform = hostPlatform();
   if (platform !== "darwin" && platform !== "linux" && platform !== "win32") {
     return { state: "unsupported-platform", message: `No pinned m365 runtime is available for ${platform || "this operating system"}. Supported targets are macOS, Linux, and Windows on x64 or arm64.` };
@@ -163,6 +166,12 @@ function runtimeInfo(p) {
   return { platform: actualPlatform, arch, version, target };
 }
 function protectStorage(p) {
+  if (storageProtectionCache[p.root]) return storageProtectionCache[p.root];
+  const result = applyStorageProtection(p);
+  storageProtectionCache[p.root] = result;
+  return result;
+}
+function applyStorageProtection(p) {
   for (const dir of [p.root, p.home, p.runtime, p.npmCache]) {
     try {
       if (!host.fs.makeDirs(dir)) return { error: "storage-protection-failed", message: "Could not create the plugin-owned private runtime directory." };
@@ -188,7 +197,13 @@ function protectStorage(p) {
   }
   return {};
 }
-function protectCacheFiles(p) {
+function protectCacheFiles(p, force = false) {
+  if (!force && cacheProtectionCache[p.root]) return cacheProtectionCache[p.root];
+  const result = applyCacheFileProtection(p);
+  cacheProtectionCache[p.root] = result;
+  return result;
+}
+function applyCacheFileProtection(p) {
   if (host.path.isWindows) return protectStorage(p);
   const env = envFor(p);
   for (const file of [p.msal, p.current, p.all]) {
@@ -198,27 +213,94 @@ function protectCacheFiles(p) {
   }
   return {};
 }
-function installM365() {
+function startLoginProcess(p, target, stage, args, packagePath, authType = "browser") {
+  let started;
+  const bin = stage === "pack" || stage === "install" ? target.npm : nativePath(p.binary);
+  const logFile = stage === "browser" ? joinPath(p.root, `login-${authType}.log`) : void 0;
+  if (logFile) try {
+    host.fs.removeFile(logFile);
+  } catch {
+  }
+  try {
+    started = host.exec.start({ bin, args, env: envFor(p), timeoutMs: 12e4, detach: true, ...logFile ? { logFile } : {} });
+  } catch {
+    return { error: `Could not start the m365 ${stage} step.` };
+  }
+  if (!started.jobId) return { error: started.error || `The m365 ${stage} step did not start.` };
+  loginJobs[started.jobId] = { stage, paths: p, target, packagePath, authType, logFile };
+  activeLoginJobId = started.jobId;
+  return { jobId: started.jobId };
+}
+function installM365(authType) {
   const p = paths();
   if (!p) return { state: "unsupported-platform", message: "The host home directory is unavailable." };
+  delete runtimeInfoCache[p.root];
   const protectedState = protectStorage(p);
   if (protectedState.error) return { state: protectedState.error, message: protectedState.message || "Could not secure plugin storage." };
   const info = runtimeInfo(p);
   if ("state" in info) return { state: info.state, message: info.message };
   const npmVersion = runProcess(info.target.npm, ["--version"], envFor(p));
   if (!npmVersion.ok) return { state: "not-installed", message: "Node.js is available, but npm is not. Install npm with Node.js 20 or later, then retry Sign in." };
-  const view = runProcess(info.target.npm, ["view", `${PACKAGE}@${VERSION}`, "dist.integrity", "--json"], envFor(p));
-  if (!view.ok) return { state: "install-failed", message: "Could not verify the pinned m365 package. Check npm access and try again." };
-  const published = parseJson(view.stdout.trim()) || view.stdout.trim().replace(/^['"]|['"]$/g, "");
-  if (published !== info.target.integrity) return { state: "install-failed", message: "The pinned m365 package checksum did not match the expected platform checksum; installation was refused." };
-  const installed = runProcess(info.target.npm, ["install", "--prefix", nativePath(p.runtime), "--ignore-scripts", "--no-audit", "--no-fund", "--save-exact", `${PACKAGE}@${VERSION}`], envFor(p));
-  if (!installed.ok) return { state: "install-failed", message: "The pinned m365 package could not be installed into its plugin-owned runtime path. Check npm access and retry." };
-  const secured = protectStorage(p);
-  if (secured.error) return { state: secured.error, message: secured.message || "Could not secure plugin storage." };
-  if (!host.fs.fileExists(p.binary)) return { state: "install-failed", message: `m365 ${VERSION} installed without its ${info.target.m365} executable. Remove the plugin runtime directory and retry.` };
-  const installedVersion = runProcess(nativePath(p.binary), ["--version"], envFor(p));
-  if (!installedVersion.ok || installedVersion.stdout.trim() !== VERSION) return { state: "install-failed", message: `The installed m365 executable did not report the pinned version ${VERSION}. Remove the plugin runtime directory and retry.` };
-  return { state: "installed-not-configured", message: `m365 ${VERSION} is installed for ${info.platform}/${info.arch}. Sign in with the browser to continue.` };
+  const entries = host.fs.readDir(p.root) || [];
+  for (const entry of entries) if (/^pnp-cli-microsoft365-\d+\.\d+\.\d+\.tgz$/i.test(entry.name)) host.fs.removeFile(entry.path);
+  const packagePath = joinPath(p.root, `pnp-cli-microsoft365-${VERSION}.tgz`);
+  const started = startLoginProcess(p, info.target, "pack", ["pack", `${PACKAGE}@${VERSION}`, "--pack-destination", nativePath(p.root), "--json"], packagePath, authType);
+  if (!started.jobId) return { state: "install-failed", message: started.error || "Could not start npm pack." };
+  return { jobId: started.jobId, state: "install-in-progress", message: "The pinned m365 package is being packed for local checksum verification before installation." };
+}
+function packageFromPackResult(p, target, stdout) {
+  const packed = parseJson(stdout);
+  const packageInfo = Array.isArray(packed) ? packed[0] : null;
+  const filename = String(packageInfo?.filename || "");
+  if (packageInfo?.name !== PACKAGE || packageInfo?.version !== VERSION || !/^pnp-cli-microsoft365-\d+\.\d+\.\d+\.tgz$/.test(filename)) {
+    return { error: "npm pack returned an unexpected package result." };
+  }
+  const packagePath = joinPath(p.root, filename);
+  if (!host.fs.fileExists(packagePath)) return { error: "npm pack did not create the expected local tarball." };
+  const script = "const fs=require('node:fs');const crypto=require('node:crypto');process.stdout.write('sha512-'+crypto.createHash('sha512').update(fs.readFileSync(process.argv[1])).digest('base64'));";
+  const digest = runProcess(target.node, ["-e", script, nativePath(packagePath)], envFor(p));
+  if (!digest.ok || digest.stdout.trim() !== target.integrity) {
+    try {
+      host.fs.removeFile(packagePath);
+    } catch {
+    }
+    return { error: "The local m365 package checksum did not match the pinned SHA-512." };
+  }
+  return { path: packagePath };
+}
+function finishLoginJob(jobId, state, error) {
+  const login = loginJobs[jobId];
+  if (login?.packagePath) {
+    try {
+      host.fs.removeFile(login.packagePath);
+    } catch {
+    }
+  }
+  if (login?.logFile) {
+    try {
+      host.fs.removeFile(login.logFile);
+    } catch {
+    }
+  }
+  delete loginJobs[jobId];
+  if (activeLoginJobId === jobId) activeLoginJobId = null;
+  return { done: true, state, error, jobId };
+}
+function startBrowserLogin(p, target, authType = "browser") {
+  const args = ["login", "--authType", authType, "--appId", CLIENT_ID, "--output", "json"];
+  return startLoginProcess(p, target, "browser", args, void 0, authType);
+}
+function deviceSignInArtifacts(login) {
+  if (!login.logFile) return {};
+  const raw = String(host.fs.readFileTail(login.logFile, 8192) || "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, " ");
+  const parsed = parseJson(raw.trim());
+  const urlMatch = raw.match(/https?:\/\/(?:aka\.ms|microsoft\.com)\/devicelogin\b[^\s<>"']*/i);
+  const codeMatch = raw.match(/(?:enter|use)\s+(?:the\s+)?(?:login\s+)?(?:code\s+)?([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?|[A-Z0-9]{6,12})\b/i) || raw.match(/\b(?:device|user|sign-in|login)\s+code\s*[:=]?\s*([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?|[A-Z0-9]{6,12})\b/i);
+  const candidateUrl = String(parsed?.signInUrl || parsed?.verificationUri || parsed?.verificationUrl || "");
+  const candidateCode = String(parsed?.deviceCode || parsed?.userCode || "");
+  const signInUrl = (urlMatch?.[0] || candidateUrl.match(/^https?:\/\/(?:aka\.ms|microsoft\.com)\/devicelogin\b[^\s<>"']*/i)?.[0])?.replace(/[),.;]+$/, "");
+  const deviceCode = /^[A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?$|^[A-Z0-9]{6,12}$/i.test(candidateCode) ? candidateCode : codeMatch?.[1];
+  return signInUrl && deviceCode ? { signInUrl, deviceCode } : {};
 }
 function targetState() {
   const p = paths();
@@ -236,8 +318,6 @@ function runM365(args) {
   const secured = protectStorage(p);
   if (secured.error) return { ok: false, error: secured.message || "Could not secure the m365 runtime.", stderr: "" };
   const result = runProcess(nativePath(p.binary), args, envFor(p));
-  const fileProtection = protectCacheFiles(p);
-  if (fileProtection.error) return { ok: false, error: fileProtection.message || "Could not protect m365 cache files.", stderr: "" };
   return result;
 }
 function authState(text) {
@@ -257,7 +337,7 @@ function authState(text) {
   if (/AADSTS700082|AADSTS700084|login has expired|access token expired|token has expired|expired refresh token/i.test(value)) {
     return { state: "token-expired", message: "The Microsoft token expired. Click Sign in again to renew the browser session." };
   }
-  if (/Can't open the default browser|could not open.*browser|browser instance/i.test(value)) {
+  if (/can't open(?: the)? default browser|could not open.*browser|failed to (?:open|launch).*browser|browser instance/i.test(value)) {
     return { state: "browser-open-failed", message: "m365 could not open the default browser. Set a system default browser or start CodeTerm in a desktop session, then retry Sign in." };
   }
   return null;
@@ -484,7 +564,7 @@ function resolveDestination(id, sender) {
   return { destination: { id: String(chat.id), label: String(chat.topic || chat.id) } };
 }
 var previewSequence = 0;
-function previewCommand(args) {
+function previewCommand(args, origin = "agent") {
   if (args.length < 2 || !validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> <text>. Choose an id from chats; display labels are not accepted." };
   const text = args.slice(1).join(" ");
   if (!text.length) return { error: "upstream-rejected: Preview text must not be empty." };
@@ -492,9 +572,9 @@ function previewCommand(args) {
   if ("error" in resolved) return resolved;
   const found = resolveDestination(args[0], resolved.sender);
   if ("error" in found) return found;
-  const idempotencyKey = sha256Hex(`${resolved.sender.identityKey}\0${found.destination.id}\0${text}`);
-  const previewId = sha256Hex(`${resolved.sender.identityKey}\0${found.destination.id}\0${text}\0${++previewSequence}`);
-  previewTokens[previewId] = { sender: resolved.sender, destination: found.destination, text };
+  const previewId = sha256Hex(`preview\0${now()}\0${++previewSequence}`);
+  const idempotencyKey = previewId;
+  previewTokens[previewId] = { sender: resolved.sender, destination: found.destination, text, origin, previewNonce: previewId };
   return { result: JSON.stringify({
     previewId,
     idempotencyKey,
@@ -508,7 +588,7 @@ function previewCommand(args) {
 function setSendPolicy(args) {
   if (!args || args.approveDestination !== true) return { error: "No send policy was changed. Review the full sender, tenant, destination, and text preview, then explicitly approve that single chat." };
   const preview = previewTokens[String(args.previewId || "")];
-  if (!preview) return { error: "Preview is unavailable. Refresh chats and create a fresh preview before approving a destination." };
+  if (!preview || preview.origin !== "view") return { error: "Only a preview created in this view can approve a destination. Refresh chats and create a fresh view preview." };
   const current = liveSender();
   if ("error" in current) return { error: current.error };
   if (current.sender.identityKey !== preview.sender.identityKey || current.sender.upn !== preview.sender.upn) {
@@ -699,9 +779,6 @@ function utf8Bytes(value) {
   }
   return bytes;
 }
-function textFromHtml(value) {
-  return value.replace(/<br\s*\/?\s*>/gi, "\n").replace(/<\/(?:p|div|li|h[1-6])\s*>/gi, "\n").replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'");
-}
 function cutText(value, units) {
   let end = Math.max(0, Math.min(value.length, units));
   if (end > 0 && end < value.length) {
@@ -718,7 +795,7 @@ function boundedHistory(chatId, source, count, maxBytes) {
     id: String(raw && raw.id || ""),
     createdDateTime: String(raw && raw.createdDateTime || ""),
     from: String(raw && (raw.from || raw.sender) || ""),
-    content: textFromHtml(String(raw && (raw.content || raw.body?.content) || "")),
+    content: String(raw && (raw.content || raw.body?.content) || ""),
     untrusted: true
   })).sort((a, b) => a.createdDateTime.localeCompare(b.createdDateTime)).slice(-capCount);
   const out = { chatId, messages: [], truncated: false };
@@ -827,7 +904,7 @@ function sendFailureResult(kind, detail, cause) {
 function rememberPrefixedFailure(message) {
   const state = message.slice(0, message.indexOf(":"));
   const allowed = ["not-logged-in", "reauth-needed", "policy-not-set", "destination-not-permitted", "rate-limited", "upstream-rejected", "unknown"];
-  return allowed.includes(state) ? rememberSendFailure(state, message) : sendFailureResult("upstream-rejected", "The command input could not be resolved; review its immutable ids and text.");
+  return allowed.includes(state) ? rememberSendFailure(state, message) : sendFailureResult("unknown", "The command result could not be classified safely. Inspect the Teams chat before retrying.");
 }
 function parseSendArgs(args) {
   if (args.length < 2 || !validChatId(args[0])) return { error: "destination-not-permitted: Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>. Choose an id from chats; labels are not ids." };
@@ -850,39 +927,28 @@ function failureForUpstream(message) {
     return { kind: "unknown", detail: "m365 may have retried this throttled send internally and may have delivered the message." };
   }
   if (/timeout|timed out|deadline exceeded|connection reset|connection closed|unexpected EOF|\bEOF\b|broken pipe|lost response|context cancel+ed|terminated|signal|killed|did not finish|could not confirm|unconfirmed/i.test(message)) return { kind: "unknown" };
-  const code = message.match(/\b(?:HTTP|status(?: code)?)\s*[:=]?\s*(4\d\d|5\d\d)\b/i);
-  return { kind: "upstream-rejected", detail: code ? `HTTP ${code[1]}; inspect the Microsoft 365 permission or request detail, correct it, then review before retrying` : "m365 returned a definitive non-zero result; inspect Teams Client status and permissions before deciding whether to invoke again" };
+  if (/\bHTTP\s+(?:400|401|403|404|413)\b/i.test(message)) return { kind: "upstream-rejected", detail: "Microsoft Graph definitively rejected this request before delivery" };
+  if (/exec denied|spawn .*?(?:ENOENT|EACCES)|binary .*?not found|not installed|node .*?missing/i.test(message)) {
+    return { kind: "upstream-rejected", detail: "the local send prerequisite failed before m365 could run" };
+  }
+  return { kind: "unknown", detail: "m365 returned an outcome that cannot prove whether the message was delivered." };
 }
-function runTeamsSend(args) {
+function runTeamsSend(args, then) {
   const target = targetState();
-  if (!target.paths) return { ok: false, error: target.message, stderr: "" };
-  if (target.state !== "ready") return { ok: false, error: target.message, stderr: "" };
+  if (!target.paths) return then({ ok: false, error: target.message, stderr: "" });
+  if (target.state !== "ready") return then({ ok: false, error: target.message, stderr: "" });
   const p = target.paths;
-  if (!host.fs.fileExists(p.binary)) return { ok: false, error: "m365 is not installed. Open Teams Client and sign in to install the pinned CLI.", stderr: "" };
+  if (!host.fs.fileExists(p.binary)) return then({ ok: false, error: "m365 is not installed. Open Teams Client and sign in to install the pinned CLI.", stderr: "" });
   const secured = protectStorage(p);
-  if (secured.error) return { ok: false, error: secured.message || "Could not secure the m365 runtime.", stderr: "" };
-  const securedCache = protectCacheFiles(p);
-  if (securedCache.error) return { ok: false, error: securedCache.message || "Could not protect m365 cache files before send.", stderr: "" };
-  let started;
-  try {
-    started = host.exec.start({ bin: nativePath(p.binary), args, env: envFor(p) });
-  } catch (error) {
-    return { ok: false, error: `Could not confirm m365 send process start: ${String(error)}`, stderr: "" };
-  }
-  if (!started || !started.jobId) return { ok: false, error: `Could not confirm m365 send process start: ${started && started.error || "no job id was returned"}`, stderr: "" };
-  let result;
-  try {
-    result = host.awaitJob(started.jobId, (value) => value);
-  } catch (error) {
-    return { ok: false, error: `m365 send process outcome could not be confirmed: ${String(error)}`, stderr: "" };
-  }
-  if (!result || result.done !== true) return { ok: false, error: "m365 send process did not finish; delivery outcome is unknown.", stderr: "" };
-  const stdout = String(result.stdout || "");
-  const stderr = String(result.stderr || "");
-  if (result.error) return { ok: false, error: `m365 send process returned an unconfirmed result: ${String(result.error)}`, stderr, code: result.code };
-  if (typeof result.code !== "number") return { ok: false, error: "m365 send process finished without an exit status; delivery outcome is unknown.", stderr };
-  if (result.code !== 0) return { ok: false, error: stderr || stdout || `m365 exited ${result.code}`, stderr, code: result.code };
-  return { ok: true, stdout, stderr };
+  if (secured.error) return then({ ok: false, error: secured.message || "Could not secure the m365 runtime.", stderr: "" });
+  return host.exec.async({ bin: nativePath(p.binary), args, env: envFor(p), timeoutMs: 5e3 }, (result) => {
+    const stdout = String(result.stdout || "");
+    const stderr = String(result.stderr || "");
+    if (result.error) return then({ ok: false, error: `m365 send process returned an unconfirmed result: ${String(result.error)}`, stderr, code: result.code });
+    if (result.done !== true || typeof result.code !== "number") return then({ ok: false, error: "m365 send process outcome is unknown.", stderr });
+    if (result.code !== 0) return then({ ok: false, error: stderr || stdout || `m365 exited ${result.code}`, stderr, code: result.code });
+    return then({ ok: true, stdout, stderr });
+  });
 }
 function messageIdFromOutput(output) {
   const value = parseJson(output.trim());
@@ -931,7 +997,13 @@ function sendCommand(sessionId, args) {
   const permitted = policy.allowedDestinations.find((item) => item.id === parsed.chatId);
   if (!permitted) return sendFailureResult("destination-not-permitted", policy.allowedDestinations[0]?.id);
   const expectedIdentity = JSON.stringify([policy.senderAccountId, policy.senderTenantId]);
-  const key = parsed.key || sha256Hex(`${expectedIdentity}\0${parsed.chatId}\0${parsed.text}`);
+  const matchingPreview = Object.values(previewTokens).reverse().find((token) => token.sender.identityKey === expectedIdentity && token.destination.id === parsed.chatId && token.text === parsed.text);
+  const key = parsed.key || matchingPreview?.previewNonce;
+  if (!key) {
+    const current = liveSender();
+    if ("error" in current) return rememberPrefixedFailure(current.error);
+    return sendFailureResult("upstream-rejected", "create a fresh preview before sending without an explicit idempotency key");
+  }
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
   const loaded = loadOutbox(p);
@@ -972,20 +1044,21 @@ function sendCommand(sessionId, args) {
   delete attempt.failureCause;
   delete attempt.failureMessage;
   if (!persistOutbox(p, ledger)) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; m365 was not contacted");
-  const run = runTeamsSend(["teams", "chat", "message", "send", "--chatId", parsed.chatId, "--message", parsed.text, "--output", "json"]);
-  if (!run.ok) {
-    const upstream = failureForUpstream(`${run.error}
+  return runTeamsSend(["teams", "chat", "message", "send", "--chatId", parsed.chatId, "--message", parsed.text, "--output", "json"], (run) => {
+    if (!run.ok) {
+      const upstream = failureForUpstream(`${run.error}
 ${run.stderr}`);
-    return persistFailure(p, ledger, attempt, upstream.kind, upstream.detail, upstream.cause);
-  }
-  attempt.graphMessageId = messageIdFromOutput(run.stdout);
-  attempt.state = "sent";
-  attempt.updatedAt = now();
-  delete attempt.failure;
-  delete attempt.failureCause;
-  delete attempt.failureMessage;
-  if (!persistOutbox(p, ledger)) return persistFailure(p, ledger, attempt, "unknown");
-  return attemptResult(attempt);
+      return persistFailure(p, ledger, attempt, upstream.kind, upstream.detail, upstream.cause);
+    }
+    attempt.graphMessageId = messageIdFromOutput(run.stdout);
+    attempt.state = "sent";
+    attempt.updatedAt = now();
+    delete attempt.failure;
+    delete attempt.failureCause;
+    delete attempt.failureMessage;
+    if (!persistOutbox(p, ledger)) return persistFailure(p, ledger, attempt, "unknown");
+    return attemptResult(attempt);
+  });
 }
 function logout() {
   const target = targetState();
@@ -1013,6 +1086,35 @@ ${run.stderr}`);
 function onAgentCommand(ctx) {
   const args = Array.isArray(ctx.args) ? ctx.args : [];
   switch (ctx.verb) {
+    case "login": {
+      if (args.length) return { error: "Usage: login." };
+      const started = loginStart("deviceCode");
+      if (started.error) return { error: started.error };
+      const current = loginPoll(started.jobId);
+      if (current.error) return { error: current.error };
+      const signInUrl = current.signInUrl;
+      const deviceCode = current.deviceCode;
+      return { result: JSON.stringify({
+        state: String(current.state || started.state || "login-in-progress"),
+        jobId: current.jobId || started.jobId,
+        signInUrl,
+        deviceCode,
+        message: signInUrl && deviceCode ? `Open ${signInUrl} and enter code ${deviceCode}.` : "Microsoft sign-in started. Poll login-status for the sign-in URL and device code."
+      }) };
+    }
+    case "login-status": {
+      if (args.length) return { error: "Usage: login-status." };
+      if (!activeLoginJobId) return { result: JSON.stringify({ state: statusView().state, done: true }) };
+      const current = loginPoll(activeLoginJobId);
+      return current.error ? { error: current.error } : { result: JSON.stringify({
+        done: current.done === true,
+        state: String(current.state || "login-in-progress"),
+        jobId: current.jobId || activeLoginJobId,
+        signInUrl: current.signInUrl,
+        deviceCode: current.deviceCode,
+        message: current.signInUrl && current.deviceCode ? `Open ${current.signInUrl} and enter code ${current.deviceCode}.` : current.message
+      }) };
+    }
     case "accounts":
       return agentAccounts();
     case "use":
@@ -1028,68 +1130,119 @@ function onAgentCommand(ctx) {
     case "send":
       return sendCommand(ctx.sessionId, args);
     case "preview":
-      return previewCommand(args);
+      return previewCommand(args, "agent");
     default:
       return { error: `Unknown Teams Client verb: ${ctx.verb}` };
   }
 }
-function loginStart() {
+function loginStart(authType = "browser") {
+  if (activeLoginJobId && loginJobs[activeLoginJobId]) {
+    return { jobId: activeLoginJobId, state: "login-in-progress", message: "Microsoft sign-in is already running. Check its status instead of starting another login." };
+  }
   const p = paths();
   if (!p) return { error: lifecycleMessage("unsupported-platform") };
   const protectedState = protectStorage(p);
   if (protectedState.error) return { error: protectedState.message || lifecycleMessage("install-failed") };
   if (!host.fs.fileExists(p.binary)) {
-    const installed = installM365();
-    if (installed.state !== "installed-not-configured" && installed.state !== "logged-in") return { error: lifecycleMessage(installed.state, installed.message), state: installed.state };
+    const installed = installM365(authType);
+    return installed.jobId ? { jobId: installed.jobId, state: installed.state, message: installed.message } : { error: lifecycleMessage(installed.state, installed.message), state: installed.state };
   }
   const target = targetState();
   if (target.state !== "ready" || !target.paths) return { error: lifecycleMessage(target.state, target.message) };
-  const args = ["login", "--authType", "browser", "--appId", CLIENT_ID, "--output", "json"];
-  let started;
-  try {
-    started = host.exec.start({ bin: nativePath(target.paths.binary), args, env: envFor(target.paths), detach: true });
-  } catch (error) {
-    return { error: String(error), state: "install-failed" };
-  }
+  const started = startBrowserLogin(target.paths, target.target, authType);
   if (!started.jobId) return { error: started.error || "m365 browser sign-in did not start.", state: "install-failed" };
-  loginJobs[started.jobId] = true;
-  return { jobId: started.jobId, state: "login-in-progress", message: "A browser should open for Microsoft sign-in. Complete the work or school sign-in, then click Check sign-in status." };
+  return { jobId: started.jobId, state: "login-in-progress", message: "Complete Microsoft work or school sign-in in the browser, then check sign-in status." };
 }
 function loginPoll(jobId) {
-  if (!jobId || !loginJobs[jobId]) return { error: "Unknown Microsoft sign-in job." };
+  const login = jobId ? loginJobs[jobId] : null;
+  if (!login) return { error: "Unknown Microsoft sign-in job." };
   let poll;
+  if (login.stage === "browser" && login.launchComplete) {
+    const current2 = statusView();
+    const artifacts2 = deviceSignInArtifacts(login);
+    if (current2.state === "logged-in") {
+      const secured2 = protectCacheFiles(login.paths, true);
+      if (secured2.error) return finishLoginJob(jobId, "install-failed", secured2.message || lifecycleMessage("install-failed"));
+      return { ...finishLoginJob(jobId, "logged-in"), ...artifacts2 };
+    }
+    return { done: false, jobId, state: "login-in-progress", message: "Finish sign-in in the browser or device flow, then check status again.", ...artifacts2 };
+  }
   try {
     poll = host.exec.poll(jobId);
   } catch {
-    return { error: "Could not read the Microsoft browser sign-in job." };
+    return { error: "Could not read the Microsoft sign-in job." };
   }
-  if (!poll.done) return { done: false, state: "login-in-progress", message: "Complete the sign-in in the browser, then check status again." };
-  delete loginJobs[jobId];
-  const p = paths();
-  if (!p) return { done: true, state: "unsupported-platform", error: lifecycleMessage("unsupported-platform") };
-  const secured = protectCacheFiles(p);
-  if (secured.error) return { done: true, state: "install-failed", error: secured.message || lifecycleMessage("install-failed") };
+  const artifacts = deviceSignInArtifacts(login);
+  if (!poll.done) return { done: false, jobId, state: "login-in-progress", message: login.stage === "browser" ? "Complete the sign-in, then check status again." : "The pinned m365 package setup is still running.", ...artifacts };
+  try {
+    host.exec.close(jobId);
+  } catch {
+  }
   if (poll.error || poll.code !== 0) {
     const reason = `${poll.error || ""}
 ${poll.stderr || ""}
 ${poll.stdout || ""}`;
     const auth = authState(reason);
-    return { done: true, state: auth ? auth.state : "reauth-needed", error: auth ? auth.message : lifecycleMessage("reauth-needed") };
+    return finishLoginJob(jobId, auth ? auth.state : "install-failed", auth ? auth.message : lifecycleMessage("install-failed"));
   }
+  if (login.stage === "pack") {
+    const packed = packageFromPackResult(login.paths, login.target, String(poll.stdout || ""));
+    if (!packed.path) return finishLoginJob(jobId, "install-failed", packed.error || lifecycleMessage("install-failed"));
+    delete loginJobs[jobId];
+    if (activeLoginJobId === jobId) activeLoginJobId = null;
+    const install = startLoginProcess(login.paths, login.target, "install", [
+      "install",
+      nativePath(packed.path),
+      "--prefix",
+      nativePath(login.paths.runtime),
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund",
+      "--save-exact"
+    ], packed.path, login.authType);
+    if (!install.jobId) {
+      try {
+        host.fs.removeFile(packed.path);
+      } catch {
+      }
+      return { done: true, state: "install-failed", error: install.error || lifecycleMessage("install-failed") };
+    }
+    return { done: false, jobId: install.jobId, state: "install-in-progress", message: "The local package checksum passed; npm is installing the verified tarball." };
+  }
+  if (login.stage === "install") {
+    const version = runProcess(nativePath(login.paths.binary), ["--version"], envFor(login.paths));
+    if (!version.ok || version.stdout.trim() !== VERSION) {
+      return finishLoginJob(jobId, "install-failed", lifecycleMessage("install-failed", "The installed m365 CLI version did not match the pinned release."));
+    }
+    if (login.packagePath) {
+      try {
+        host.fs.removeFile(login.packagePath);
+      } catch {
+      }
+    }
+    delete loginJobs[jobId];
+    if (activeLoginJobId === jobId) activeLoginJobId = null;
+    const browser = startBrowserLogin(login.paths, login.target, login.authType);
+    if (!browser.jobId) return { done: true, state: "install-failed", error: browser.error || "m365 browser sign-in did not start." };
+    return { done: false, jobId: browser.jobId, state: "login-in-progress", message: "The verified runtime is ready. Complete Microsoft work or school sign-in in the browser." };
+  }
+  login.launchComplete = true;
   const current = statusView();
-  if (current.state !== "logged-in") return { done: true, state: current.state, error: current.message };
-  return { done: true, state: "logged-in", account: current, message: current.message };
+  if (current.state !== "logged-in") return { done: false, jobId, state: "login-in-progress", message: "Finish sign-in in the browser or device flow, then check status again.", ...artifacts };
+  const secured = protectCacheFiles(login.paths, true);
+  if (secured.error) return finishLoginJob(jobId, "install-failed", secured.message || lifecycleMessage("install-failed"));
+  return { ...finishLoginJob(jobId, "logged-in"), ...artifacts };
 }
 function viewCall(method, args) {
   const value = args || {};
-  if (method === "status") return statusView();
+  if (method === "status") return { ...statusView(), loginJobId: activeLoginJobId };
   if (method === "loginStart") return loginStart();
   if (method === "loginPoll") return loginPoll(String(value.jobId || ""));
   if (method === "useAccount") return useAccount(String(value.id || ""));
   if (method === "logout") return logout();
   if (method === "chats") return agentChats();
   if (method === "policy") return policySummary();
-  if (method === "preview") return previewCommand([String(value.chatId || ""), String(value.text || "")]);
+  if (method === "preview") return previewCommand([String(value.chatId || ""), String(value.text || "")], "view");
   if (method === "approveSendPolicy") return setSendPolicy(value);
   if (method === "send") return sendCommand("teams-client-view", [String(value.chatId || ""), "--key", String(value.idempotencyKey || ""), String(value.text || "")]);
   return { error: `Unknown Teams Client view method: ${method}` };
