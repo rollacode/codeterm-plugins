@@ -20,15 +20,18 @@ function platformName(): string {
   try { return String(host.platform() || "").toLowerCase(); } catch { return ""; }
 }
 
+function binaryName(platform: string): string {
+  return /^win/.test(platform.toLowerCase()) ? "tg.exe" : "tg";
+}
+
 function paths(): Paths | null {
   try {
     const root = host.fs.expandHome(ROOT);
     if (!root) return null;
-    const windows = platformName().indexOf("win") >= 0;
     return {
       root,
       binDir: `${root}/bin`,
-      binary: `${root}/bin/tg${windows ? ".exe" : ""}`,
+      binary: `${root}/bin/${binaryName(platformName())}`,
       config: `${root}/${CONFIG_NAME}`,
       install: `${root}/install.json`,
       failure: `${root}/install-status.json`,
@@ -525,6 +528,7 @@ const plugin: PluginModule = {
   renderGlance,
   viewCall: viewCall as PluginModule["viewCall"],
   __test_paths: paths,
+  __test_binaryName: binaryName,
   __test_options: options,
   __test_utf8Bytes: utf8Bytes,
   __test_boundedHistory: boundedHistory,
