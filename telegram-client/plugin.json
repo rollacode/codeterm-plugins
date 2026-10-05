@@ -11,13 +11,15 @@
   "entry": "plugin.js",
   "capabilities": {
     "view": true,
-    "glanceView": true,
-    "onAgentCommand": true
+    "glanceView": true
   },
   "permissions": {
     "secrets": true,
     "subprocess": {
-      "allow": ["tg", "tg.exe"]
+      "allow": [
+        "tg",
+        "tg.exe"
+      ]
     }
   },
   "sessions": {
