@@ -567,9 +567,10 @@ function sendCommand(sessionId: string, args: string[]): { result: string } | { 
   const matchingPreview = Object.values(previewTokens).reverse().find((token: any) =>
     token.sender.id === policySummary().senderAccountId && token.destination.id === parsed.chatId && token.text === parsed.text);
   const key = parsed.key || matchingPreview?.previewNonce;
-  if (!key) return sendFailureResult("upstream-rejected", "create a fresh preview before sending without an explicit idempotency key");
-  const recorded = recordedByCallerKey(key, parsed.chatId, parsed.text);
-  if (recorded) return recorded;
+  if (key) {
+    const recorded = recordedByCallerKey(key, parsed.chatId, parsed.text);
+    if (recorded) return recorded;
+  }
   const policy = policySummary();
   if (!policy.configured) return sendFailureResult("policy-not-set");
   const resolved = resolveSender();
@@ -578,6 +579,7 @@ function sendCommand(sessionId: string, args: string[]): { result: string } | { 
   if ("error" in found) return sendFailureResult("destination-not-permitted", policy.allowedDestinations[0] && policy.allowedDestinations[0].id);
   const permitted = policy.senderAccountId === resolved.sender.id && policy.allowedDestinations.some((entry: any) => entry.id === found.destination.id && found.destination.label === "Saved Messages");
   if (!permitted || found.destination.id !== `id:${resolved.sender.telegramUserId}`) return sendFailureResult("destination-not-permitted", policy.allowedDestinations[0] && policy.allowedDestinations[0].id);
+  if (!key) return sendFailureResult("upstream-rejected", "create a fresh preview before sending without an explicit idempotency key");
 
   const payloadHash = sha256Hex(parsed.text);
   const p = paths();

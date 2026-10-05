@@ -693,19 +693,6 @@ function utf8Bytes(value: string): number {
   return bytes;
 }
 
-function textFromHtml(value: string): string {
-  return value
-    .replace(/<br\s*\/?\s*>/gi, "\n")
-    .replace(/<\/(?:p|div|li|h[1-6])\s*>/gi, "\n")
-    .replace(/<[^>]*>/g, "")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'");
-}
-
 function cutText(value: string, units: number): string {
   let end = Math.max(0, Math.min(value.length, units));
   if (end > 0 && end < value.length) {
@@ -723,7 +710,7 @@ function boundedHistory(chatId: string, source: any[], count: number, maxBytes: 
     id: String(raw && raw.id || ""),
     createdDateTime: String(raw && raw.createdDateTime || ""),
     from: String(raw && (raw.from || raw.sender) || ""),
-    content: textFromHtml(String(raw && (raw.content || raw.body?.content) || "")),
+    content: String(raw && (raw.content || raw.body?.content) || ""),
     untrusted: true,
   })).sort((a: any, b: any) => a.createdDateTime.localeCompare(b.createdDateTime)).slice(-capCount);
   const out: { chatId: string; messages: any[]; truncated: boolean } = { chatId, messages: [], truncated: false };
@@ -958,7 +945,11 @@ function sendCommand(sessionId: string, args: string[]): { result: string } | { 
   const matchingPreview = Object.values(previewTokens).reverse().find((token: any) =>
     token.sender.identityKey === expectedIdentity && token.destination.id === parsed.chatId && token.text === parsed.text);
   const key = parsed.key || matchingPreview?.previewNonce;
-  if (!key) return sendFailureResult("upstream-rejected", "create a fresh preview before sending without an explicit idempotency key");
+  if (!key) {
+    const current = liveSender();
+    if ("error" in current) return rememberPrefixedFailure(current.error);
+    return sendFailureResult("upstream-rejected", "create a fresh preview before sending without an explicit idempotency key");
+  }
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
   const loaded = loadOutbox(p);

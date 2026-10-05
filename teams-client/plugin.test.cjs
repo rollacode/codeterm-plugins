@@ -1026,9 +1026,8 @@ test("manifest declares only denied cache files and the required view capabiliti
   assert.deepEqual(manifest.capabilities, { view: true, glanceView: true });
   assert.equal(manifest.credentials.length, 3);
   assert.ok(manifest.credentials.every((entry) => !entry.secret || Object.keys(entry.secret).length === 0));
-  assert.ok(manifest.permissions.subprocess.allow.includes("open"));
-  assert.ok(manifest.permissions.subprocess.allow.includes("xdg-open"));
-  assert.ok(manifest.permissions.subprocess.allow.includes("powershell.exe"));
+  assert.ok(manifest.permissions.subprocess.allow.includes("node"));
+  assert.equal(manifest.permissions.subprocess.allow.some((bin) => ["open", "xdg-open", "powershell.exe"].includes(bin)), false);
   assert.match(manifest.configHelp, /accounts.*use.*chats.*history.*health.*logout/is);
   assert.match(manifest.configHelp, /agent_commands/i);
 });

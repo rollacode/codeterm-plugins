@@ -6,6 +6,8 @@ Teams Client uses the pinned `@pnp/cli-microsoft365` v11.11.0 package from a plu
 
 The runtime and isolated m365 home are under the plugin-owned data root. On macOS and Linux they are `~/.codeterm/teams-client/runtime/m365` and `~/.codeterm/teams-client/m365-home`. On Windows they are `%USERPROFILE%\.codeterm\teams-client\runtime\m365` and `%USERPROFILE%\.codeterm\teams-client\m365-home`. Both `HOME` and `USERPROFILE` point to the isolated home on every CLI call, alongside platform-specific config-home variables. This keeps the plugin's sign-in, connections, and tokens separate from the owner's own m365 profile. POSIX directories are restricted to mode 0700 and cache files to 0600. Windows applies an owner and SYSTEM ACL with `icacls`; POSIX modes are not used as a Windows security claim. The resolver and package integrity map cover macOS, Linux, and Windows on x64 and arm64; the npm package is platform-independent, so the verified SRI is the same for all six supported target keys. Other OS/architecture pairs receive a named unsupported-target state.
 
+The required `node` subprocess permission identifies the runtime and verifies the locally packed tarball checksum. Filesystem-confinement statements describe plugin-owned paths and `host.fs` access only.
+
 The installed package source fixes its files under `os.homedir()`. These paths are under the isolated home shown above:
 
 - macOS and Linux: `~/.codeterm/teams-client/m365-home/.cli-m365-msal.json`, `.cli-m365-connection.json`, and `.cli-m365-all-connections.json`.
