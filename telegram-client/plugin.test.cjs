@@ -13,6 +13,7 @@ const plugin = require(testBundle).default;
 process.on("exit", () => rmSync(testBundle, { force: true }));
 
 const tests = [];
+const unexpectedCommands = [];
 function test(name, fn) { tests.push([name, fn]); }
 function assertOk(value, message) { assert.equal(!!value, true, message); }
 function writeJson(file, value) {
@@ -46,16 +47,43 @@ function mockHost(options = {}) {
 
   function commandArgs(args) {
     const out = [];
+    let commandStarted = false;
     for (let i = 0; i < args.length; i++) {
-      if (["--config", "--account", "--output"].includes(args[i])) { i++; continue; }
+      if (!commandStarted && ["--config", "--account", "--output"].includes(args[i])) {
+        if (i + 1 >= args.length) throw new Error(`missing value for ${args[i]} in tg argv: ${args.join(" ")}`);
+        i++;
+        continue;
+      }
+      if (!commandStarted) commandStarted = true;
       out.push(args[i]);
     }
     return out;
   }
 
+  function supportedCommandShape(words) {
+    switch (words[0]) {
+      case "init": return words.length === 1;
+      case "accounts":
+        return words.length === 1
+          || ((words[1] === "add" || words[1] === "default") && words.length === 3);
+      case "chats": return words[1] === "list" && words.includes("--limit");
+      case "history": return words.length >= 2 && words.includes("--limit");
+      case "whoami": return words.length === 1;
+      case "logout": return words.length === 1;
+      case "send": return words[1] === "--" && typeof words[2] === "string";
+      case "login": return words.includes("--output") && words.includes("json");
+      default: return false;
+    }
+  }
+
   function responseFor(opts) {
     const words = commandArgs(opts.args || []);
     calls.push({ ...opts, args: [...(opts.args || [])], env: { ...(opts.env || {}) }, words });
+    if (!supportedCommandShape(words)) {
+      const message = `unmatched tg command shape: ${JSON.stringify(words)} (argv: ${JSON.stringify(opts.args || [])})`;
+      unexpectedCommands.push(message);
+      return { code: 1, stdout: "", stderr: message };
+    }
     if (words[0] === "init" || (words[0] === "accounts" && words[1] === "add")) {
       const conf = opts.args[opts.args.indexOf("--config") + 1];
       writeFileSync(conf, "app_id: 123\napp_hash: fixture\n", { mode: 0o600 });
@@ -94,7 +122,7 @@ function mockHost(options = {}) {
   globalThis.host = {
     platform: () => platform,
     path: {
-      isWindows: () => /^win32$/i.test(platform),
+      isWindows: /^win32$/i.test(platform),
       normalize: (value) => path.normalize(value),
       toNative: (value) => path.normalize(value),
       equal: (left, right) => path.normalize(left) === path.normalize(right),
@@ -599,7 +627,7 @@ test("config stays in the private plugin root at mode 0600 and logout removes co
     assert.equal(p.config.startsWith(env.root + path.sep), true);
     assert.equal(p.config.includes("/codeterm-plugins-worktrees/"), false);
     assert.equal(p.config.includes("/.config/"), false);
-    if (!host.path.isWindows()) assert.equal(statSync(p.config).mode & 0o777, 0o600);
+    if (!host.path.isWindows) assert.equal(statSync(p.config).mode & 0o777, 0o600);
     const session = join(p.root, "gotd.session.default.user.derived.json");
     const cache = join(p.root, "gotd.peers.default.user.derived.json");
     writeFileSync(session, "session", { mode: 0o600 });
@@ -618,6 +646,10 @@ async function main() {
   for (const [name, fn] of tests) {
     try { await fn(); process.stdout.write(`ok - ${name}\n`); }
     catch (error) { failures++; process.stderr.write(`not ok - ${name}\n${error.stack || error}\n`); }
+  }
+  if (unexpectedCommands.length) {
+    failures++;
+    process.stderr.write(`not ok - mock received unmatched tg command shapes\n${unexpectedCommands.join("\n")}\n`);
   }
   process.stdout.write(`${tests.length - failures}/${tests.length} tests passed\n`);
   if (failures) process.exitCode = 1;
