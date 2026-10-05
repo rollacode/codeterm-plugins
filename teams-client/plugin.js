@@ -234,19 +234,19 @@ function runM365(args) {
 function authState(text) {
   const value = String(text || "");
   if (/AADSTS53003|conditional[ -]access|blocked by (?:your )?(?:organization|tenant) policy/i.test(value)) {
-    return { state: "conditional-access-blocked", message: "Your organization's Conditional Access policy blocked this sign-in. Ask your IT administrator which browser sign-in policy applies, then try again." };
+    return { state: "conditional-access-blocked", message: "Your organization's Conditional Access policy blocked this sign-in. Ask your IT administrator which browser sign-in policy applies, then click Sign in again." };
   }
   if (/AADSTS50076|AADSTS50079|multi[ -]?factor|\bMFA\b|additional authentication is required/i.test(value)) {
-    return { state: "mfa-required", message: "Complete the MFA step in the Microsoft browser sign-in, then return to Teams Client and refresh status." };
+    return { state: "mfa-required", message: "Complete the MFA step in the Microsoft browser sign-in, then click Sign in again in Teams Client." };
   }
   if (/AADSTS65001|consent_required|consent (?:was )?not granted|admin consent/i.test(value)) {
-    return { state: "consent-not-granted", message: "The requested Microsoft Graph consent is not recorded. If your tenant allows user consent, retry sign-in and approve the prompt; if it restricts user consent, ask a tenant administrator to approve the m365 app's requested permissions." };
+    return { state: "consent-not-granted", message: "The requested Microsoft Graph consent is not recorded. If your tenant allows user consent, click Sign in again and approve the prompt; if it restricts user consent, ask a tenant administrator to approve the m365 app's requested permissions, then click Sign in again." };
   }
   if (/AADSTS50173|refresh token[^\n]*(?:revoked|invalidated)|(?:revoked|invalidated)[^\n]*refresh token/i.test(value)) {
-    return { state: "refresh-token-revoked", message: "The Microsoft refresh token was revoked. Use Sign in to create a new browser session." };
+    return { state: "refresh-token-revoked", message: "The Microsoft refresh token was revoked. Click Sign in again to create a new browser session." };
   }
   if (/AADSTS700082|AADSTS700084|login has expired|access token expired|token has expired|expired refresh token/i.test(value)) {
-    return { state: "token-expired", message: "The Microsoft token expired. Use Sign in to renew the browser session." };
+    return { state: "token-expired", message: "The Microsoft token expired. Click Sign in again to renew the browser session." };
   }
   if (/Can't open the default browser|could not open.*browser|browser instance/i.test(value)) {
     return { state: "browser-open-failed", message: "m365 could not open the default browser. Set a system default browser or start CodeTerm in a desktop session, then retry Sign in." };
@@ -261,7 +261,7 @@ function lifecycleMessage(state, detail) {
     "installed-not-configured": "The pinned m365 CLI is ready. Sign in with your work or school Microsoft account in the browser.",
     "logged-out": "You are signed out. Click Sign in to start a browser sign-in.",
     "logged-in": "Microsoft Teams is connected.",
-    "reauth-needed": "The Microsoft session needs sign-in again. Click Sign in to open the browser."
+    "reauth-needed": "The Microsoft session needs a new sign-in. Click Sign in again to open the browser."
   };
   return messages[state] || detail || "Teams Client could not determine its current state.";
 }
@@ -415,7 +415,7 @@ function sendRefusal() {
   const publicFields = p ? currentPublic(p) || {} : {};
   const tenantId = String(publicFields.tenantId || "").toLowerCase();
   if (tenantId === PERSONAL_TENANT_ID) {
-    return `${SEND_DISABLED} A personal Microsoft account is unsupported on POST /chats/{chat-id}/messages with delegated ChatMessage.Send; this does not mean personal accounts cannot use Teams generally.`;
+    return `${SEND_DISABLED} A personal Microsoft account is unsupported on POST /chats/{chat-id}/messages in Graph v1.0 with delegated ChatMessage.Send.`;
   }
   return SEND_DISABLED;
 }
