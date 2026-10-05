@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 
 declare global {
   interface Window {
-    ct?: { invoke(method: string, args?: unknown): Promise<unknown> };
+    ct?: { invoke(method: string, args?: unknown): Promise<unknown>; close?(): void };
   }
 }
 
@@ -172,7 +172,7 @@ function App() {
       <section style={{ marginTop: 22 }}>
         <h2 style={{ fontSize: 15 }}>Resolved sender</h2>
         <p style={{ fontSize: 13 }}>Current account: <strong>{health?.currentAccount || "none"}</strong></p>
-        {health?.resolvedAccount && <pre style={{ overflow: "auto", whiteSpace: "pre-wrap", padding: 12, borderRadius: 6, background: "rgba(0,0,0,.18)", fontSize: 11 }}>{JSON.stringify(health.resolvedAccount, null, 2)}</pre>}
+        {health?.resolvedAccount ? <pre style={{ overflow: "auto", whiteSpace: "pre-wrap", padding: 12, borderRadius: 6, background: "rgba(0,0,0,.18)", fontSize: 11 }}>{JSON.stringify(health.resolvedAccount, null, 2)}</pre> : null}
         {accounts.map((account) => (
           <div key={account.id} style={{ display: "flex", alignItems: "center", gap: 10, margin: "8px 0", padding: 10, border: "1px solid var(--ct-border-default, rgba(255,255,255,.1))", borderRadius: 6 }}>
             <span style={{ flex: 1 }}>{account.label} · {account.hasSession ? "session present" : "logged out"}{account.current ? " · current" : ""}</span>
