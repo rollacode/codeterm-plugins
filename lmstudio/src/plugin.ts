@@ -1206,7 +1206,7 @@ const plugin: ChatBackend & {
   requestPromptAuthoring: (sessionId: string, instruction?: string) => AuthoringResult;
 } = {
   openSession(ctx) {
-    const sid = ctx.paneId;
+    const sid = ctx.tabId;
     const s = resolveSession(ctx);
     if (s.charterError) {
       host.log("error", `openSession failed for ${sid}: ${s.charterError}`);
