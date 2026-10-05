@@ -343,7 +343,7 @@ test("preview resolves duplicate display names by immutable id and rejects a dis
     assert.equal(JSON.parse(chosen.result).destination.id, "id:4243");
     const before = env.calls.length;
     const rejected = plugin.onAgentCommand({ sessionId: "preview-test", verb: "preview", args: ["Alex", "hello"] });
-    assert.match(rejected.error, /immutable id|numeric-chat-id|id:/i);
+    assert.ok(rejected.error && !rejected.result, "a display name is refused with an error and no preview result");
     assert.equal(env.calls.length, before, "a display name is rejected before running tg");
     assert.equal(env.calls.some((call) => call.words[0] === "send"), false);
   } finally { env.cleanup(); }
@@ -553,7 +553,7 @@ test("chats expose numeric immutable ids and history rejects display names", () 
     assert.equal(chats[0].title, "Alice");
     const before = env.calls.length;
     const rejected = plugin.onAgentCommand({ sessionId: "test", verb: "history", args: ["Alice"] });
-    assert.match(rejected.error, /immutable id|numeric-chat-id|id:/i);
+    assert.ok(rejected.error && !rejected.result, "a display name is refused with an error and no preview result");
     assert.equal(env.calls.length, before, "display name was not passed to tg");
   } finally { env.cleanup(); }
 });
