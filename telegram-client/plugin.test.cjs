@@ -215,7 +215,7 @@ test("faithful await mock returns a marker and resumes through the one-shot cont
   const env = mockHost();
   try {
     configureLoggedInFixture(env);
-    const marker = host.exec.async({ bin: env.binary, args: ["--output", "json", "accounts"] }, (result) => ({ code: result.code, done: result.done }));
+    const marker = host.exec.async({ bin: env.binary, args: ["--config", env.config, "--output", "json", "accounts"] }, (result) => ({ code: result.code, done: result.done }));
     assert.equal(typeof marker.__ctAwait__.job, "string");
     assert.equal(typeof marker.__ctAwait__.k, "string");
     assert.deepEqual(drive(marker), { code: 0, done: true });
@@ -736,7 +736,7 @@ test("config stays in the private plugin root at mode 0600 and logout removes co
     assert.equal(p.config.startsWith(env.root + path.sep), true);
     assert.equal(p.config.includes("/codeterm-plugins-worktrees/"), false);
     assert.equal(p.config.includes("/.config/"), false);
-    if (!host.path.isWindows) assert.equal(statSync(p.config).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal(statSync(p.config).mode & 0o777, 0o600);
     const session = join(p.root, "gotd.session.default.user.derived.json");
     const cache = join(p.root, "gotd.peers.default.user.derived.json");
     writeFileSync(session, "session", { mode: 0o600 });

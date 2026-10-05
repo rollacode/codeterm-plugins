@@ -447,6 +447,9 @@ test("agent login extracts only the verification URL and user code from JSON out
     assert.equal(result.signInUrl, "https://microsoft.com/devicelogin");
     assert.equal(result.deviceCode, "JSON-2345");
     assert.equal(JSON.stringify(result).includes("fixture-secret"), false);
+    env.setCurrentName("account-a");
+    const complete = JSON.parse(command("login-status").result);
+    assert.equal(complete.state, "logged-in");
   } finally { env.cleanup(); }
 });
 
