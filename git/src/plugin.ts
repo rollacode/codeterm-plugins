@@ -519,15 +519,28 @@ function gitPush(cwd: string): { pushed: true; stdout: string; stderr: string } 
   return { pushed: true, stdout: r.stdout || "", stderr: r.stderr || "" };
 }
 
+// Child-directory names via the sandbox-aware host binding: `null` means denied
+// or unreadable, `[]` a readable directory with no children. An older daemon has
+// no such binding at all, so an absent member degrades to no discovery rather
+// than a throw that would take the whole bubble down.
+type ListChildDirsHost = { listChildDirs?: (path: string) => string[] | null };
+
 function listChildDirs(cwd: string): string[] {
-  const plat = typeof host.platform === "function" ? host.platform() : (host.platform as unknown as string);
-  const cmd: ExecOpts =
-    String(plat || "").toLowerCase().indexOf("win") !== -1
-      ? { bin: "cmd", args: ["/c", "dir", "/b", "/ad", cwd] }
-      : { bin: "ls", args: ["-1", cwd] };
-  const r = exec(cmd);
-  if (!ok(r)) return [];
-  return (r.stdout || "").split(/\r?\n/).filter((l) => l.length > 0);
+  const list = (host as unknown as ListChildDirsHost).listChildDirs;
+  if (typeof list !== "function") return [];
+  let names: string[] | null;
+  try {
+    names = list.call(host, cwd);
+  } catch (e) {
+    return [];
+  }
+  if (!names || typeof names.length !== "number") return [];
+  const out: string[] = [];
+  for (let i = 0; i < names.length; i++) {
+    const n = names[i];
+    if (typeof n === "string" && n.length > 0) out.push(n);
+  }
+  return out;
 }
 
 interface Repo {

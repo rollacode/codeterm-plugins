@@ -1,9 +1,21 @@
 # LM Studio plugin configuration.
 #
-# Start LM Studio, load a model, and start the Developer server. The plugin uses
-# LM Studio's native v1 API: POST /api/v1/chat and GET /api/v1/models.
+# Start LM Studio, load a model, and start the Developer server.
+# Server address, e.g. http://localhost:1234 or
+# http://<mac>.<tailnet>.ts.net:1234. This shared address is used by chat and
+# decision requests; a remote host needs a grant in CodeTerm plugin settings.
 
 baseUrl: http://localhost:1234
+
+# OpenAI-compatible decision endpoint settings.
+decision:
+  # Blank inherits `model` when set, otherwise the first loaded model.
+  model: ""
+  # auto uses constrained JSON for model ids containing MLX (owner-probed null
+  # logprobs); set to logprobs or constrained to override for a model.
+  logprobsMode: auto
+  maxTokens: 64
+  timeoutMs: 30000
 
 # Optional global model fallback. Leave blank to let LM Studio route to the
 # loaded model, or set a model id returned by listModels.

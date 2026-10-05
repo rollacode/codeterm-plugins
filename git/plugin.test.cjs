@@ -126,15 +126,97 @@ test("plugin.json does not advertise AI configuration without settings", () => {
   assert(manifest.configHelp == null, "Git should not expose Configure with AI");
 });
 
+test("subprocess allow-list is the git binary alone — discovery uses the host binding", () => {
+  const { readFileSync } = require("node:fs");
+  const { join } = require("node:path");
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  const allow = manifest.permissions.subprocess.allow;
+  assert(allow.length === 1 && allow[0] === "git", "only git allowed, got " + JSON.stringify(allow));
+  const bundle = readFileSync(join(__dirname, "plugin.js"), "utf8");
+  assert(!/bin:\s*"cmd"/.test(bundle) && !/bin:\s*"ls"/.test(bundle), "bundle spawns neither cmd nor ls");
+});
+
+// ── multi-repo discovery (host.listChildDirs binding) ──
+//
+// Contract coded against: host.listChildDirs(path) -> string[] | null, where
+// null means denied/unreadable and [] a readable directory with no children.
+
+// A mocked host whose only subprocess is git; any other bin fails the test.
+// Each test uses its own parent path: the bubble cache is keyed by cwd.
+function multiRepoHost(parent, listChildDirs) {
+  return {
+    unixNowMs: () => 10000,
+    platform: () => "windows",
+    listChildDirs,
+    fileExists: (path) => /repo-[ab]\/\.git$/.test(path.replace(/\\/g, "/")),
+    exec: (raw) => {
+      const opts = JSON.parse(raw);
+      if (opts.bin !== "git") throw new Error(`plugin spawned a non-git binary: ${opts.bin}`);
+      const cwd = opts.args[1];
+      const args = opts.args.slice(2);
+      if (args[0] === "symbolic-ref") {
+        if (cwd === parent) return JSON.stringify({ code: 1, stdout: "", stderr: "not a repository" });
+        const branch = cwd.endsWith("repo-b") ? "feature/b" : "main";
+        return JSON.stringify({ code: 0, stdout: `${branch}\n`, stderr: "" });
+      }
+      if (args[0] === "rev-parse" && args[1] === "--show-toplevel") {
+        return JSON.stringify({ code: 1, stdout: "", stderr: "not a repository" });
+      }
+      if (args[0] === "status") return JSON.stringify({ code: 0, stdout: "", stderr: "" });
+      throw new Error(`unexpected git call: ${cwd} ${args.join(" ")}`);
+    },
+  };
+}
+
+test("gitRepos discovers sibling repositories through host.listChildDirs", () => {
+  const parent = "C:/ws-discovery";
+  const listed = [];
+  globalThis.host = multiRepoHost(parent, (path) => {
+    listed.push(path);
+    return ["repo-a", "repo-b", "not-a-repo"];
+  });
+  const repos = plugin.viewCall("gitRepos", { cwd: parent });
+  assert(listed.length > 0 && listed[0] === parent, "listChildDirs called with the pane cwd");
+  assert(repos.length === 2, `both repos discovered, got ${JSON.stringify(repos)}`);
+  assert(repos[0].path === `${parent}/repo-a` && repos[0].branch === "main", "repo-a on main");
+  assert(repos[1].path === `${parent}/repo-b` && repos[1].branch === "feature/b", "repo-b on feature/b");
+});
+
+test("denied listChildDirs (null) yields no repos without throwing", () => {
+  const parent = "C:/ws-denied";
+  globalThis.host = multiRepoHost(parent, () => null);
+  const repos = plugin.viewCall("gitRepos", { cwd: parent });
+  assert(Array.isArray(repos) && repos.length === 0, "denied listing degrades to [], got " + JSON.stringify(repos));
+});
+
+test("absent listChildDirs binding (older daemon) yields no repos without throwing", () => {
+  const parent = "C:/ws-absent";
+  const mock = multiRepoHost(parent, undefined);
+  delete mock.listChildDirs;
+  globalThis.host = mock;
+  const repos = plugin.viewCall("gitRepos", { cwd: parent });
+  assert(Array.isArray(repos) && repos.length === 0, "missing binding degrades to [], got " + JSON.stringify(repos));
+  const bubble = plugin.statusBubble({ cwd: parent });
+  assert(bubble === null || typeof bubble === "object", "bubble survives a host without the binding");
+});
+
+test("a throwing listChildDirs binding yields no repos without throwing", () => {
+  const parent = "C:/ws-throws";
+  globalThis.host = multiRepoHost(parent, () => { throw new Error("host denied"); });
+  const repos = plugin.viewCall("gitRepos", { cwd: parent });
+  assert(Array.isArray(repos) && repos.length === 0, "throwing binding degrades to [], got " + JSON.stringify(repos));
+});
+
 test("multi-repo bubble summarizes and follows the selected repository", () => {
   const parent = "C:/workspace";
   globalThis.host = {
     unixNowMs: () => 10000,
     platform: () => "windows",
+    listChildDirs: () => ["repo-a", "repo-b"],
     fileExists: (path) => /repo-[ab]\/\.git$/.test(path.replace(/\\/g, "/")),
     exec: (raw) => {
       const opts = JSON.parse(raw);
-      if (opts.bin === "cmd") return JSON.stringify({ code: 0, stdout: "repo-a\r\nrepo-b\r\n", stderr: "" });
+      if (opts.bin !== "git") throw new Error(`plugin spawned a non-git binary: ${opts.bin}`);
       const cwd = opts.args[1];
       const args = opts.args.slice(2);
       if (args[0] === "symbolic-ref") {

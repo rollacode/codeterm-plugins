@@ -106,7 +106,8 @@ test("auto-unlock: no session + persisted master password → op retries and ret
     object: "item", id: "id-1", type: 1, name: "db-pw", notes: null,
     login: { username: null, password: "s3cr3t-value", totp: null, uris: [] },
   };
-  const secrets = { master_password: MASTER }; // note: no "session" → locked
+  // Consent armed in the plugin's own bucket; same mechanism, now behind the opt-in.
+  const secrets = { auto_unlock_consent: "1", master_password: MASTER }; // note: no "session" → locked
   let unlockCalls = 0;
 
   const savedHost = globalThis.host;
@@ -121,7 +122,9 @@ test("auto-unlock: no session + persisted master password → op retries and ret
       const args = o.args || [];
       const env = o.env || {};
       let body;
-      if (args.indexOf("unlock") >= 0) {
+      if (args.indexOf("status") >= 0) {
+        body = { success: true, data: { status: "locked" } };
+      } else if (args.indexOf("unlock") >= 0) {
         unlockCalls += 1;
         body = env.BW_PASSWORD === MASTER
           ? { success: true, data: { object: "message", raw: SESSION } }
@@ -145,10 +148,214 @@ test("auto-unlock: no session + persisted master password → op retries and ret
   }
 });
 
-test("successful unlock always persists the master password for auto-unlock", () => {
+test("auto-relogin: logged-out email account logs in, unlocks, and completes the operation once", () => {
+  const MASTER = "correct-horse-battery-staple";
+  const EMAIL = "owner@example.com";
+  const SESSION = "SESSION-AFTER-LOGIN";
+  const secrets = { auto_unlock_consent: "1", master_password: MASTER, login_email: EMAIL };
+  const calls = [];
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      const args = o.args || [], env = o.env || {};
+      calls.push({ args, env });
+      let body;
+      if (args.includes("status")) body = { success: true, data: { status: "unauthenticated" } };
+      else if (args.includes("login")) body = env.BW_PASSWORD === MASTER ? { success: true, data: {} } : { success: false, message: "Invalid credentials" };
+      else if (args.includes("unlock")) body = env.BW_PASSWORD === MASTER ? { success: true, data: { raw: SESSION } } : { success: false, message: "Invalid master password" };
+      else body = env.BW_SESSION === SESSION
+        ? { success: true, data: { id: "id-1", type: 1, name: "publish-token", login: { password: "value" } } }
+        : { success: false, message: "You are not logged in." };
+      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+    },
+  };
+  try {
+    const r = plugin.secretGetItem("publish-token");
+    assert("ok" in r && r.ok.value === "value", "expected recovered operation, got " + JSON.stringify(r));
+    assert(calls.filter((c) => c.args.includes("login")).length === 1, "expected one login");
+    assert(calls.filter((c) => c.args.includes("unlock")).length === 1, "expected one unlock");
+    assert(calls.filter((c) => c.args.includes("get")).length === 1, "expected one operation attempt");
+    assert(calls.every((c) => !c.args.includes(MASTER)), "master password must never enter argv");
+    assert(secrets.session === SESSION, "fresh session must be persisted");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("auto-relogin: API-key account restores login without exposing credentials in argv", () => {
+  const MASTER = "master-password";
+  const CLIENT_ID = "client-id";
+  const CLIENT_SECRET = "client-secret";
+  const SESSION = "API-SESSION";
+  const secrets = {
+    auto_unlock_consent: "1",
+    master_password: MASTER,
+    api_client_id: CLIENT_ID,
+    api_client_secret: CLIENT_SECRET,
+  };
+  const calls = [];
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      const args = o.args || [], env = o.env || {};
+      calls.push({ args, env });
+      let body;
+      if (args.includes("status")) body = { success: true, data: { status: "unauthenticated" } };
+      else if (args.includes("login")) body = env.BW_CLIENTID === CLIENT_ID && env.BW_CLIENTSECRET === CLIENT_SECRET
+        ? { success: true, data: {} }
+        : { success: false, message: "Invalid credentials" };
+      else if (args.includes("unlock")) body = env.BW_PASSWORD === MASTER ? { success: true, data: { raw: SESSION } } : { success: false, message: "Invalid master password" };
+      else body = env.BW_SESSION === SESSION ? { success: true, data: [] } : { success: false, message: "You are not logged in." };
+      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+    },
+  };
+  try {
+    const r = plugin.secretList({});
+    assert("ok" in r, "expected API-key recovery, got " + JSON.stringify(r));
+    const login = calls.find((c) => c.args.includes("login"));
+    assert(login && login.args.includes("--apikey"), "expected API-key login");
+    assert(login.env.BW_CLIENTID === CLIENT_ID && login.env.BW_CLIENTSECRET === CLIENT_SECRET, "API credentials must be environment-only");
+    assert(calls.every((c) => !c.args.includes(CLIENT_ID) && !c.args.includes(CLIENT_SECRET) && !c.args.includes(MASTER)), "credentials must never enter argv");
+    assert(secrets.session === SESSION, "fresh API session must be persisted");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("auto-relogin: stale session receives one bounded login-unlock-retry cycle", () => {
+  const MASTER = "master-password";
+  const SESSION = "fresh-session";
+  const secrets = { auto_unlock_consent: "1", session: "stale-session", master_password: MASTER, login_email: "owner@example.com" };
+  let operationCalls = 0;
+  let loginCalls = 0;
+  let unlockCalls = 0;
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      const args = o.args || [], env = o.env || {};
+      let body;
+      if (args.includes("status")) body = { success: true, data: { status: "unauthenticated" } };
+      else if (args.includes("login")) { loginCalls++; body = { success: true, data: {} }; }
+      else if (args.includes("unlock")) { unlockCalls++; body = { success: true, data: { raw: SESSION } }; }
+      else {
+        operationCalls++;
+        body = env.BW_SESSION === SESSION
+          ? { success: true, data: { id: "id-1", type: 1, name: "token", login: { password: "value" } } }
+          : { success: false, message: "You are not logged in." };
+      }
+      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+    },
+  };
+  try {
+    const r = plugin.secretGetItem("token");
+    assert("ok" in r, "expected stale-session recovery, got " + JSON.stringify(r));
+    assert(operationCalls === 2, "operation must run once before and once after recovery");
+    assert(loginCalls === 1 && unlockCalls === 1, "recovery must be exactly one login and one unlock");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("auto-relogin: server login failure is surfaced and keeps persisted credentials", () => {
+  const MASTER = "master-password";
+  const secrets = { auto_unlock_consent: "1", master_password: MASTER, login_email: "owner@example.com" };
+  let loginCalls = 0;
+  let unlockCalls = 0;
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const args = JSON.parse(optsJson).args || [];
+      let body;
+      if (args.includes("status")) body = { success: true, data: { status: "unauthenticated" } };
+      else if (args.includes("login")) { loginCalls++; body = { success: false, message: "Error saving device" }; }
+      else if (args.includes("unlock")) { unlockCalls++; body = { success: true, data: { raw: "unexpected" } }; }
+      else body = { success: false, message: "You are not logged in." };
+      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+    },
+  };
+  try {
+    const r = plugin.secretGetItem("token");
+    assert("error" in r && r.error.kind === "backend" && r.error.message === "Error saving device", "expected server failure, got " + JSON.stringify(r));
+    assert(loginCalls === 1 && unlockCalls === 0, "failed login must stop before unlock");
+    assert(secrets.master_password === MASTER, "transient server failure must retain the password");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("async status: logged-out vault advances through login and unlock jobs", () => {
+  const MASTER = "master-password";
+  const SESSION = "async-session";
+  const secrets = { auto_unlock_consent: "1", master_password: MASTER, login_email: "owner@example.com" };
+  const jobs = {};
+  const polled = [];
+  let nextJob = 1;
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    execStart: (optsJson) => {
+      const opts = JSON.parse(optsJson);
+      const id = "job-" + nextJob++;
+      jobs[id] = opts;
+      return JSON.stringify({ jobId: id });
+    },
+    execPoll: (id) => {
+      polled.push(id);
+      const opts = jobs[id];
+      const args = opts.args || [];
+      let body;
+      if (args.includes("status")) body = { success: true, data: { status: "unauthenticated" } };
+      else if (args.includes("login")) body = { success: true, data: {} };
+      else body = { success: true, data: { raw: SESSION } };
+      return JSON.stringify({ done: true, stdout: JSON.stringify(body), stderr: "", code: 0 });
+    },
+  };
+  try {
+    const started = plugin.viewCall("statusStart", {});
+    assert(started.jobId === "job-1", "expected stable flow id");
+    assert(plugin.viewCall("statusPoll", { jobId: started.jobId }).done === false, "status should advance to login");
+    assert(plugin.viewCall("statusPoll", { jobId: started.jobId }).done === false, "login should advance to unlock");
+    const done = plugin.viewCall("statusPoll", { jobId: started.jobId });
+    assert(done.done === true && done.status.status === "unlocked", "expected unlocked, got " + JSON.stringify(done));
+    assert(polled.join(",") === "job-1,job-2,job-3", "expected event-driven job chain, got " + polled.join(","));
+    assert(secrets.session === SESSION, "async unlock must persist the fresh session");
+    assert(Object.values(jobs).every((j) => !(j.args || []).includes(MASTER)), "master password must never enter argv");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("consent armed + explicit intent: unlock persists the master password for auto-unlock", () => {
   const MASTER = "hunter2";
   const SESSION = "SESS-OFF";
-  const secrets = {};
+  const secrets = { auto_unlock_consent: "1" };
   const savedHost = globalThis.host;
   globalThis.host = {
     secretGet: (k) => (k in secrets ? secrets[k] : null),
@@ -167,10 +374,61 @@ test("successful unlock always persists the master password for auto-unlock", ()
     },
   };
   try {
-    const r = plugin.secretUnlock({ masterPassword: MASTER, email: "a@b.c" });
+    const r = plugin.secretUnlock({ masterPassword: MASTER, email: "a@b.c", persistForAutoUnlock: true });
     assert("ok" in r, "expected unlock ok, got " + JSON.stringify(r));
     assert(secrets.session === SESSION, "session must be persisted");
-    assert(secrets.master_password === MASTER, "K_MASTER must always be persisted");
+    assert(secrets.master_password === MASTER, "K_MASTER must be persisted when consent is armed and intent is explicit");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("locked identity survives a later CLI logout for headless recovery", () => {
+  const MASTER = "master-password";
+  const EMAIL = "owner@example.com";
+  const SESSION_1 = "first-session";
+  const SESSION_2 = "recovered-session";
+  const secrets = { auto_unlock_consent: "1" };
+  let state = "locked";
+  let unlocks = 0;
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      const args = o.args || [], env = o.env || {};
+      let body;
+      if (args.includes("status")) {
+        body = { success: true, data: { status: state, userEmail: state === "locked" ? EMAIL : undefined, serverUrl: "https://vault.bitwarden.com" } };
+      } else if (args.includes("login")) {
+        state = "locked";
+        body = env.BW_PASSWORD === MASTER ? { success: true, data: {} } : { success: false, message: "Invalid credentials" };
+      } else if (args.includes("unlock")) {
+        unlocks += 1;
+        state = "unlocked";
+        body = env.BW_PASSWORD === MASTER ? { success: true, data: { raw: unlocks === 1 ? SESSION_1 : SESSION_2 } } : { success: false, message: "Invalid master password" };
+      } else {
+        body = env.BW_SESSION === SESSION_2
+          ? { success: true, data: { id: "id-1", type: 1, name: "token", login: { password: "value" } } }
+          : { success: false, message: "You are not logged in." };
+      }
+      return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+    },
+  };
+  try {
+    const unlocked = plugin.secretUnlock({ masterPassword: MASTER, persistForAutoUnlock: true });
+    assert("ok" in unlocked, "expected locked vault unlock, got " + JSON.stringify(unlocked));
+    assert(secrets.login_email === EMAIL, "locked status identity must be persisted");
+
+    state = "unauthenticated";
+    delete secrets.session;
+    const recovered = plugin.secretGetItem("token");
+    assert("ok" in recovered && recovered.ok.value === "value", "expected relogin recovery, got " + JSON.stringify(recovered));
+    assert(unlocks === 2, "expected initial and recovery unlocks only, got " + unlocks);
   } finally {
     globalThis.host = savedHost;
   }
@@ -181,7 +439,7 @@ test("successful unlock always persists the master password for auto-unlock", ()
 test("empty-creds unlock: no input + persisted master → auto-unlock succeeds", () => {
   const MASTER = "hunter2";
   const SESSION = "SESS-EMPTY";
-  const secrets = { master_password: MASTER };
+  const secrets = { auto_unlock_consent: "1", master_password: MASTER };
   let unlockCalls = 0;
   const savedHost = globalThis.host;
   globalThis.host = {
@@ -270,6 +528,158 @@ test("status cause: bw-level error passes the bw message through", () => {
   }
 });
 
+test("locked with nothing remembered: status answers once and names the way out", () => {
+  const secrets = {};
+  const savedHost = globalThis.host;
+  let execs = 0;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: () => {
+      execs++;
+      return JSON.stringify({ stdout: JSON.stringify({ success: true, data: { status: "locked" } }), code: 0 });
+    },
+  };
+  try {
+    const s = plugin.secretStatus();
+    assert(s.status === "locked", "expected locked, got " + JSON.stringify(s));
+    assert(/unlock/i.test(s.reason || ""), "a terminal lock must name the way out, got " + s.reason);
+    assert(execs === 1, "one bw invocation is enough to know, ran " + execs);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("locked with nothing remembered: an operation fails structurally without running bw", () => {
+  const secrets = {};
+  const savedHost = globalThis.host;
+  let execs = 0;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: () => { execs++; return JSON.stringify({ stdout: "{}", code: 0 }); },
+  };
+  try {
+    const r = plugin.secretGetItem("example");
+    const err = r && r.error;
+    assert(err && err.kind === "locked", "expected a locked envelope, got " + JSON.stringify(r));
+    assert(/unlock/i.test(err.message || ""), "the error must name the way out, got " + err.message);
+    assert(execs === 0, "a headlessly-unopenable vault needs no bw call, ran " + execs);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("bw status runs on its own shorter budget than a full command", () => {
+  const secrets = {};
+  const savedHost = globalThis.host;
+  const budgets = [];
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      budgets.push(JSON.parse(optsJson).timeoutMs);
+      return JSON.stringify({ stdout: JSON.stringify({ success: true, data: { status: "locked" } }), code: 0 });
+    },
+  };
+  try {
+    plugin.secretStatus();
+    assert(budgets.length === 1, "expected one status call, got " + budgets.length);
+    assert(budgets[0] < 30000, "status must not book the full command budget, got " + budgets[0]);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("a rejected master password is forgotten, so the next call fails fast", () => {
+  const secrets = { auto_unlock_consent: "1", master_password: "wrong" };
+  const savedHost = globalThis.host;
+  let unlocks = 0;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const args = JSON.parse(optsJson).args || [];
+      if (args.indexOf("unlock") >= 0) {
+        unlocks++;
+        return JSON.stringify({ stdout: JSON.stringify({ success: false, message: "Invalid master password." }), code: 1 });
+      }
+      return JSON.stringify({ stdout: JSON.stringify({ success: true, data: { status: "locked" } }), code: 0 });
+    },
+  };
+  try {
+    const first = plugin.secretGetItem("example");
+    assert(first && first.error && first.error.kind === "locked", "expected locked, got " + JSON.stringify(first));
+    assert(unlocks === 1, "the first call may try the remembered password once, tried " + unlocks);
+    assert(!("master_password" in secrets), "a rejected password must not be kept");
+
+    const second = plugin.secretGetItem("example");
+    assert(second && second.error && second.error.kind === "locked", "still locked");
+    assert(unlocks === 1, "the second call must not retry a password already rejected, tried " + unlocks);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("a transient unlock failure keeps the remembered password", () => {
+  const secrets = { auto_unlock_consent: "1", master_password: "right" };
+  const savedHost = globalThis.host;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const args = JSON.parse(optsJson).args || [];
+      if (args.indexOf("unlock") >= 0) {
+        return JSON.stringify({ stdout: JSON.stringify({ success: false, message: "Server is unreachable" }), code: 1 });
+      }
+      return JSON.stringify({ stdout: JSON.stringify({ success: true, data: { status: "locked" } }), code: 0 });
+    },
+  };
+  try {
+    plugin.secretGetItem("example");
+    assert(secrets.master_password === "right", "a network failure must not wipe a good credential");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("api-key creds without a master password are refused up front, not by bw", () => {
+  const secrets = {};
+  const savedHost = globalThis.host;
+  let execs = 0;
+  globalThis.host = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { secrets[k] = v; },
+    secretDelete: (k) => { delete secrets[k]; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: () => { execs++; return JSON.stringify({ stdout: "{}", code: 0 }); },
+  };
+  try {
+    const r = plugin.secretUnlock({ apiKeyClientId: "id", apiKeyClientSecret: "secret" });
+    assert(r && r.error && r.error.kind === "bad_request", "expected bad_request, got " + JSON.stringify(r));
+    assert(/master password/i.test(r.error.message || ""), "the error must name what is missing, got " + r.error.message);
+    assert(execs === 0, "the requirement is knowable without running bw, ran " + execs);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
 test("reset connection applies the configured server and clears stale credentials", () => {
   const secrets = {
     session: "stale-session",
@@ -303,6 +713,223 @@ test("reset connection applies the configured server and clears stale credential
   } finally {
     globalThis.host = savedHost;
   }
+});
+
+// ── auto-unlock consent ──
+// Capability advertises, the durable flag permits, the per-call intent requests,
+// and the vault still authenticates on its own evidence.
+
+const SYNTHETIC_MASTER = "synthetic-not-a-credential-0000";
+const SYNTHETIC_SESSION = "synthetic-session-token-0000";
+const SYNTHETIC_CLIENT_SECRET = "synthetic-client-secret-0000";
+
+// Records the calls themselves, so consent is asserted on writes, not on state.
+function recordingHost(secrets, exec) {
+  const rec = { writes: [], deletes: [], execs: [], starts: [] };
+  const h = {
+    secretGet: (k) => (k in secrets ? secrets[k] : null),
+    secretSet: (k, v) => { rec.writes.push({ key: k, value: v }); secrets[k] = v; return true; },
+    secretDelete: (k) => { rec.deletes.push(k); delete secrets[k]; return true; },
+    settingsJson: () => "{}",
+    manifest: () => ({ permissions: { network: { allow: [] } } }),
+    exec: (optsJson) => {
+      const o = JSON.parse(optsJson);
+      rec.execs.push({ args: o.args || [], env: o.env || {} });
+      return exec ? exec(o) : JSON.stringify({ stdout: "{}", code: 0 });
+    },
+    execStart: (optsJson) => {
+      rec.starts.push(JSON.parse(optsJson));
+      return JSON.stringify({ error: "not used" });
+    },
+  };
+  return { host: h, rec };
+}
+
+// bw double: unlock succeeds for `master`, session-scoped ops need `session`.
+function bwDouble(master, session, extra) {
+  return (o) => {
+    const args = o.args || [], env = o.env || {};
+    let body = extra ? extra(args, env) : null;
+    if (!body) {
+      if (args.indexOf("status") >= 0) body = { success: true, data: { status: "locked", serverUrl: "https://vault.bitwarden.com" } };
+      else if (args.indexOf("unlock") >= 0) body = env.BW_PASSWORD === master
+        ? { success: true, data: { raw: session } }
+        : { success: false, message: "Invalid master password." };
+      else if (args.indexOf("login") >= 0) body = { success: true, data: {} };
+      else body = env.BW_SESSION === session
+        ? { success: true, data: { id: "id-1", type: 1, name: "token", login: { password: "value" } } }
+        : { success: false, message: "Vault is locked." };
+    }
+    return JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: body.success ? 0 : 1 });
+  };
+}
+
+// Two independent signals, one permitted cell.
+test("signing in always arms auto-unlock, whatever the caller asks for", () => {
+  const savedHost = globalThis.host;
+  // Auto-unlock is unconditional now, so no caller-supplied intent may weaken it.
+  for (const intent of [false, true, undefined]) {
+    const label = "intent=" + String(intent);
+    const secrets = {};
+    const { host: h, rec } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+    globalThis.host = h;
+    try {
+      const r = plugin.secretUnlock({
+        masterPassword: SYNTHETIC_MASTER,
+        email: "owner@example.com",
+        persistForAutoUnlock: intent,
+      });
+      assert("ok" in r, label + ": unlock itself must succeed, got " + JSON.stringify(r));
+      assert(secrets.session === SYNTHETIC_SESSION, label + ": the session token is always persisted");
+      const writes = rec.writes.filter((w) => w.key === "master_password").length;
+      assert(writes === 1, label + ": expected exactly 1 master_password write, got " + writes);
+      assert(secrets.master_password === SYNTHETIC_MASTER, label + ": the master password must be stored");
+    } finally {
+      globalThis.host = savedHost;
+    }
+  }
+});
+
+test("a stale consent flag from an older build cannot disarm auto-unlock", () => {
+  const savedHost = globalThis.host;
+  // Upgrades carry the old key; it must be inert, not a hidden off switch.
+  for (const stale of ["", "0", "no"]) {
+    const secrets = { auto_unlock_consent: stale };
+    const { host: h } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+    globalThis.host = h;
+    try {
+      const r = plugin.secretUnlock({ masterPassword: SYNTHETIC_MASTER, email: "owner@example.com" });
+      assert("ok" in r, "stale flag " + JSON.stringify(stale) + ": unlock must succeed");
+      assert(
+        secrets.master_password === SYNTHETIC_MASTER,
+        "stale flag " + JSON.stringify(stale) + " must not suppress the stored password",
+      );
+    } finally {
+      globalThis.host = savedHost;
+    }
+  }
+});
+
+test("the consent verbs are gone from the view bridge", () => {
+  const savedHost = globalThis.host;
+  const { host: h } = recordingHost({}, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+  globalThis.host = h;
+  try {
+    for (const method of ["autoUnlockConsent", "setAutoUnlockConsent"]) {
+      const r = plugin.viewCall(method, {});
+      assert(
+        r && typeof r.error === "string" && /unknown view method/.test(r.error),
+        method + " must no longer be routed, got " + JSON.stringify(r),
+      );
+    }
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+
+test("consent armed but no stored credential: an operation is refused with a named discriminant", () => {
+  const secrets = { auto_unlock_consent: "1" };
+  const { host: h, rec } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+  const savedHost = globalThis.host;
+  globalThis.host = h;
+  try {
+    const r = plugin.secretGetItem("token");
+    assert(r && r.error && r.error.kind === "locked", "expected a locked discriminant, got " + JSON.stringify(r));
+    assert(/unlock/i.test(r.error.message || ""), "the refusal must name the way out, got " + r.error.message);
+    assert(rec.execs.length === 0, "consent is not access: nothing is attempted, ran " + rec.execs.length);
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("the manifest declares the auto-unlock capability it now implements", () => {
+  const { readFileSync } = require("node:fs");
+  const { join } = require("node:path");
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  const cap = manifest.capabilities && manifest.capabilities.secretBackend;
+  assert(cap && typeof cap === "object", "secretBackend must be the object form, got " + JSON.stringify(cap));
+  assert(cap.autoUnlock === true, "the manifest must declare autoUnlock, got " + JSON.stringify(cap));
+});
+
+test("secretInit performs no exec and no secret write", () => {
+  const secrets = {
+    auto_unlock_consent: "1",
+    master_password: SYNTHETIC_MASTER,
+    session: SYNTHETIC_SESSION,
+    login_email: "owner@example.com",
+  };
+  const { host: h, rec } = recordingHost(secrets, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION));
+  const savedHost = globalThis.host;
+  globalThis.host = h;
+  try {
+    const r = plugin.secretInit();
+    assert(r && r.ok === true, "expected secretInit to succeed, got " + JSON.stringify(r));
+    assert(rec.execs.length === 0 && rec.starts.length === 0, "secretInit must shell nothing, ran " + (rec.execs.length + rec.starts.length));
+    assert(rec.writes.length === 0 && rec.deletes.length === 0, "secretInit must write nothing, touched " + JSON.stringify(rec.writes.concat(rec.deletes)));
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
+test("no credential reaches argv or any emitted string across the recovery paths", () => {
+  const savedHost = globalThis.host;
+  const emitted = [];
+  const argv = [];
+
+  const drive = (secrets, exec, run) => {
+    const { host: h, rec } = recordingHost(secrets, exec);
+    globalThis.host = h;
+    try {
+      emitted.push(JSON.stringify(run()));
+    } finally {
+      globalThis.host = savedHost;
+      for (const call of rec.execs) argv.push(call.args.join(" "));
+      for (const call of rec.starts) argv.push((call.args || []).join(" "));
+    }
+  };
+
+  // login + persist, JIT auto-unlock, API-key relogin, surfaced login failure.
+  drive({ auto_unlock_consent: "1" }, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION), () =>
+    plugin.secretUnlock({ masterPassword: SYNTHETIC_MASTER, email: "owner@example.com", persistForAutoUnlock: true }));
+
+  drive({ auto_unlock_consent: "1", master_password: SYNTHETIC_MASTER, login_email: "owner@example.com" },
+    bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION), () => plugin.secretGetItem("token"));
+
+  drive({
+    auto_unlock_consent: "1",
+    master_password: SYNTHETIC_MASTER,
+    api_client_id: "client-id",
+    api_client_secret: SYNTHETIC_CLIENT_SECRET,
+  }, bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION, (args) =>
+    args.indexOf("status") >= 0 ? { success: true, data: { status: "unauthenticated" } } : null),
+  () => plugin.secretGetItem("token"));
+
+  drive({ auto_unlock_consent: "1", master_password: SYNTHETIC_MASTER, login_email: "owner@example.com" },
+    bwDouble(SYNTHETIC_MASTER, SYNTHETIC_SESSION, (args) => {
+      if (args.indexOf("status") >= 0) return { success: true, data: { status: "unauthenticated" } };
+      if (args.indexOf("login") >= 0) return { success: false, message: "Error saving device" };
+      return null;
+    }), () => plugin.secretGetItem("token"));
+
+  for (const value of [SYNTHETIC_MASTER, SYNTHETIC_SESSION, SYNTHETIC_CLIENT_SECRET]) {
+    for (const line of argv) {
+      assert(line.indexOf(value) < 0, "a credential reached argv: " + line.split(value).join("<redacted>"));
+    }
+    for (const out of emitted) {
+      assert(out.indexOf(value) < 0, "a credential reached an emitted envelope: " + out.split(value).join("<redacted>"));
+    }
+  }
+});
+
+test("the view renders no auto-unlock toggle and asks for no consent", () => {
+  const { readFileSync } = require("node:fs");
+  const { join } = require("node:path");
+  const src = readFileSync(join(__dirname, "ui", "src", "main.tsx"), "utf8");
+  assert(!/RememberToggle/.test(src), "the view must not render a remember toggle");
+  assert(!/setAutoUnlockConsent|autoUnlockConsent/.test(src), "the view must not call a consent verb");
+  assert(!/persistForAutoUnlock/.test(src), "unlock must not carry a per-call persistence intent");
+  assert(/invoke\("unlock"/.test(src), "the view must still perform the unlock");
 });
 
 let failed = 0;

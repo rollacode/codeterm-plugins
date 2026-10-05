@@ -613,6 +613,88 @@ test("remote: status is ready and glance shows the endpoint", () => {
 
 // ── Run ────────────────────────────────────────────────────────────────
 let failed = 0;
+
+test("macOS: a Homebrew ffmpeg outside the plugin PATH is used by absolute path", () => {
+  reset({ model: "small" }, "macos");
+  // Installed where brew puts it, invisible to a runtime with no login PATH.
+  files["/usr/local/bin/ffmpeg"] = "binary";
+  files["/usr/local/bin/whisper-cli"] = "binary";
+  files[HOME + "/.codeterm/transcriber/ggml-small.bin"] = "x".repeat(200000);
+  execHandler = withSandbox((opts) => {
+    if (basename(opts.bin) === "ffmpeg" && opts.bin.indexOf("/") === -1) {
+      return JSON.stringify({ error: "not found" });
+    }
+    if (basename(opts.bin) === "whisper-cli" && opts.bin.indexOf("/") === -1) {
+      return JSON.stringify({ error: "not found" });
+    }
+    if (basename(opts.bin) === "brew") return JSON.stringify({ error: "not found" });
+    if (basename(opts.bin) === "whisper-cli") {
+      const of = (opts.args || []).indexOf("-of");
+      if (of >= 0) files[opts.args[of + 1] + ".json"] = whisperJson(["hello"]);
+      return JSON.stringify({ code: 0 });
+    }
+    return JSON.stringify({ code: 0, stdout: "", stderr: "" });
+  });
+  files["/tmp/note.oga"] = "audio";
+  plugin.transcribe("/tmp/note.oga");
+  assert(
+    execCalls.some((c) => c.bin === "/usr/local/bin/ffmpeg"),
+    "ffmpeg must run by its absolute path, ran: " + execCalls.map((c) => c.bin).join(", "),
+  );
+  assert(
+    !execCalls.some((c) => basename(c.bin) === "brew" && (c.args || [])[0] === "install"),
+    "a binary that is already present must not trigger brew install",
+  );
+});
+
+test("macOS: brew --prefix decides where an installed binary is looked for", () => {
+  reset({ model: "small" }, "macos");
+  files["/opt/custom/bin/ffmpeg"] = "binary";
+  files["/opt/custom/bin/whisper-cli"] = "binary";
+  files[HOME + "/.codeterm/transcriber/ggml-small.bin"] = "x".repeat(200000);
+  execHandler = withSandbox((opts) => {
+    if (opts.bin.indexOf("/") === -1 && basename(opts.bin) !== "brew") {
+      return JSON.stringify({ error: "not found" });
+    }
+    if (basename(opts.bin) === "brew" && (opts.args || [])[0] === "--prefix") {
+      return JSON.stringify({ code: 0, stdout: "/opt/custom\n", stderr: "" });
+    }
+    if (opts.bin === "curl") {
+      const i = (opts.args || []).indexOf("-o");
+      if (i >= 0) files[opts.args[i + 1]] = "x".repeat(200000);
+      return JSON.stringify({ code: 0 });
+    }
+    if (basename(opts.bin) === "whisper-cli") {
+      const of = (opts.args || []).indexOf("-of");
+      if (of >= 0) files[opts.args[of + 1] + ".json"] = whisperJson(["hi"]);
+      return JSON.stringify({ code: 0 });
+    }
+    return JSON.stringify({ code: 0, stdout: "", stderr: "" });
+  });
+  files["/tmp/note.oga"] = "audio";
+  plugin.transcribe("/tmp/note.oga");
+  // Before the fix this reached `brew install` for a binary that was already
+  // there, because only the PATH probe and the plugin-local dir were consulted.
+  assert(
+    !execCalls.some((c) => (c.args || [])[0] === "install"),
+    "binaries under brew's own prefix must be found, not reinstalled; ran: " + execCalls.map((c) => c.bin).join(", "),
+  );
+  assert(
+    execCalls.some((c) => basename(c.bin) === "brew" && (c.args || [])[0] === "--prefix"),
+    "brew's own prefix must be asked for rather than guessed",
+  );
+});
+
+test("macOS: a genuinely missing ffmpeg names where it was looked for", () => {
+  reset({ model: "small" }, "macos");
+  execHandler = withSandbox(() => JSON.stringify({ error: "not found" }));
+  files["/tmp/note.oga"] = "audio";
+  const r = plugin.transcribe("/tmp/note.oga");
+  const msg = (r && (r.error || r.text)) || "";
+  assert(/looked in/i.test(msg), "the failure must be diagnosable, got " + JSON.stringify(r));
+  assert(msg.indexOf("/usr/local/bin/ffmpeg") >= 0, "the standard prefixes must be named, got " + msg);
+});
+
 for (const [name, fn] of tests) {
   try { fn(); console.log(`✓ ${name}`); }
   catch (err) { failed += 1; console.error(`✗ ${name}`); console.error(err); }

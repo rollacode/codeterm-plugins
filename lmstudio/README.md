@@ -1,11 +1,11 @@
 # LM Studio
 
 A CodeTerm **chatBackend** plugin that turns a pane into an open agent shell
-backed by a local [LM Studio](https://lmstudio.ai) model. The shell uses LM
+backed by an [LM Studio](https://lmstudio.ai) model. The shell uses LM
 Studio native v1 chat, streams partial tokens, shows the active system prompt as
 the first message, and can run validated CodeTerm tool calls parsed by the host.
 
-LM Studio's local server is the model backend; this plugin connects to it via
+The LM Studio server is the model backend; this plugin connects to it via
 permission-gated host APIs.
 
 The plugin also supports **context engines** and **interaction modes**:
@@ -20,8 +20,18 @@ The plugin also supports **context engines** and **interaction modes**:
 
 1. Open LM Studio, load a model, and start its server (Developer -> Start Server).
    The default endpoint is `http://localhost:1234`.
-2. Configure the plugin if your server differs from the default. See
-   [`config.yaml`](./config.yaml), which documents the default preset shape.
+2. Set **Server address** in the plugin detail panel. It defaults to
+   `http://localhost:1234`. For a remote server, CodeTerm 1.12.4 and later can
+   grant its host with the second command below:
+
+   ```sh
+   codeterm plugin config lmstudio --set baseUrl=http://eight.tail0e459c.ts.net:1234
+   codeterm plugin settings lmstudio --allow-host eight.tail0e459c.ts.net:1234
+   ```
+
+   The first command sets the endpoint used by both chat and decision requests;
+   the second grants that host in CodeTerm. See [`config.yaml`](./config.yaml)
+   for the available settings and default preset shape.
 3. Open a chatBackend pane for this plugin, or spawn it as a shell when the host
    exposes chatBackend providers through `codeterm agent spawn`.
 
@@ -54,8 +64,12 @@ The host parses verdicts tolerantly and executes allowed actions (`nudge`, `noti
 
 Config lives in [`config.yaml`](./config.yaml):
 
-- `baseUrl`: server base URL, default `http://localhost:1234`.
+- `baseUrl`: server address for chat and decision requests, default
+  `http://localhost:1234`. A remote address can be a reachable Tailscale name;
+  add its `host:port` in CodeTerm 1.12.4 and later with
+  `codeterm plugin settings lmstudio --allow-host <host:port>`.
 - `model`: fallback model id; blank lets LM Studio use the loaded model.
+- `decision.model`: model id for decision requests; blank uses `model` or the first id from `GET /v1/models`. `decision.maxTokens` defaults to 64 (clamped to 8–128); `decision.timeoutMs` is capped at 30 seconds.
 - `defaultPreset`: preset id when the chosen model has no bound preset and the
   session does not request one explicitly.
 - `presets`: array of `{ id, name, systemPrompt?, model?, params? }`. A preset
@@ -71,9 +85,12 @@ the first `system_prompt` message so the UI can render it as an observable card.
 
 Watcher sessions emit the **charter** as the system-prompt card instead of a chat preset.
 
-The plugin may only reach hosts in `plugin.json` -> `permissions.network.allow`
-(defaults: `localhost:1234`, `127.0.0.1:1234`). Point `baseUrl` elsewhere and add
-that `host:port` to the allowlist.
+The manifest grants the local defaults (`localhost:1234`, `127.0.0.1:1234`).
+On CodeTerm 1.12.4 and later, grant a remote endpoint's `host:port` with
+`codeterm plugin settings lmstudio --allow-host <host:port>`. CodeTerm applies
+that host grant to requests for both capabilities. An optional stored Supporter
+token is automatically added as a bearer header on CodeTerm 1.12.4 and later;
+the plugin never receives or logs it.
 
 ## How It Works
 
@@ -103,10 +120,54 @@ manifest also lists `codeterm` in `subprocess.allow` for readability, but the
 current implementation invokes it through `sh`, so that direct `codeterm` grant
 is redundant.
 
+## Decision model
+
+The plugin also provides the `decisionModel` capability through LM Studio's
+OpenAI-compatible `POST /v1/chat/completions` endpoint. `models()` reads loaded
+ids from `GET /v1/models`; it does not bundle model ids. `decision.model` selects
+a model explicitly, otherwise the general `model` setting or first loaded id is
+used. A model selected by the host through `selectModel` takes precedence for
+subsequent decision requests; `modelId` reports that selection, and `metadata`
+reports the adapter name and configured server address. This selection is
+independent of a chat pane's model and does not change `decision.model` in the
+plugin configuration. The default `decision.maxTokens` is 64 so engines can
+emit leading whitespace before their first answer token. The configured value
+is clamped to 8–128 tokens.
+
+When a response includes token `top_logprobs`, the adapter skips whitespace-only
+generated tokens and derives noul and choice probabilities from the first content
+token. Noul combines case and leading-space yes/no variants before normalizing.
+If token logprobs are absent (as observed with LM Studio's MLX engine), the
+adapter retries with a JSON-schema-constrained response. LM Studio documents the
+OpenAI-compatible chat-completions payload and JSON-schema output support in its
+[Chat Completions docs](https://lmstudio.ai/docs/developer/openai-compat/chat-completions)
+and [Structured Output docs](https://lmstudio.ai/docs/developer/openai-compat/structured-output).
+In the owner's local probe, `logprobs: true` with `top_logprobs: 5` returned
+`logprobs: null` for the loaded MLX models, while a JSON-schema enum was honored.
+That path is approximate:
+noul uses the model's 0–100 confidence for yes/no, while choice assigns that
+confidence to the selected label and spreads the remainder evenly across the
+other labels. After a model uses this path, its entry in `models()` is marked
+`(approximate fallback)`. A missing candidate in a present logprob list remains a
+parse error; the adapter does not invent a logprob.
+
+For score fallback, the model returns one constrained numeric point in the
+0–(number of levels − 1) range. The result's index-keyed probability map linearly
+interpolates between adjacent levels to preserve that point estimate; it is not
+a model confidence distribution, so `confidence` is null. This result is
+approximate as well.
+
+`decision.timeoutMs` is a per-request cap (default and maximum 30 seconds). The
+current SDK `DecisionRequest` does not expose the host's remaining deadline, so
+this cap cannot track that live deadline. The host also maps plugin exceptions to
+a generic decision transport error, so the plugin's detailed parse-error text
+may not reach callers.
+
 ## Develop
 
 ```sh
 node scripts/build-plugin.mjs lmstudio
-node lmstudio/plugin.test.cjs
-npx tsc --noEmit
+npx tsx lmstudio/plugin.test.cjs
+npm run typecheck
+npm run check:icons
 ```

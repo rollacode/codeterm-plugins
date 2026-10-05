@@ -410,11 +410,21 @@ function gitPush(cwd) {
   return { pushed: true, stdout: r.stdout || "", stderr: r.stderr || "" };
 }
 function listChildDirs(cwd) {
-  const plat = typeof host.platform === "function" ? host.platform() : host.platform;
-  const cmd = String(plat || "").toLowerCase().indexOf("win") !== -1 ? { bin: "cmd", args: ["/c", "dir", "/b", "/ad", cwd] } : { bin: "ls", args: ["-1", cwd] };
-  const r = exec(cmd);
-  if (!ok(r)) return [];
-  return (r.stdout || "").split(/\r?\n/).filter((l) => l.length > 0);
+  const list = host.listChildDirs;
+  if (typeof list !== "function") return [];
+  let names;
+  try {
+    names = list.call(host, cwd);
+  } catch (e) {
+    return [];
+  }
+  if (!names || typeof names.length !== "number") return [];
+  const out = [];
+  for (let i = 0; i < names.length; i++) {
+    const n = names[i];
+    if (typeof n === "string" && n.length > 0) out.push(n);
+  }
+  return out;
 }
 function gitRepos(cwd) {
   const top = git(cwd, ["rev-parse", "--show-toplevel"]);

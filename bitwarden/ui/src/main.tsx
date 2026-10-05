@@ -160,10 +160,12 @@ function App() {
       {!status ? (
         <span style={{ color: COLOR.muted, fontSize: 12.5 }}>Checking status…</span>
       ) : st === "unlocked" ? (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <Badge tone="ok" label={`Unlocked${status.user ? ` · ${status.user}` : ""}`} />
-          <button style={{ ...btnStyle, background: "rgba(255,255,255,0.08)" }} disabled={busy}
-            onClick={() => void run(() => ct().invoke("signout"), "sign out")}>Sign out</button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <Badge tone="ok" label={`Unlocked${status.user ? ` · ${status.user}` : ""}`} />
+            <button style={{ ...btnStyle, background: "rgba(255,255,255,0.08)" }} disabled={busy}
+              onClick={() => void run(() => ct().invoke("signout"), "sign out")}>Sign out</button>
+          </div>
         </div>
       ) : st === "unavailable" ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>

@@ -1,0 +1,16 @@
+{
+  "id": "chatcmpl-fixture-constrained-score",
+  "object": "chat.completion",
+  "model": "fixture-model",
+  "choices": [
+    {
+      "index": 0,
+      "logprobs": null,
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "{\"score\":1.25}"
+      }
+    }
+  ]
+}

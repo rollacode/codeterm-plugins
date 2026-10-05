@@ -6,6 +6,8 @@ const { join } = require("node:path");
 const vm = require("node:vm");
 
 const fetchCalls = [];
+const asyncFetchJobs = [];
+let nextAsyncFetchJob = 0;
 const streamCalls = [];
 const streamJobs = [];
 const execCalls = [];
@@ -28,6 +30,7 @@ let pendingExecPolls = null;
 let forceParse = null;
 let settingsObj = {};
 let fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
+let asyncFetchHandler = () => ({ status: 500, error: "no async fetch handler set" });
 const lastModelPath = "/tmp/codeterm-home/.codeterm/plugins/lmstudio/last-model.json";
 
 function parseLooseJson(raw) {
@@ -100,15 +103,26 @@ function mockToolcallParse(rawText, schemaJson) {
   return JSON.stringify({ status: "ok", ...candidates[0] });
 }
 
+function mockHostFetch(optsJson) {
+  const opts = JSON.parse(optsJson);
+  fetchCalls.push(opts);
+  return fetchHandler(opts);
+}
+mockHostFetch.async = (opts, then) => {
+  fetchCalls.push(opts);
+  const jobId = `fetch-${nextAsyncFetchJob++}`;
+  const continuationId = String(nextAsyncFetchJob);
+  asyncFetchJobs.push({ jobId, continuationId, opts, then, resumed: false });
+  // Match host.awaitJob: the export yields now; the host invokes `then` only
+  // after the job finishes and serializes whatever that continuation returns.
+  return { __ctAwait__: { job: jobId, k: continuationId } };
+};
+
 globalThis.host = {
   homeDir: () => "/tmp/codeterm-home",
   makeDirs: () => true,
   settingsJson: () => JSON.stringify(settingsObj),
-  fetch: (optsJson) => {
-    const opts = JSON.parse(optsJson);
-    fetchCalls.push(opts);
-    return fetchHandler(opts);
-  },
+  fetch: mockHostFetch,
   fetchStream: (optsJson) => {
     const opts = JSON.parse(optsJson);
     streamCalls.push(opts);
@@ -215,6 +229,8 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
 
 function reset(settings) {
   fetchCalls.length = 0;
+  asyncFetchJobs.length = 0;
+  nextAsyncFetchJob = 0;
   streamCalls.length = 0;
   streamJobs.length = 0;
   execCalls.length = 0;
@@ -232,6 +248,7 @@ function reset(settings) {
   settingsObj = settings || {};
   for (const key of Object.keys(fileStore)) delete fileStore[key];
   fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
+  asyncFetchHandler = () => ({ status: 500, error: "no async fetch handler set" });
 }
 
 // Queue the poll responses the in-flight authoring ticket hands back, in order.
@@ -270,35 +287,84 @@ function assertJsonEqual(actual, expected, msg) {
   assert(a === e, `${msg}\nactual: ${a}\nexpected: ${e}`);
 }
 
-function expectedMachineMessages(charter, state, input) {
-  return [
-    {
-      role: "system",
-      content:
-        charter +
-        "\n\n" +
-        [
-          "Respond ONLY with a JSON object of this exact shape (no markdown fences, no surrounding prose):",
-          "{",
-          '  "status": "ok" | "attention" | "stalled",',
-          '  "summary": "<one-line assessment>",',
-          '  "state": <updated state object>,',
-          '  "actions": [{ "kind": "nudge" | "notify" | "report", "pane": "<optional pane id>", "message": "<text>" }]',
-          "}",
-        ].join("\n"),
-    },
-    { role: "user", content: JSON.stringify({ state, input }) },
-  ];
+function settleFetchExport(value, method) {
+  assert(
+    value && typeof value === "object" && value.__ctAwait__ &&
+      Object.keys(value).length === 1 &&
+      typeof value.__ctAwait__.job === "string" && typeof value.__ctAwait__.k === "string",
+    method + " returns the host.fetch.async await marker before a result exists",
+  );
+  let result = value;
+  let resumed = 0;
+  while (result && typeof result === "object" && result.__ctAwait__) {
+    assert(resumed++ < 20, method + " exceeded async continuation limit");
+    const marker = result.__ctAwait__;
+    const job = asyncFetchJobs.find((entry) =>
+      entry.jobId === marker.job && entry.continuationId === marker.k,
+    );
+    assert(job && !job.resumed, method + " returned an unknown or already-resumed fetch marker");
+    job.resumed = true;
+    result = job.then(asyncFetchHandler(job.opts));
+  }
+  assert(asyncFetchJobs.every((job) => job.resumed), method + " left a fetch continuation unawaited");
+  return result;
+}
+
+function decide(request) {
+  return settleFetchExport(plugin.decide(request), "decision export");
+}
+
+function decisionModels() {
+  return settleFetchExport(plugin.models(), "models export");
+}
+
+// The engine owns the verdict-contract wording; this plugin owns only the fact
+// that a machine turn renders assembleMachine's two messages as one string,
+// carrying THIS caller's charter and state. Copying the engine's prose here made
+// the suite fail on an engine rewrite while proving nothing about the plugin.
+function assertMachineInput(input, charter, state, tickInput, name) {
+  assert(typeof input === "string", name + ": transport input must be a string");
+  assert(
+    input.indexOf("system: " + charter + "\n\n") === 0,
+    name + ": the system message must open with the caller's charter",
+  );
+  const tail = "user: " + JSON.stringify({ state: state, input: tickInput });
+  assert(
+    input.length >= tail.length && input.substring(input.length - tail.length) === tail,
+    name + ": the user message must round-trip the caller's state and input",
+  );
+}
+
+function assertMachineMessages(messages, charter, state, tickInput, name) {
+  assert(Array.isArray(messages) && messages.length === 2, name + ": expected a system and a user message");
+  assert(messages[0].role === "system" && messages[1].role === "user", name + ": roles are system then user");
+  assert(
+    String(messages[0].content).indexOf(charter) === 0,
+    name + ": the system message must open with the caller's charter",
+  );
+  assertJsonEqual(JSON.parse(messages[1].content), { state: state, input: tickInput }, name + ": state and input round-trip");
 }
 
 function renderEngineMessages(messages) {
   return messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
 }
 
+function decisionFixture(name) {
+  return JSON.parse(readFileSync(join(__dirname, "fixtures", "decision", name), "utf8"));
+}
+
+function decisionRequest(question, instructions = "Evaluate the supplied state.") {
+  return { state: { candidate: "fixture" }, instructions, question };
+}
+
+function closeTo(actual, expected, message) {
+  assert(Math.abs(actual - expected) < 1e-10, `${message}: expected ${expected}, got ${actual}`);
+}
+
 function openAndStartBody(ctx) {
   plugin.openSession(ctx);
-  plugin.sendMessage(ctx.paneId, "hello");
-  assert(streamCalls.length === 1, "stream started for " + ctx.paneId);
+  plugin.sendMessage(ctx.tabId, "hello");
+  assert(streamCalls.length === 1, "stream started for " + ctx.tabId);
   return JSON.parse(streamCalls[0].body);
 }
 
@@ -321,12 +387,12 @@ function turn(answer, responseId) {
 test("openSession seeds the system prompt as a user message carrying the system_prompt marker", () => {
   reset({ baseUrl: "http://localhost:1234", defaultPreset: "codeterm", presets: [] });
   const r = plugin.openSession({
-    paneId: "pane-system",
+    tabId: "pane-system",
     config: {},
     systemPrompt: "You answer only in rhymes.",
     model: "ctx-model",
   });
-  assert(r.sessionId === "pane-system", "sessionId echoes paneId");
+  assert(r.sessionId === "pane-system", "sessionId echoes tabId");
 
   const p = plugin.poll("pane-system", null);
   assert(p.messages.length === 1, "one seed message, got " + p.messages.length);
@@ -344,9 +410,33 @@ test("openSession seeds the system prompt as a user message carrying the system_
   );
 });
 
+test("lmstudio_open_session_uses_session_config_system_prompt_and_model", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  assert(manifest.capabilities.chatBackend.sessionConfig === true, "chatBackend declares sessionConfig support");
+  assert(manifest.capabilities.decisionModel === true, "decisionModel remains in the backward-compatible bare form");
+  assert(manifest.hostApi === 2, "manifest remains compatible with host API 2");
+  assert(manifest.minCodeterm === "1.12.3", "chatBackend session config remains available on CodeTerm 1.12.3");
+  const endpoint = "http://eight.tail0e459c.ts.net:1234";
+  reset({ baseUrl: endpoint, model: "settings-model", defaultPreset: "codeterm", presets: [] });
+  const ctx = {
+    tabId: "session-config",
+    config: {},
+    systemPrompt: "Host-composed system prompt",
+    model: "host-selected-model",
+  };
+
+  const body = openAndStartBody(ctx);
+  assert(body.model === "host-selected-model", "openSession uses the model from host session config");
+  assert(body.system_prompt === "Host-composed system prompt", "openSession uses the system prompt from host session config");
+  assert(
+    streamCalls[0].url === `${endpoint}/api/v1/chat`,
+    "chat request uses the configured server address",
+  );
+});
+
 test("sendMessage sends stream:true and streams a growing assistant message with one stable id", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "stream", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "stream", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("stream", "hello");
 
   assert(streamCalls.length === 1, "stream started");
@@ -395,7 +485,7 @@ test("sendMessage sends stream:true and streams a growing assistant message with
 
 test("reasoning is surfaced as a type:'thinking' message, never mixed into the answer", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "reason", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "reason", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("reason", "think then answer");
 
   enqueueStream(0, [
@@ -432,7 +522,7 @@ test("reasoning is surfaced as a type:'thinking' message, never mixed into the a
 
 test("append upserts by id: streaming reasoning+answer collapse to exactly one entry each", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "upsert", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "upsert", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("upsert", "go");
 
   // Reasoning and answer each arrive across multiple poll cycles. The buggy
@@ -475,7 +565,7 @@ test("empty model auto-resolves to first loaded model via /api/v1/models and cac
     return JSON.stringify({ error: "unexpected url " + opts.url });
   };
 
-  plugin.openSession({ paneId: "empty-model", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "empty-model", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("empty-model", "hi");
 
   assert(streamCalls.length === 1, "stream started after resolving model");
@@ -496,7 +586,7 @@ test("empty model auto-resolves to first loaded model via /api/v1/models and cac
 
 test("codeterm-tool exec block runs host.exec, appends tool_result, then continues to final answer", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "react", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "react", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("react", "list panes");
 
   const answer =
@@ -537,7 +627,7 @@ test("codeterm-tool exec block runs host.exec, appends tool_result, then continu
 
 test("exec tool runs async via host.exec.start/poll: pump polls until done, then tool_result + continuation", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "async-exec", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "async-exec", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("async-exec", "list panes");
 
   const answer = 'Checking.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"sleep 1 && echo done"}}\n```';
@@ -572,7 +662,7 @@ test("exec tool runs async via host.exec.start/poll: pump polls until done, then
 
 test("iteration cap stops after 8 tool rounds", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "cap", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "cap", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("cap", "loop");
 
   const fence = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo loop"}}\n```';
@@ -590,7 +680,7 @@ test("iteration cap stops after 8 tool rounds", () => {
 
 test("iteration cap clears queued continuations and emits one cap message", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "cap-clear", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "cap-clear", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("cap-clear", "loop");
 
   const fence = '```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo loop"}}\n```';
@@ -621,7 +711,7 @@ test("iteration cap clears queued continuations and emits one cap message", () =
 
 test("fallback assembled context includes one final assistant entry per turn", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "fallback-context", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "fallback-context", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("fallback-context", "first");
 
   enqueueStream(0, [
@@ -648,7 +738,7 @@ test("watcher openSession emits the charter card and not the default preset prom
     presets: [{ id: "codeterm", name: "CodeTerm", systemPrompt: "DEFAULT PRESET" }],
   });
   plugin.openSession({
-    paneId: "watch-open",
+    tabId: "watch-open",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "WATCH CHARTER" },
@@ -665,7 +755,7 @@ test("watcherTick request body has no previous_response_id and renders assembleM
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   const tick = { tick: 1, nowMs: 123, state: { seen: 0 }, observations: { panes: ["a"] } };
   plugin.openSession({
-    paneId: "watch-body",
+    tabId: "watch-body",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "CHECK PROGRESS" },
@@ -676,13 +766,13 @@ test("watcherTick request body has no previous_response_id and renders assembleM
   const body = JSON.parse(streamCalls[0].body);
   assert(!Object.prototype.hasOwnProperty.call(body, "previous_response_id"), "watcher tick does not chain previous_response_id");
   assert(typeof body.input === "string", "watcher tick transport input is a string");
-  assert(body.input === renderEngineMessages(expectedMachineMessages("CHECK PROGRESS", tick.state, tick)), "watcher body input renders assembleMachine");
+  assertMachineInput(body.input, "CHECK PROGRESS", tick.state, tick, "watcher body");
 });
 
 test("two watcher ticks do not grow context from transcript history", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "watch-two",
+    tabId: "watch-two",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "WATCH" },
@@ -703,7 +793,7 @@ test("two watcher ticks do not grow context from transcript history", () => {
 test("watcher machine system contract is byte-identical across ticks", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "watch-contract",
+    tabId: "watch-contract",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "IMMUTABLE" },
@@ -723,7 +813,7 @@ test("watcherTick emits context_request and watcher_verdict transcript messages"
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   const tick = { tick: 7, nowMs: 77, state: {}, observations: { reports: [] } };
   plugin.openSession({
-    paneId: "watch-transcript",
+    tabId: "watch-transcript",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "OBSERVE" },
@@ -735,7 +825,7 @@ test("watcherTick emits context_request and watcher_verdict transcript messages"
   const contexts = contents(p.messages, "context_request");
   const verdicts = contents(p.messages, "watcher_verdict");
   assert(contexts.length === 1, "one context_request emitted");
-  assertJsonEqual(JSON.parse(contexts[0]), expectedMachineMessages("OBSERVE", tick.state, tick), "context_request contains assembled messages");
+  assertMachineMessages(JSON.parse(contexts[0]), "OBSERVE", tick.state, tick, "context_request");
   assert(verdicts.length === 1, "one watcher_verdict emitted");
   assert(verdicts[0] === '{"status":"attention","summary":"check","state":{},"actions":[]}', "verdict is final text verbatim");
 });
@@ -743,7 +833,7 @@ test("watcherTick emits context_request and watcher_verdict transcript messages"
 test("watcherTick executes a tool block and uses the next clean round as watcher_verdict", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "watch-tool",
+    tabId: "watch-tool",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "WATCH" },
@@ -770,7 +860,7 @@ test("watcherTick executes a tool block and uses the next clean round as watcher
 test("watcherTick emits tool_call and tool_result before the watcher_verdict", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "watch-transcript-tools",
+    tabId: "watch-transcript-tools",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "WATCH" },
@@ -796,7 +886,7 @@ test("watcherTick emits tool_call and tool_result before the watcher_verdict", (
 test("watcherTick round cap still yields exactly one fallback watcher_verdict", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "watch-cap",
+    tabId: "watch-cap",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "WATCH" },
@@ -825,7 +915,7 @@ test("watcherTick round cap still yields exactly one fallback watcher_verdict", 
 test("watcherTick after a tool loop starts from assembleMachine only", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "watch-tool-isolation",
+    tabId: "watch-tool-isolation",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "WATCH" },
@@ -843,7 +933,7 @@ test("watcherTick after a tool loop starts from assembleMachine only", () => {
   assert(streamCalls.length === 3, "second tick starts one fresh stream after first tick's tool continuation");
   const body = JSON.parse(streamCalls[2].body);
   assert(!Object.prototype.hasOwnProperty.call(body, "previous_response_id"), "second tick does not inherit previous_response_id");
-  assert(body.input === renderEngineMessages(expectedMachineMessages("WATCH", tick2.state, tick2)), "second tick input is exactly assembleMachine output");
+  assertMachineInput(body.input, "WATCH", tick2.state, tick2, "second tick");
   assert(!body.input.includes("tool_result"), "second tick excludes tick-1 tool result");
   assert(!body.input.includes("tool done"), "second tick excludes tick-1 verdict");
 });
@@ -855,7 +945,7 @@ test("sendMessage is a no-op on watcher sessions", () => {
   host.log = (level, message) => logs.push({ level, message });
   try {
     plugin.openSession({
-      paneId: "watch-noop",
+      tabId: "watch-noop",
       config: {},
       mode: "watcher",
       engine: { kind: "machine", charter: "WATCH" },
@@ -874,7 +964,7 @@ test("sendMessage is a no-op on watcher sessions", () => {
 test("chat engine window caps fallback history while default sessions remain unchanged", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "chat-window",
+    tabId: "chat-window",
     config: {},
     systemPrompt: "sys",
     engine: { kind: "chat", window: { maxMessages: 2, policy: "top" } },
@@ -891,7 +981,7 @@ test("chat engine window caps fallback history while default sessions remain unc
   assert(capped.includes("user: second"), "chat window keeps current user message");
 
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "default-history", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "default-history", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("default-history", "first");
   enqueueStream(0, [{ chunks: [turn("one", null)], done: true, status: 200 }]);
   pumpUntilDone("default-history");
@@ -906,19 +996,19 @@ test("chat engine window caps fallback history while default sessions remain unc
 test("interactive machine sendMessage uses assembleMachine and advances parsed verdict state", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   plugin.openSession({
-    paneId: "machine-interactive",
+    tabId: "machine-interactive",
     config: {},
     engine: { kind: "machine", charter: "STATEFUL" },
   });
   plugin.sendMessage("machine-interactive", "first?");
   let body = JSON.parse(streamCalls[0].body);
-  assert(body.input === renderEngineMessages(expectedMachineMessages("STATEFUL", {}, { query: "first?" })), "first machine input renders initial state");
+  assertMachineInput(body.input, "STATEFUL", {}, { query: "first?" }, "first machine turn");
   enqueueStream(0, [{ chunks: [turn('{"status":"ok","summary":"ok","state":{"step":1},"actions":[]}', null)], done: true, status: 200 }]);
   pumpUntilDone("machine-interactive");
 
   plugin.sendMessage("machine-interactive", "second?");
   body = JSON.parse(streamCalls[1].body);
-  assert(body.input === renderEngineMessages(expectedMachineMessages("STATEFUL", { step: 1 }, { query: "second?" })), "second machine input renders parsed verdict state");
+  assertMachineInput(body.input, "STATEFUL", { step: 1 }, { query: "second?" }, "second machine turn");
   assert(!Object.prototype.hasOwnProperty.call(body, "previous_response_id"), "interactive machine request does not chain previous_response_id");
 });
 
@@ -926,7 +1016,7 @@ test("host parser receives the full assistant text and executes the validated ca
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   // An earlier illustrative fence, separated from a later real fence by prose:
   // only the trailing fence is a tool call; the prose-separated one is not.
-  plugin.openSession({ paneId: "two-fences", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "two-fences", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("two-fences", "explain then run");
   const twoFences =
     'For example:\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo example"}}\n```\n' +
@@ -948,7 +1038,7 @@ test("host parser receives the full assistant text and executes the validated ca
 
 test("a native <|tool_call|> exec wrapper is recognized and runs host.exec", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "native", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "native", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("native", "list panes");
   // gemma-style native tool call: <|tool_call>call:NAME{args}<tool_call|> with an
   // unquoted key and the `command` alias (mapped to exec's `cmd`).
@@ -970,7 +1060,7 @@ test("a native <|tool_call|> exec wrapper is recognized and runs host.exec", () 
 
 test("a namespaced native tool-call header (call:default_api:exec) runs host.exec", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "ns-native", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "ns-native", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("ns-native", "list panes");
   // Live gemma shape: the tool name is the LAST colon segment of the call header,
   // with a `default_api:` namespace prefix and single-quoted loose args.
@@ -992,7 +1082,7 @@ test("a namespaced native tool-call header (call:default_api:exec) runs host.exe
 
 test("an unknown namespaced native tool-call (call:unknownns:notatool) is ignored", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "ns-unknown", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "ns-unknown", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("ns-unknown", "go");
   const answer = "Trying.\n<|tool_call>call:unknownns:notatool{command: 'rm -rf /'}<tool_call|>";
   enqueueStream(0, [{ chunks: [turn(answer, "resp-unk")], done: true, status: 200 }]);
@@ -1007,7 +1097,7 @@ test("an unknown namespaced native tool-call (call:unknownns:notatool) is ignore
 
 test("a codeterm-tool fence followed by trailing prose still executes", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "fence-prose", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "fence-prose", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("fence-prose", "go");
   const answer =
     'Running it.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo hi"}}\n```\nThat should do it.';
@@ -1022,7 +1112,7 @@ test("a codeterm-tool fence followed by trailing prose still executes", () => {
 
 test("a trailing fence matching the old documented example now executes (no example-guard skip)", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "example", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "example", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("example", "list my panes");
   // The old isDocumentedExample guard skipped this exact call because it equals the
   // former system-prompt example ('codeterm pane list'). That guard is REMOVED: the
@@ -1051,7 +1141,7 @@ test("a trailing fence matching the old documented example now executes (no exam
 
 test("a fence-only assistant reply leaves no empty assistant bubble", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "fence-only", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "fence-only", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("fence-only", "list panes");
   // The whole reply is the fence — after stripping the executed fence, cleaned === ''.
   // That empty content must NOT be shown as a blank assistant bubble in the transcript.
@@ -1072,7 +1162,7 @@ test("a fence-only assistant reply leaves no empty assistant bubble", () => {
 
 test("an executed tool-call fence is stripped from the displayed assistant content", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "strip", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "strip", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("strip", "do it");
   const answer = 'On it.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo strip"}}\n```';
   enqueueStream(0, [{ chunks: [turn(answer, "resp-strip")], done: true, status: 200 }]);
@@ -1090,7 +1180,7 @@ test("an executed tool-call fence is stripped from the displayed assistant conte
 
 test("malformed trailing tool fence is a normal assistant message when host parser returns null", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "bad-json", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "bad-json", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("bad-json", "bad tool");
   const bad = '```codeterm-tool\n{"tool":"exec","args":\n```';
   enqueueStream(0, [{ chunks: [turn(bad, "resp-bad-json")], done: true, status: 200 }]);
@@ -1107,7 +1197,7 @@ test("malformed trailing tool fence is a normal assistant message when host pars
 // ── R8b: tri-state host.toolcall.parse (ok / none / malformed) ─────────────
 test("tri-state ok: a {status:'ok'} parse executes the validated call", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "tri-ok", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "tri-ok", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("tri-ok", "run it");
   const answer = 'Running.\n```codeterm-tool\n{"tool":"exec","args":{"cmd":"echo hi"}}\n```';
   forceParse = JSON.stringify({ status: "ok", tool: "exec", args: { cmd: "echo hi" }, confidence: 0.95, span: [9, answer.length] });
@@ -1122,7 +1212,7 @@ test("tri-state ok: a {status:'ok'} parse executes the validated call", () => {
 
 test("tri-state none: a {status:'none'} parse is a normal assistant message, no tool", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "tri-none", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "tri-none", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("tri-none", "just talk");
   forceParse = JSON.stringify({ status: "none" });
   enqueueStream(0, [{ chunks: [turn("Here is a plain answer.", "resp-tri-none")], done: true, status: 200 }]);
@@ -1138,7 +1228,7 @@ test("tri-state none: a {status:'none'} parse is a normal assistant message, no 
 
 test("tri-state malformed: a {status:'malformed'} parse injects a retry note instead of silently dropping", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "tri-malf", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "tri-malf", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("tri-malf", "do a thing");
   forceParse = JSON.stringify({ status: "malformed", reason: "unterminated args object", span: [0, 20] });
   const bad = '```codeterm-tool\n{"tool":"exec","args":\n```';
@@ -1157,7 +1247,7 @@ test("tri-state malformed: a {status:'malformed'} parse injects a retry note ins
 
 test("tri-state malformed retries are capped per turn so a stuck model cannot loop forever", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "tri-cap", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "tri-cap", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("tri-cap", "go");
   forceParse = JSON.stringify({ status: "malformed", reason: "still broken" });
   const bad = '```codeterm-tool\n{"tool":"exec"\n```';
@@ -1178,7 +1268,7 @@ test("tri-state malformed retries are capped per turn so a stuck model cannot lo
 
 test("tri-state: a thrown host.toolcall.parse is handled as a normal message, not a crash", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "tri-throw", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "tri-throw", config: {}, systemPrompt: "sys" });
   plugin.sendMessage("tri-throw", "talk");
   forceParse = () => { throw new Error("native parser panic"); };
   enqueueStream(0, [{ chunks: [turn("A safe answer.", "resp-tri-throw")], done: true, status: 200 }]);
@@ -1192,8 +1282,9 @@ test("tri-state: a thrown host.toolcall.parse is handled as a normal message, no
 });
 
 test("listPresets returns configured presets and listModels uses /api/v1/models", () => {
+  const endpoint = "http://eight.tail0e459c.ts.net:1234";
   reset({
-    baseUrl: "http://localhost:1234/",
+    baseUrl: `${endpoint}/`,
     defaultPreset: "codeterm",
     presets: [
       { id: "codeterm", name: "CodeTerm", systemPrompt: "sys" },
@@ -1206,7 +1297,7 @@ test("listPresets returns configured presets and listModels uses /api/v1/models"
   // Native shape: { models: [{ key, ... }] }.
   fetchHandler = (opts) => {
     assert(opts.method === "GET", "GET");
-    assert(opts.url === "http://localhost:1234/api/v1/models", "native models url, got " + opts.url);
+    assert(opts.url === `${endpoint}/api/v1/models`, "native model list uses the configured server address, got " + opts.url);
     return JSON.stringify({
       status: 200,
       body: JSON.stringify({ models: [{ key: "llama-3" }, { key: "qwen2.5" }, { bogus: true }] }),
@@ -1235,7 +1326,7 @@ test("model-bound preset resolves prompt and params for the chosen model", () =>
     ],
   });
 
-  plugin.openSession({ paneId: "bound-model", config: {} });
+  plugin.openSession({ tabId: "bound-model", config: {} });
   let p = plugin.poll("bound-model", null);
   assert(p.messages[0].content.includes("simple prompt"), "seed uses bound preset prompt");
 
@@ -1260,7 +1351,7 @@ test("unbound model falls back to defaultPreset", () => {
     ],
   });
 
-  const body = openAndStartBody({ paneId: "unbound-model", config: {} });
+  const body = openAndStartBody({ tabId: "unbound-model", config: {} });
   assert(body.model === "unbound-model", "keeps unbound chosen model");
   assert(body.system_prompt === "default prompt", "falls back to default preset prompt");
   assert(body.temperature === 0.6, "default preset params override global defaults");
@@ -1278,7 +1369,7 @@ test("explicit preset request wins when the model has no binding", () => {
     ],
   });
 
-  const body = openAndStartBody({ paneId: "explicit-preset", config: {}, model: "unbound-model", preset: "creative" });
+  const body = openAndStartBody({ tabId: "explicit-preset", config: {}, model: "unbound-model", preset: "creative" });
   assert(body.model === "unbound-model", "keeps explicit unbound model");
   assert(body.system_prompt === "creative prompt", "uses explicit preset prompt");
   assert(body.temperature === 0.95, "uses explicit preset params");
@@ -1295,14 +1386,14 @@ test("model-bound preset without systemPrompt falls back to default prompt", () 
     ],
   });
 
-  const body = openAndStartBody({ paneId: "bound-without-prompt", config: {} });
+  const body = openAndStartBody({ tabId: "bound-without-prompt", config: {} });
   assert(body.system_prompt === "default prompt", "missing bound prompt falls back to default");
   assert(body.temperature === 0.2, "bound preset params still apply");
 });
 
 test("setModel persists the last-used model", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
-  plugin.openSession({ paneId: "persist-set-model", config: {}, systemPrompt: "sys" });
+  plugin.openSession({ tabId: "persist-set-model", config: {}, systemPrompt: "sys" });
 
   plugin.setModel("persist-set-model", "qwen-2.5");
 
@@ -1312,7 +1403,7 @@ test("setModel persists the last-used model", () => {
 
 test("describeModelSwitch asks for confirmation only when target differs from active model", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [] });
-  plugin.openSession({ paneId: "describe-switch", config: {}, systemPrompt: "sys", model: "llama-3" });
+  plugin.openSession({ tabId: "describe-switch", config: {}, systemPrompt: "sys", model: "llama-3" });
 
   let desc = plugin.describeModelSwitch("describe-switch", "llama-3");
   assert(desc.needsConfirm === false, "same model is a no-op");
@@ -1328,7 +1419,7 @@ test("openSession without explicit model or preset binding restores the persiste
   reset({ baseUrl: "http://localhost:1234", model: "default-model", presets: [] });
   fileStore[lastModelPath] = JSON.stringify({ lastModel: "remembered-model" });
 
-  const body = openAndStartBody({ paneId: "restore-last-model", config: {}, systemPrompt: "sys" });
+  const body = openAndStartBody({ tabId: "restore-last-model", config: {}, systemPrompt: "sys" });
 
   assert(body.model === "remembered-model", "restored persisted model, got " + body.model);
   const stored = JSON.parse(fileStore[lastModelPath] || "{}");
@@ -1347,32 +1438,32 @@ test("explicit model and preset-bound model win over the persisted last-used mod
   });
   fileStore[lastModelPath] = JSON.stringify({ lastModel: "remembered-model" });
 
-  let body = openAndStartBody({ paneId: "explicit-over-persisted", config: {}, model: "explicit-model" });
+  let body = openAndStartBody({ tabId: "explicit-over-persisted", config: {}, model: "explicit-model" });
   assert(body.model === "explicit-model", "explicit model wins, got " + body.model);
 
   streamCalls.length = 0;
   streamJobs.length = 0;
   fileStore[lastModelPath] = JSON.stringify({ lastModel: "remembered-model" });
-  body = openAndStartBody({ paneId: "preset-over-persisted", config: {}, preset: "tiny" });
+  body = openAndStartBody({ tabId: "preset-over-persisted", config: {}, preset: "tiny" });
   assert(body.model === "tiny-model", "preset-bound model wins, got " + body.model);
   assert(body.system_prompt === "tiny prompt", "preset-bound prompt used");
 });
 
 test("missing or corrupt persisted last-used model falls back to defaultModel without throwing", () => {
   reset({ baseUrl: "http://localhost:1234", model: "default-model", presets: [] });
-  let body = openAndStartBody({ paneId: "missing-last-model", config: {}, systemPrompt: "sys" });
+  let body = openAndStartBody({ tabId: "missing-last-model", config: {}, systemPrompt: "sys" });
   assert(body.model === "default-model", "missing persisted model falls back to default");
 
   streamCalls.length = 0;
   streamJobs.length = 0;
   fileStore[lastModelPath] = "{not-json";
-  body = openAndStartBody({ paneId: "corrupt-last-model", config: {}, systemPrompt: "sys" });
+  body = openAndStartBody({ tabId: "corrupt-last-model", config: {}, systemPrompt: "sys" });
   assert(body.model === "default-model", "corrupt persisted model falls back to default");
 });
 
 test("sessionInfo reports the session model and setModel switches it for the next turn", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [] });
-  plugin.openSession({ paneId: "switch", config: {}, systemPrompt: "sys", model: "llama-3" });
+  plugin.openSession({ tabId: "switch", config: {}, systemPrompt: "sys", model: "llama-3" });
 
   // sessionInfo surfaces the model the session opened with.
   assert(plugin.sessionInfo("switch").model === "llama-3", "sessionInfo returns opened model");
@@ -1390,7 +1481,7 @@ test("sessionInfo reports the session model and setModel switches it for the nex
 
 test("setModel surfaces a JIT-load VRAM failure from chat as a clean system message", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [] });
-  plugin.openSession({ paneId: "vram-switch", config: {}, systemPrompt: "sys", model: "llama-3" });
+  plugin.openSession({ tabId: "vram-switch", config: {}, systemPrompt: "sys", model: "llama-3" });
 
   plugin.setModel("vram-switch", "qwen-72b");
   plugin.sendMessage("vram-switch", "hello");
@@ -1415,7 +1506,7 @@ test("charter: id resolves shipped prompts/watcher-orchestration.md in openSessi
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [] });
   const md = readFileSync(join(__dirname, "prompts", "watcher-orchestration.md"), "utf8").replace(/\s+$/, "");
   const r = plugin.openSession({
-    paneId: "charter-ref",
+    tabId: "charter-ref",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "charter:watcher-orchestration" },
@@ -1436,7 +1527,7 @@ test("charter: id accepts inline config override for custom charters", () => {
     charters: { custom: "INLINE CHARTER BODY" },
   });
   plugin.openSession({
-    paneId: "charter-inline",
+    tabId: "charter-inline",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "charter:custom" },
@@ -1448,7 +1539,7 @@ test("charter: id accepts inline config override for custom charters", () => {
 test("unknown charter: id fails openSession with an error", () => {
   reset({ baseUrl: "http://localhost:1234", model: "llama", presets: [], charters: {} });
   const r = plugin.openSession({
-    paneId: "charter-missing",
+    tabId: "charter-missing",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "charter:does-not-exist" },
@@ -1465,7 +1556,7 @@ test("charter ref resolves before watcherTick uses assembleMachine", () => {
     charters: { health: "HEALTH CHARTER" },
   });
   plugin.openSession({
-    paneId: "charter-tick",
+    tabId: "charter-tick",
     config: {},
     mode: "watcher",
     engine: { kind: "machine", charter: "charter:health" },
@@ -1473,20 +1564,24 @@ test("charter ref resolves before watcherTick uses assembleMachine", () => {
   const tick = { tick: 1, nowMs: 99, state: {}, observations: {} };
   plugin.watcherTick("charter-tick", tick);
   const body = JSON.parse(streamCalls[0].body);
-  assert(
-    body.input === renderEngineMessages(expectedMachineMessages("HEALTH CHARTER", tick.state, tick)),
-    "watcherTick uses resolved charter text",
-  );
+  assertMachineInput(body.input, "HEALTH CHARTER", tick.state, tick, "charter ref");
 });
 
 test("settings schema and config expose presets/defaultPreset", () => {
   const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));
   const schemaText = JSON.stringify(schema);
   assert(schemaText.includes("baseUrl"), "schema exposes baseUrl");
+  const serverSection = schema.find((section) => section.title === "LM Studio server");
+  const baseUrlField = serverSection && serverSection.fields.find((field) => field.key === "baseUrl");
+  assert(baseUrlField && baseUrlField.label === "Server address", "SchemaRenderer exposes a labeled Server address field");
+  assert(baseUrlField.description.includes("tailnet"), "Server address describes remote Tailscale endpoints");
   assert(schemaText.includes("defaultPreset"), "schema exposes defaultPreset");
   assert(schemaText.includes("presets"), "schema exposes presets");
 
   const config = readFileSync(join(__dirname, "config.yaml"), "utf8");
+  assert(/# Server address, e\.g\. http:\/\/localhost:1234/.test(config), "config documents the server address");
+  assert(config.includes("<mac>.<tailnet>.ts.net:1234"), "config documents a remote Tailscale address");
+  assert(/^baseUrl:\s*http:\/\/localhost:1234$/m.test(config), "config keeps the localhost default");
   assert(/defaultPreset:\s*codeterm/.test(config), "config has defaultPreset");
   assert(/systemPrompt:\s*\|/.test(config), "config seeds block systemPrompt");
   assert(/charters:/.test(config), "config exposes charters map");
@@ -1516,7 +1611,7 @@ test("sessionInfo returns model and systemPrompt so an external author can read 
     presets: [{ id: "p1", name: "P1", systemPrompt: "Base prompt text" }],
     defaultPreset: "p1",
   });
-  plugin.openSession({ paneId: "info-r6", config: {}, model: "gemma-3" });
+  plugin.openSession({ tabId: "info-r6", config: {}, model: "gemma-3" });
   const info = plugin.sessionInfo("info-r6");
   assert(info.model === "gemma-3", "sessionInfo.model matches opened model, got " + info.model);
   assert(info.systemPrompt === "Base prompt text", "sessionInfo.systemPrompt matches preset, got " + info.systemPrompt);
@@ -1524,7 +1619,7 @@ test("sessionInfo returns model and systemPrompt so an external author can read 
 
 test("authorSystemPrompt saves the drafted prompt for the session's model to the authored-prompts file", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "gemma-3" });
-  plugin.openSession({ paneId: "author-save-r6", config: {}, model: "gemma-3", systemPrompt: "original" });
+  plugin.openSession({ tabId: "author-save-r6", config: {}, model: "gemma-3", systemPrompt: "original" });
 
   plugin.authorSystemPrompt("author-save-r6", "My tuned prompt for gemma");
 
@@ -1534,7 +1629,7 @@ test("authorSystemPrompt saves the drafted prompt for the session's model to the
 
 test("authorSystemPrompt updates the live sessionInfo.systemPrompt immediately", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "qwen-2.5" });
-  plugin.openSession({ paneId: "author-live-r6", config: {}, model: "qwen-2.5", systemPrompt: "old" });
+  plugin.openSession({ tabId: "author-live-r6", config: {}, model: "qwen-2.5", systemPrompt: "old" });
 
   plugin.authorSystemPrompt("author-live-r6", "Tuned for qwen");
 
@@ -1552,7 +1647,7 @@ test("openSession for the same model picks up the authored prompt on subsequent 
   // Seed the authored prompt as if a prior authorSystemPrompt call had written it.
   fileStore[authoredPromptsPath] = JSON.stringify({ "gemma-3": "Tuned prompt from author" });
 
-  const body = openAndStartBody({ paneId: "authored-init-r6", config: {}, model: "gemma-3" });
+  const body = openAndStartBody({ tabId: "authored-init-r6", config: {}, model: "gemma-3" });
   assert(
     body.system_prompt === "Tuned prompt from author",
     "authored prompt wins over preset on session init, got " + body.system_prompt,
@@ -1568,8 +1663,8 @@ test("authorSystemPrompt on unknown session is a safe no-op that writes nothing"
 
 test("authorSystemPrompt persists across multiple models independently", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "m1" });
-  plugin.openSession({ paneId: "multi-a", config: {}, model: "model-a", systemPrompt: "orig-a" });
-  plugin.openSession({ paneId: "multi-b", config: {}, model: "model-b", systemPrompt: "orig-b" });
+  plugin.openSession({ tabId: "multi-a", config: {}, model: "model-a", systemPrompt: "orig-a" });
+  plugin.openSession({ tabId: "multi-b", config: {}, model: "model-b", systemPrompt: "orig-b" });
 
   plugin.authorSystemPrompt("multi-a", "Tuned for model-a");
   plugin.authorSystemPrompt("multi-b", "Tuned for model-b");
@@ -1583,7 +1678,7 @@ test("authorSystemPrompt persists across multiple models independently", () => {
 
 test("requestPromptAuthoring hands off to an agent pane: ensures a workspace, spawns, and sends the current model + prompt", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "gemma-3" });
-  plugin.openSession({ paneId: "author-handoff-r6", config: {}, model: "gemma-3", systemPrompt: "current prompt body" });
+  plugin.openSession({ tabId: "author-handoff-r6", config: {}, model: "gemma-3", systemPrompt: "current prompt body" });
 
   agentReply = "TUNED PROMPT FOR GEMMA";
   const res = plugin.requestPromptAuthoring("author-handoff-r6", "make it shorter and example-led");
@@ -1601,7 +1696,7 @@ test("requestPromptAuthoring hands off to an agent pane: ensures a workspace, sp
 
 test("requestPromptAuthoring round-trip writes the agent's reply back as the authored prompt and updates the live session", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "gemma-3" });
-  plugin.openSession({ paneId: "author-rt-r6", config: {}, model: "gemma-3", systemPrompt: "old" });
+  plugin.openSession({ tabId: "author-rt-r6", config: {}, model: "gemma-3", systemPrompt: "old" });
 
   agentReply = "TUNED PROMPT FOR GEMMA";
   plugin.requestPromptAuthoring("author-rt-r6", "tune it");
@@ -1623,7 +1718,7 @@ test("the prompt authored via the round-trip is used on the next session init", 
     presets: [{ id: "p1", name: "P1", systemPrompt: "Preset prompt", model: "gemma-3" }],
     defaultPreset: "p1",
   });
-  plugin.openSession({ paneId: "author-init-rt-r6", config: {}, model: "gemma-3", systemPrompt: "Preset prompt" });
+  plugin.openSession({ tabId: "author-init-rt-r6", config: {}, model: "gemma-3", systemPrompt: "Preset prompt" });
 
   agentReply = "ROUND-TRIP TUNED PROMPT";
   plugin.requestPromptAuthoring("author-init-rt-r6", "tune");
@@ -1632,7 +1727,7 @@ test("the prompt authored via the round-trip is used on the next session init", 
   // A fresh session for the same model must pick up the authored prompt.
   streamCalls.length = 0;
   streamJobs.length = 0;
-  const body = openAndStartBody({ paneId: "author-init-rt-r6b", config: {}, model: "gemma-3" });
+  const body = openAndStartBody({ tabId: "author-init-rt-r6b", config: {}, model: "gemma-3" });
   assert(
     body.system_prompt === "ROUND-TRIP TUNED PROMPT",
     "next init uses the round-trip authored prompt over the preset, got " + body.system_prompt,
@@ -1641,7 +1736,7 @@ test("the prompt authored via the round-trip is used on the next session init", 
 
 test("requestPromptAuthoring parks across pumps until the author agent's reply is ready", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "qwen-2.5" });
-  plugin.openSession({ paneId: "author-park-r6", config: {}, model: "qwen-2.5", systemPrompt: "p" });
+  plugin.openSession({ tabId: "author-park-r6", config: {}, model: "qwen-2.5", systemPrompt: "p" });
 
   enqueueAgentPoll([{ done: false }, { done: false }, { done: true, reply: "READY PROMPT" }]);
   plugin.requestPromptAuthoring("author-park-r6", "tune");
@@ -1658,7 +1753,7 @@ test("requestPromptAuthoring parks across pumps until the author agent's reply i
 
 test("requestPromptAuthoring strips a code fence the author agent wraps the prompt in", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "gemma-3" });
-  plugin.openSession({ paneId: "author-fence-r6", config: {}, model: "gemma-3", systemPrompt: "p" });
+  plugin.openSession({ tabId: "author-fence-r6", config: {}, model: "gemma-3", systemPrompt: "p" });
 
   agentReply = "```\nUNFENCED PROMPT\n```";
   plugin.requestPromptAuthoring("author-fence-r6", "tune");
@@ -1670,7 +1765,7 @@ test("requestPromptAuthoring strips a code fence the author agent wraps the prom
 
 test("requestPromptAuthoring surfaces an author-agent error as a system message and writes nothing", () => {
   reset({ baseUrl: "http://localhost:1234", presets: [], model: "gemma-3" });
-  plugin.openSession({ paneId: "author-err-r6", config: {}, model: "gemma-3", systemPrompt: "keep me" });
+  plugin.openSession({ tabId: "author-err-r6", config: {}, model: "gemma-3", systemPrompt: "keep me" });
 
   enqueueAgentPoll([{ done: true, error: "author agent crashed" }]);
   plugin.requestPromptAuthoring("author-err-r6", "tune");
@@ -1688,6 +1783,372 @@ test("requestPromptAuthoring on an unknown session or one without a model is a s
   const res = plugin.requestPromptAuthoring("no-such-session", "x");
   assert(res && res.ok === false, "unknown session reports not-ok, got " + JSON.stringify(res));
   assert(agentSpawns.length === 0 && workspaceCalls.length === 0, "no agent spawned for unknown session");
+});
+
+test("decision_noul_chains_model_discovery_from_the_async_continuation", () => {
+  reset({ baseUrl: "http://localhost:1234", model: "", decision: { model: "" } });
+  asyncFetchHandler = (opts) => {
+    if (opts.url.endsWith("/models")) {
+      return { status: 200, body: JSON.stringify(decisionFixture("models.fixture.json")) };
+    }
+    return { status: 200, body: JSON.stringify(decisionFixture("noul-variants.fixture.json")) };
+  };
+
+  const answer = decide(decisionRequest({ type: "noul", criteria: null }));
+
+  assert(answer.type === "noul", "noul result type after discovery");
+  closeTo(answer.p, 0.8, "model discovery chains to the logprob request");
+  assert(fetchCalls.length === 2, "model list and completion requests both settle");
+  assert(fetchCalls[0].method === "GET" && fetchCalls[0].url.endsWith("/models"), "first continuation loads model ids");
+  assert(JSON.parse(fetchCalls[1].body).model === "owner/model-a", "completion uses the first server model");
+});
+
+test("decision_noul_ratio_from_logprobs merges variants after leading whitespace tokens", () => {
+  reset({ baseUrl: "http://localhost:1234", decision: { model: "fixture-model", maxTokens: 1, timeoutMs: 2400 } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("noul-variants.fixture.json")) });
+
+  const answer = decide(decisionRequest({
+    type: "noul",
+    criteria: { true: "the candidate matches", false: "the candidate does not match" },
+  }));
+
+  assert(answer.type === "noul", "noul result type");
+  closeTo(answer.p, 0.8, "yes mass divided by yes and no mass");
+  const body = JSON.parse(fetchCalls[0].body);
+  assert(fetchCalls[0].timeoutMs === 2400, "configured request timeout passed to async fetch");
+  assert(body.max_tokens === 8 && body.logprobs === true && body.top_logprobs === 5, "bounded request leaves room for leading whitespace");
+});
+
+test("decision_noul_null_logprobs_uses_confidence_schema_fallback", () => {
+  reset({ decision: { model: "fixture-model" } });
+  const responses = [
+    decisionFixture("mlx-null-logprobs-whitespace.fixture.json"),
+    decisionFixture("constrained-noul-confidence.fixture.json"),
+  ];
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
+
+  const answer = decide(decisionRequest({ type: "noul", criteria: null }));
+
+  assert(answer.type === "noul", "noul fallback result type");
+  closeTo(answer.p, 0.8, "yes confidence maps to yes probability");
+  assert(fetchCalls.length === 2, "null logprobs triggers one constrained retry");
+  const body = JSON.parse(fetchCalls[1].body);
+  assert(body.logprobs === undefined, "constrained retry does not claim token logprobs");
+  const schema = body.response_format.json_schema.schema;
+  assert(schema.properties.answer.enum.join(",") === "yes,no", "fallback constrains yes/no answer");
+  assert(schema.properties.confidence.minimum === 0 && schema.properties.confidence.maximum === 100, "fallback constrains integer confidence");
+  assert(JSON.parse(fetchCalls[0].body).max_tokens === 64, "default token budget reaches past leading whitespace");
+});
+
+test("decision_noul_empty_null_logprobs_retries_instead_of_guessing", () => {
+  reset({ decision: { model: "fixture-model" } });
+  const noAnswer = decisionFixture("constrained-noul-confidence.fixture.json");
+  noAnswer.choices[0].message.content = JSON.stringify({ answer: "no", confidence: 80 });
+  const responses = [decisionFixture("mlx-null-logprobs-empty.fixture.json"), noAnswer];
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
+
+  const answer = decide(decisionRequest({ type: "noul", criteria: null }));
+
+  assert(answer.type === "noul", "noul fallback result type");
+  closeTo(answer.p, 0.2, "no confidence maps to the complementary yes probability");
+  assert(fetchCalls.length === 2, "empty content with null logprobs makes a constrained request");
+});
+
+test("decision_noul_mlx_defaults_to_one_constrained_json_request", () => {
+  reset({ decision: { model: "owner/jev-style-qwen3.5-2b-decision-mlx-bf16" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-noul-confidence.fixture.json")) });
+
+  const answer = decide(decisionRequest({ type: "noul", criteria: null }));
+
+  assert(answer.type === "noul", "MLX noul result type");
+  closeTo(answer.p, 0.8, "MLX constrained confidence maps to yes probability");
+  assert(fetchCalls.length === 1, "known null-logprobs model avoids a speculative completion");
+  const body = JSON.parse(fetchCalls[0].body);
+  assert(body.logprobs === undefined && body.response_format.json_schema.schema.properties.answer.enum.join(",") === "yes,no", "first MLX request is constrained JSON");
+});
+
+test("decision_noul_present_logprobs_without_yes_no_tokens_is_parse_error", () => {
+  reset({ decision: { model: "fixture-model" } });
+  const response = decisionFixture("noul-variants.fixture.json");
+  response.choices[0].logprobs.content[1].top_logprobs = [
+    { token: "maybe", logprob: -0.10536051565782628 },
+  ];
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(response) });
+
+  let error = "";
+  try {
+    decide(decisionRequest({ type: "noul", criteria: null }));
+  } catch (caught) {
+    error = String(caught && caught.message || caught);
+  }
+  assert(/parse error: candidate tokens are absent/.test(error), "missing yes/no logprobs produce parse error, got " + error);
+  assert(fetchCalls.length === 1, "present but incomplete logprobs do not trigger a guessed fallback");
+});
+
+test("decision_choice_normalizes_label_logprobs", () => {
+  reset({ decision: { model: "fixture-model" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("choice-logprobs.fixture.json")) });
+
+  const answer = decide(decisionRequest({
+    type: "choice",
+    options: { keep: "Retain the candidate", drop: "Discard the candidate" },
+  }));
+
+  assert(answer.type === "choice" && answer.choice === "drop", "highest normalized label selected");
+  closeTo(answer.probabilities.keep, 0.25, "keep probability");
+  closeTo(answer.probabilities.drop, 0.75, "drop probability");
+  closeTo(answer.confidence, 0.75, "choice confidence");
+});
+
+test("decision_choice_null_logprobs_uses_confidence_and_spreads_remainder", () => {
+  reset({ decision: { model: "fixture-model" } });
+  const constrainedChoice = {
+    id: "chatcmpl-fixture-choice-confidence",
+    choices: [{
+      logprobs: null,
+      message: { role: "assistant", content: JSON.stringify({ choice: "drop", confidence: 75 }) },
+    }],
+  };
+  const responses = [decisionFixture("mlx-null-logprobs-empty.fixture.json"), constrainedChoice];
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
+
+  const answer = decide(decisionRequest({
+    type: "choice",
+    options: { keep: "Retain the candidate", drop: "Discard the candidate" },
+  }));
+
+  assert(answer.type === "choice" && answer.choice === "drop", "constrained label is returned");
+  assertJsonEqual(answer.probabilities, { keep: 0.25, drop: 0.75 }, "confidence maps to selected label and remainder");
+  closeTo(answer.confidence, 0.75, "fallback confidence");
+  const schema = JSON.parse(fetchCalls[1].body).response_format.json_schema.schema;
+  assert(schema.properties.choice.enum.join(",") === "keep,drop", "JSON schema constrains supplied labels");
+  assert(schema.properties.confidence.minimum === 0 && schema.properties.confidence.maximum === 100, "JSON schema constrains confidence");
+});
+
+test("decision_choice_mlx_defaults_to_one_constrained_json_request", () => {
+  reset({ decision: { model: "owner/jev-style-qwen3.5-2b-decision-mlx-bf16" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-choice.fixture.json")) });
+
+  const answer = decide(decisionRequest({
+    type: "choice",
+    options: { allow: "Allow the action", alternate: "Choose an alternative", deny: "Deny the action" },
+  }));
+
+  assert(answer.type === "choice" && answer.choice === "alternate", "MLX constrained label is returned");
+  assert(fetchCalls.length === 1, "known null-logprobs model uses one constrained request");
+  assert(JSON.parse(fetchCalls[0].body).logprobs === undefined, "MLX constrained request does not request token logprobs");
+});
+
+test("decision_choice_batches_36_candidates_in_three_constrained_requests", () => {
+  reset({ decision: { model: "owner/jev-style-qwen3.5-2b-decision-mlx-bf16" } });
+  const options = Object.fromEntries(Array.from({ length: 36 }, (_, index) => [
+    `candidate-${String(index).padStart(2, "0")}`,
+    `Candidate ${index}`,
+  ]));
+  let batchIndex = 0;
+  asyncFetchHandler = (opts) => {
+    const body = JSON.parse(opts.body);
+    const schema = body.response_format.json_schema.schema;
+    const keys = Object.keys(schema.properties.scores.properties);
+    assert(keys.length > 0 && keys.length <= 12, "each constrained request scores at most twelve candidates");
+    const scores = {};
+    keys.forEach((key, index) => { scores[key] = batchIndex * 12 + index + 1; });
+    batchIndex += 1;
+    return {
+      status: 200,
+      body: JSON.stringify({
+        choices: [{ message: { role: "assistant", content: JSON.stringify({ scores }) } }],
+      }),
+    };
+  };
+
+  const answer = decide(decisionRequest({ type: "choice", options }));
+
+  assert(answer.type === "choice" && answer.choice === "candidate-35", "highest batch score selects the final candidate");
+  closeTo(answer.probabilities["candidate-35"], 36 / 666, "batch scores normalize over the complete candidate set");
+  assert(fetchCalls.length === 3, "36 candidates require three serialized model calls");
+  assert(fetchCalls.every((call) => JSON.parse(call.body).logprobs === undefined), "known null-logprobs model uses constrained requests only");
+});
+
+test("decision_choice_batch_rejects_more_than_36_labels_without_a_guess", () => {
+  reset({ decision: { model: "owner/jev-style-qwen3.5-2b-decision-mlx-bf16" } });
+  const options = Object.fromEntries(Array.from({ length: 37 }, (_, index) => [`candidate-${index}`, `Candidate ${index}`]));
+
+  let error = "";
+  try {
+    decide(decisionRequest({ type: "choice", options }));
+  } catch (caught) {
+    error = String(caught && caught.message || caught);
+  }
+
+  assert(/parse error: choice supports at most 36 labels/.test(error), "oversized batch fails explicitly, got " + error);
+  assert(fetchCalls.length === 0, "oversized batch sends no partial or guessed requests");
+});
+
+test("decision_choice_shared_prefix_falls_back_constrained", () => {
+  reset({ decision: { model: "fixture-model" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-choice.fixture.json")) });
+
+  const answer = decide(decisionRequest({
+    type: "choice",
+    options: { allow: "Allow the action", alternate: "Choose an alternative", deny: "Deny the action" },
+  }));
+
+  assert(answer.type === "choice" && answer.choice === "alternate", "constrained label is returned");
+  closeTo(answer.probabilities.allow, 0.1, "confidence remainder is spread evenly (allow)");
+  closeTo(answer.probabilities.alternate, 0.8, "constrained label keeps its confidence");
+  closeTo(answer.probabilities.deny, 0.1, "confidence remainder is spread evenly (deny)");
+  closeTo(answer.confidence, 0.8, "constrained confidence");
+  assert(fetchCalls.length === 1, "shared first-token prefixes use the constrained request directly");
+  const body = JSON.parse(fetchCalls[0].body);
+  const schema = body.response_format.json_schema.schema;
+  assert(body.logprobs === undefined, "constrained response does not claim token logprobs");
+  assert(schema.properties.choice.enum.join(",") === "allow,alternate,deny", "JSON schema constrains supplied labels");
+  assert(body.max_tokens >= 32, "schema response has enough output budget for JSON");
+});
+
+test("decision_score_index_keyed_map", () => {
+  reset({ decision: { model: "fixture-model" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("score-logprobs.fixture.json")) });
+
+  const answer = decide(decisionRequest({ type: "score", levels: ["low", "medium", "high"] }));
+
+  assert(answer.type === "score", "score result type");
+  assertJsonEqual(Object.keys(answer.probabilities), ["0", "1", "2"], "probabilities use level indexes");
+  closeTo(answer.probabilities["0"], 0.2, "low level probability");
+  closeTo(answer.probabilities["1"], 0.3, "medium level probability");
+  closeTo(answer.probabilities["2"], 0.5, "high level probability");
+  closeTo(answer.score, 1.3, "score is the probability-weighted level index");
+});
+
+test("decision_score_null_logprobs_uses_constrained_point_and_interpolated_index_map", () => {
+  reset({ decision: { model: "fixture-model" } });
+  const responses = [
+    decisionFixture("mlx-null-logprobs-empty.fixture.json"),
+    decisionFixture("constrained-score.fixture.json"),
+  ];
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(responses.shift()) });
+
+  const answer = decide(decisionRequest({ type: "score", levels: ["low", "medium", "high"] }));
+
+  assert(answer.type === "score", "score fallback result type");
+  closeTo(answer.score, 1.25, "constrained score point");
+  assertJsonEqual(answer.probabilities, { "1": 0.75, "2": 0.25 }, "interpolation preserves the point estimate");
+  assert(answer.confidence === null, "point-score interpolation is not model confidence");
+  const schema = JSON.parse(fetchCalls[1].body).response_format.json_schema.schema;
+  assert(schema.properties.score.minimum === 0 && schema.properties.score.maximum === 2, "schema constrains the declared level range");
+});
+
+test("decision_score_mlx_defaults_to_one_constrained_json_request", () => {
+  reset({ decision: { model: "owner/jev-style-qwen3.5-2b-decision-mlx-bf16" } });
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-score.fixture.json")) });
+
+  const answer = decide(decisionRequest({ type: "score", levels: ["low", "medium", "high"] }));
+
+  assert(answer.type === "score", "MLX score result type");
+  closeTo(answer.score, 1.25, "MLX constrained score point");
+  assert(fetchCalls.length === 1, "known null-logprobs model uses one constrained request");
+  assert(JSON.parse(fetchCalls[0].body).logprobs === undefined, "MLX score request does not claim token logprobs");
+});
+
+test("decision_models_returns_nonempty_server_catalog_through_async_marker_without_hardcoded_ids", () => {
+  const endpoint = "http://eight.tail0e459c.ts.net:1234/v1";
+  reset({ baseUrl: endpoint });
+  const catalog = decisionFixture("models.fixture.json");
+  asyncFetchHandler = (opts) => {
+    assert(opts.url === `${endpoint}/models`, "OpenAI-compatible model endpoint uses the configured server address");
+    return { status: 200, body: JSON.stringify(catalog) };
+  };
+
+  const pending = plugin.models();
+  assert(pending && pending.__ctAwait__, "models export yields the host.fetch.async marker");
+  const models = settleFetchExport(pending, "models export");
+
+  assertJsonEqual(models, [
+    { id: "owner/model-a", display_name: "Model A" },
+    { id: "owner/model-b", display_name: "owner/model-b" },
+  ], "server model ids and display names returned as listed");
+  assert(fetchCalls.length === 1 && asyncFetchJobs[0].resumed, "non-empty catalogue is parsed after the marker resumes");
+});
+
+test("decision_completion_uses_configured_remote_server_address", () => {
+  const endpoint = "http://eight.tail0e459c.ts.net:1234";
+  reset({ baseUrl: endpoint, decision: { model: "owner/model-a", logprobsMode: "constrained" } });
+  asyncFetchHandler = (opts) => {
+    assert(opts.url === `${endpoint}/v1/chat/completions`, "decision endpoint uses the configured server address");
+    return { status: 200, body: JSON.stringify(decisionFixture("constrained-noul-confidence.fixture.json")) };
+  };
+
+  const answer = decide(decisionRequest({ type: "noul" }));
+  assert(answer.type === "noul", "decision request completes against the configured endpoint");
+});
+
+test("decision_models_marks_models_after_approximate_fallback", () => {
+  reset({ decision: { model: "catalog-model" } });
+  const responses = [
+    decisionFixture("mlx-null-logprobs-empty.fixture.json"),
+    decisionFixture("constrained-noul-confidence.fixture.json"),
+  ];
+  asyncFetchHandler = (opts) => {
+    if (opts.url.endsWith("/chat/completions")) {
+      return { status: 200, body: JSON.stringify(responses.shift()) };
+    }
+    return { status: 200, body: JSON.stringify({ data: [{ id: "catalog-model", name: "Catalog Model" }] }) };
+  };
+
+  decide(decisionRequest({ type: "noul", criteria: null }));
+  const models = decisionModels();
+
+  assert(models.length === 1 && models[0].id === "catalog-model", "loaded model id remains selectable");
+  assert(models[0].display_name === "Catalog Model (approximate fallback)", "model info marks constrained fallback as approximate");
+});
+
+test("decision_select_model_applies_without_a_fetch_and_reports_the_model_id", () => {
+  reset({ decision: { model: "configured-model" } });
+  asyncFetchHandler = () => { throw new Error("selectModel must not fetch"); };
+  assert(plugin.modelId() === "configured-model", "configured model is reported before selection");
+  assert(plugin.selectModel("other-model") === true, "a host-verified id is applied");
+  assert(plugin.modelId() === "other-model", "the applied model is reported back");
+  assert(plugin.selectModel("") === false, "an empty id is refused");
+  assert(plugin.metadata().display_name === "LM Studio", "metadata names the adapter");
+});
+
+test("decision_selected_model_reaches_remote_requests_independently_of_chat_session_model", () => {
+  const endpoint = "http://eight.tail0e459c.ts.net:1234";
+  reset({ baseUrl: endpoint, model: "general-model", decision: { model: "configured-decision", logprobsMode: "constrained" }, presets: [] });
+  const adapter = loadPlugin();
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("constrained-noul-confidence.fixture.json")) });
+  adapter.openSession({ tabId: "independent-selection", config: {}, model: "chat-model" });
+  assert(adapter.selectModel("supporter-model") === true, "Supporter model selection is accepted");
+
+  const answer = settleFetchExport(adapter.decide(decisionRequest({ type: "noul" })), "selected model decision");
+  assert(answer.type === "noul", "selected model produces a decision through the async continuation");
+  assert(fetchCalls.length === 1, "selected model needs no extra catalogue request");
+  assert(fetchCalls[0].url === `${endpoint}/v1/chat/completions`, "selection retains the remote endpoint");
+  assert(JSON.parse(fetchCalls[0].body).model === "supporter-model", "request uses the selection ahead of configured models");
+  assert(!Object.keys(fetchCalls[0].headers).some((key) => key.toLowerCase() === "authorization"), "plugin request requires no token setting; the host owns optional authentication");
+  assert(adapter.sessionInfo("independent-selection").model === "chat-model", "Supporter selection preserves the chat model");
+
+  adapter.setModel("independent-selection", "next-chat-model");
+  adapter.sendMessage("independent-selection", "hello");
+  assert(JSON.parse(streamCalls[0].body).model === "next-chat-model", "chat stream uses the changed chat model");
+  assert(adapter.modelId() === "supporter-model", "chat model switch preserves Supporter selection");
+  assert(adapter.selectModel("") === false && adapter.modelId() === "supporter-model", "refused selection preserves the applied model");
+  settleFetchExport(adapter.decide(decisionRequest({ type: "noul" })), "decision after chat switch");
+  assert(JSON.parse(fetchCalls[1].body).model === "supporter-model", "later decisions retain Supporter selection after chat changes");
+  assert(settingsObj.decision.model === "configured-decision" && settingsObj.model === "general-model", "selection leaves configured model defaults intact");
+  adapter.closeSession("independent-selection");
+});
+
+test("decision_model_id_reports_catalogue_fallback_and_metadata_normalizes_remote_address", () => {
+  const endpoint = "http://eight.tail0e459c.ts.net:1234";
+  reset({ baseUrl: ` ${endpoint}/v1/// ` });
+  const adapter = loadPlugin();
+  assert(adapter.modelId() === null, "no selected, configured or discovered model initially");
+  asyncFetchHandler = () => ({ status: 200, body: JSON.stringify(decisionFixture("models.fixture.json")) });
+  const models = settleFetchExport(adapter.models(), "catalogue fallback models");
+  assert(models.length > 0 && adapter.modelId() === models[0].id, "modelId reports the first discovered model fallback");
+  assert(adapter.metadata().server_address === endpoint, "metadata reports the normalized configured server address");
 });
 
 let failed = 0;

@@ -30,6 +30,19 @@ var K_EMAIL = "login_email";
 var K_CLIENT_ID = "api_client_id";
 var K_CLIENT_SECRET = "api_client_secret";
 var BW_TIMEOUT_MS = 3e4;
+var BW_STATUS_TIMEOUT_MS = 8e3;
+function rememberedMasterPassword() {
+  const master = host.secretGet(K_MASTER);
+  return master && master.length ? master : null;
+}
+function canUnlockHeadlessly() {
+  return !!rememberedMasterPassword();
+}
+function isRejectedCredential(msg) {
+  const m = (msg || "").toLowerCase();
+  return m.indexOf("invalid master password") >= 0 || m.indexOf("username or password is incorrect") >= 0 || m.indexOf("invalid credentials") >= 0;
+}
+var LOCKED_HINT = "vault is locked and no master password is remembered \u2014 run `codeterm mem secret unlock` interactively";
 var B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 function base64Encode(str) {
   const bytes = [];
@@ -196,19 +209,76 @@ function extractSessionToken(data) {
   return (token || "").trim();
 }
 var autoUnlocking = false;
+var lastRecoveryError = null;
+function tryAutoLogin(master) {
+  const clientId = host.secretGet(K_CLIENT_ID);
+  const clientSecret = host.secretGet(K_CLIENT_SECRET);
+  const email = host.secretGet(K_EMAIL);
+  let login;
+  let usedApiKey = false;
+  if (clientId && clientSecret) {
+    usedApiKey = true;
+    login = bw(["login", "--apikey"], {
+      env: { BW_CLIENTID: clientId, BW_CLIENTSECRET: clientSecret }
+    });
+  } else if (email) {
+    login = bw(["login", email, "--passwordenv", "BW_PASSWORD"], {
+      env: { BW_PASSWORD: master }
+    });
+  } else {
+    lastRecoveryError = { kind: "logged_out", message: "stored Bitwarden login identity is missing" };
+    return false;
+  }
+  if (login.success || (login.message || "").toLowerCase().indexOf("already logged in") >= 0) {
+    lastRecoveryError = null;
+    return true;
+  }
+  lastRecoveryError = mapBwError(login.message);
+  if (isRejectedCredential(login.message)) {
+    if (usedApiKey) {
+      host.secretDelete(K_CLIENT_ID);
+      host.secretDelete(K_CLIENT_SECRET);
+    } else {
+      host.secretDelete(K_MASTER);
+    }
+  }
+  return false;
+}
 function tryAutoUnlock() {
   if (autoUnlocking) return false;
   autoUnlocking = true;
   try {
-    const master = host.secretGet(K_MASTER);
+    const master = rememberedMasterPassword();
     if (master && master.length) {
+      const status = bwStatus();
+      if (status.failure) {
+        lastRecoveryError = { kind: "backend", message: status.failure.message };
+        return false;
+      }
+      rememberLoginIdentity(status);
+      if (status.status && status.status.status === "unauthenticated" && !tryAutoLogin(master)) {
+        return false;
+      }
       const unlocked = bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: master } });
-      if (!unlocked.success) return false;
+      if (!unlocked.success) {
+        if (isRejectedCredential(unlocked.message)) {
+          host.secretDelete(K_MASTER);
+          lastRecoveryError = { kind: "locked", message: "stored Bitwarden master password was rejected" };
+        } else {
+          lastRecoveryError = mapBwError(unlocked.message);
+        }
+        return false;
+      }
       const token = extractSessionToken(unlocked.data);
-      if (!token) return false;
+      if (!token) {
+        lastRecoveryError = { kind: "backend", message: "bw unlock returned no session token" };
+        return false;
+      }
       host.secretSet(K_SESSION, token);
+      lastRecoveryError = null;
       return true;
     }
+    lastRecoveryError = { kind: "locked", message: LOCKED_HINT };
     return false;
   } finally {
     autoUnlocking = false;
@@ -218,15 +288,18 @@ function runWithSession(args, stdin) {
   let session = host.secretGet(K_SESSION);
   let triedUnlock = false;
   if (!session) {
-    if (!tryAutoUnlock()) return { error: { kind: "locked" } };
+    if (!canUnlockHeadlessly()) return { error: { kind: "locked", message: LOCKED_HINT } };
+    if (!tryAutoUnlock()) return { error: lastRecoveryError || { kind: "locked", message: LOCKED_HINT } };
     triedUnlock = true;
     session = host.secretGet(K_SESSION);
-    if (!session) return { error: { kind: "locked" } };
+    if (!session) return { error: { kind: "locked", message: LOCKED_HINT } };
   }
   let r = bw(args, { session, stdin });
   if (!r.success) {
     const err = mapBwError(r.message);
-    if (err.kind === "locked" && !triedUnlock && tryAutoUnlock()) {
+    if ((err.kind === "locked" || err.kind === "logged_out") && !triedUnlock && canUnlockHeadlessly()) {
+      host.secretDelete(K_SESSION);
+      if (!tryAutoUnlock()) return { error: lastRecoveryError || err };
       const fresh = host.secretGet(K_SESSION);
       if (fresh) {
         r = bw(args, { session: fresh, stdin });
@@ -268,7 +341,9 @@ function bwExecToStatusResult(ex) {
 }
 function bwStatus() {
   const session = host.secretGet(K_SESSION);
-  const raw = host.exec(bwExecOpts(["status"], { session: session || void 0 }));
+  const raw = host.exec(
+    bwExecOpts(["status"], { session: session || void 0, timeoutMs: BW_STATUS_TIMEOUT_MS })
+  );
   let ex;
   try {
     ex = JSON.parse(raw);
@@ -277,13 +352,17 @@ function bwStatus() {
   }
   return bwExecToStatusResult(ex);
 }
+function rememberLoginIdentity(res) {
+  const email = res.status && res.status.userEmail;
+  if (email) host.secretSet(K_EMAIL, email);
+}
 function statusFromBw(res) {
   const endpoint = serverUrl();
   if (res.failure) return { status: "unavailable", reason: res.failure.message };
   const s = res.status;
   if (!s) return { status: "unavailable", reason: "bw status returned no data" };
+  rememberLoginIdentity(res);
   if (s.status === "unlocked") {
-    if (s.userEmail) host.secretSet(K_EMAIL, s.userEmail);
     return { status: "unlocked", user: s.userEmail || null, transient: false, endpoint: s.serverUrl || endpoint };
   }
   if (s.status === "locked") return { status: "locked", endpoint };
@@ -291,8 +370,14 @@ function statusFromBw(res) {
 }
 function secretStatus() {
   let st = statusFromBw(bwStatus());
-  if (st.status === "locked" && host.secretGet(K_MASTER) && tryAutoUnlock()) {
-    st = statusFromBw(bwStatus());
+  if (st.status === "locked" && !canUnlockHeadlessly()) {
+    return { status: "locked", endpoint: st.endpoint, reason: LOCKED_HINT };
+  }
+  if ((st.status === "locked" || st.status === "logged_out") && canUnlockHeadlessly()) {
+    if (tryAutoUnlock()) st = statusFromBw(bwStatus());
+    else if (lastRecoveryError) {
+      st = { status: "unavailable", endpoint: st.endpoint, reason: lastRecoveryError.message || lastRecoveryError.kind };
+    }
   }
   return st;
 }
@@ -300,8 +385,12 @@ function secretUnlock(creds) {
   creds = creds || {};
   const hasPw = creds.masterPassword && creds.masterPassword.length;
   if (!hasPw && !creds.apiKeyClientId) {
-    if (tryAutoUnlock()) return { ok: true };
+    if (canUnlockHeadlessly() && tryAutoUnlock()) return { ok: true };
+    if (lastRecoveryError) return { error: lastRecoveryError };
     return { error: { kind: "bad_request", message: "master password (or API-key creds) required" } };
+  }
+  if (!hasPw) {
+    return { error: { kind: "bad_request", message: "master password is required to unlock, even with API-key credentials" } };
   }
   const server = serverUrl();
   if (!isValidHttpUrl(server)) {
@@ -310,7 +399,9 @@ function secretUnlock(creds) {
   if (!serverHostAllowed(server, effectiveAllow())) {
     return { error: { kind: "bad_request", message: "server host not permitted by plugin network permissions: " + hostOf(server) } };
   }
-  let st = bwStatus().status;
+  let statusResult = bwStatus();
+  rememberLoginIdentity(statusResult);
+  let st = statusResult.status;
   let loggedIn = !!st && st.status !== "unauthenticated";
   const currentServer = st && st.serverUrl || "";
   if (loggedIn && currentServer && currentServer !== server) {
@@ -318,12 +409,17 @@ function secretUnlock(creds) {
     host.secretDelete(K_SESSION);
     loggedIn = false;
   }
-  if (currentServer !== server) {
+  const serverChanged = currentServer !== server;
+  if (serverChanged) {
     const cfg = bw(["config", "server", server]);
     if (!cfg.success) return { error: { kind: "backend", message: "could not point bw at " + server } };
   }
-  st = bwStatus().status;
-  loggedIn = !!st && st.status !== "unauthenticated";
+  if (serverChanged) {
+    statusResult = bwStatus();
+    rememberLoginIdentity(statusResult);
+    st = statusResult.status;
+    loggedIn = !!st && st.status !== "unauthenticated";
+  }
   if (!loggedIn) {
     let login;
     if (creds.apiKeyClientId && creds.apiKeyClientSecret) {
@@ -514,18 +610,105 @@ function statusStart() {
     return { error: "exec start: " + e };
   }
   if (res.error) return { error: res.error };
+  if (res.jobId) statusFlows[res.jobId] = { hostJobId: res.jobId, phase: "status" };
   return { jobId: res.jobId };
+}
+var statusFlows = {};
+function startFlowJob(flowId, phase, args, opts, usedApiKey) {
+  let started;
+  try {
+    started = JSON.parse(host.execStart(bwExecOpts(args, opts)));
+  } catch (e) {
+    lastRecoveryError = { kind: "backend", message: "exec start: " + e };
+    return null;
+  }
+  if (started.error || !started.jobId) {
+    lastRecoveryError = { kind: "backend", message: started.error || "exec start returned no jobId" };
+    return null;
+  }
+  statusFlows[flowId] = { hostJobId: started.jobId, phase, usedApiKey };
+  return started.jobId;
+}
+function startFlowLogin(flowId, master) {
+  const clientId = host.secretGet(K_CLIENT_ID);
+  const clientSecret = host.secretGet(K_CLIENT_SECRET);
+  const email = host.secretGet(K_EMAIL);
+  if (clientId && clientSecret) {
+    return !!startFlowJob(flowId, "login", ["login", "--apikey"], {
+      env: { BW_CLIENTID: clientId, BW_CLIENTSECRET: clientSecret }
+    }, true);
+  }
+  if (email) {
+    return !!startFlowJob(flowId, "login", ["login", email, "--passwordenv", "BW_PASSWORD"], {
+      env: { BW_PASSWORD: master }
+    }, false);
+  }
+  lastRecoveryError = { kind: "logged_out", message: "stored Bitwarden login identity is missing" };
+  return false;
+}
+function flowFailure(flowId, message, usedApiKey) {
+  lastRecoveryError = mapBwError(message);
+  if (isRejectedCredential(message)) {
+    if (usedApiKey) {
+      host.secretDelete(K_CLIENT_ID);
+      host.secretDelete(K_CLIENT_SECRET);
+    } else {
+      host.secretDelete(K_MASTER);
+    }
+  }
+  delete statusFlows[flowId];
+  return {
+    done: true,
+    status: { status: "unavailable", endpoint: serverUrl(), reason: lastRecoveryError.message || lastRecoveryError.kind }
+  };
 }
 function statusPoll(jobId) {
   if (!jobId) return { done: true, error: "no jobId" };
+  const flow = statusFlows[jobId] || { hostJobId: jobId, phase: "status" };
   let p;
   try {
-    p = JSON.parse(host.execPoll(jobId));
+    p = JSON.parse(host.execPoll(flow.hostJobId));
   } catch (e) {
+    delete statusFlows[jobId];
     return { done: true, error: "exec poll: " + e };
   }
   if (!p.done) return { done: false };
-  return { done: true, status: statusFromBw(bwExecToStatusResult(p)) };
+  const response = parseBwOutput(p);
+  if (flow.phase === "login") {
+    if (!response.success && (response.message || "").toLowerCase().indexOf("already logged in") < 0) {
+      return flowFailure(jobId, response.message, flow.usedApiKey);
+    }
+    const master2 = rememberedMasterPassword();
+    if (!master2 || !startFlowJob(jobId, "unlock", ["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], {
+      env: { BW_PASSWORD: master2 || "" }
+    })) {
+      delete statusFlows[jobId];
+      return { done: true, status: { status: "unavailable", endpoint: serverUrl(), reason: lastRecoveryError && (lastRecoveryError.message || lastRecoveryError.kind) || LOCKED_HINT } };
+    }
+    return { done: false };
+  }
+  if (flow.phase === "unlock") {
+    if (!response.success) return flowFailure(jobId, response.message);
+    const token = extractSessionToken(response.data);
+    if (!token) return flowFailure(jobId, "bw unlock returned no session token");
+    host.secretSet(K_SESSION, token);
+    lastRecoveryError = null;
+    delete statusFlows[jobId];
+    return { done: true, status: { status: "unlocked", user: host.secretGet(K_EMAIL), transient: false, endpoint: serverUrl() } };
+  }
+  const statusResult = bwExecToStatusResult(p);
+  const status = statusFromBw(statusResult);
+  if (status.status !== "locked" && status.status !== "logged_out" || !canUnlockHeadlessly()) {
+    delete statusFlows[jobId];
+    return { done: true, status };
+  }
+  const master = rememberedMasterPassword() || "";
+  const started = status.status === "logged_out" ? startFlowLogin(jobId, master) : !!startFlowJob(jobId, "unlock", ["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: master } });
+  if (!started) {
+    delete statusFlows[jobId];
+    return { done: true, status: { status: "unavailable", endpoint: status.endpoint, reason: lastRecoveryError && (lastRecoveryError.message || lastRecoveryError.kind) || LOCKED_HINT } };
+  }
+  return { done: false };
 }
 function renderGlance() {
   const s = secretStatus();
