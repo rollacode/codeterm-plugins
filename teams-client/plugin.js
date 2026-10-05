@@ -787,11 +787,11 @@ function failureMessage(kind, detail, cause) {
     case "destination-not-permitted":
       return `destination-not-permitted: Only the owner's approved immutable chat id is allowed (${String(detail || "no destination is approved")}). Select that exact chat or review a new preview before changing policy.`;
     case "rate-limited":
-      return `rate-limited: Microsoft 365 asked this account to wait until ${Number(detail) || 0}. Invoke send again after that recorded deadline; Teams Client will not wait or retry automatically.`;
+      return `rate-limited: Microsoft 365 throttled this operation. Review Teams Client status and the selected chat before deciding what to do.`;
     case "upstream-rejected":
       return `upstream-rejected: m365 refused the operation (${String(detail || "inspect the Microsoft 365 error and correct its cause")}). Correct the permission or request issue, then invoke send again only if you still want delivery.`;
     case "unknown":
-      return "unknown: Microsoft 365 may have accepted this message but confirmation was lost. Do not retry this idempotency key; inspect the selected chat and decide manually.";
+      return `unknown: ${String(detail || "Microsoft 365 may have accepted this message but confirmation was lost.")} Do not retry this idempotency key; inspect the selected chat and decide manually.`;
   }
   const exhaustive = kind;
   return exhaustive;
@@ -802,7 +802,7 @@ function loadOutbox(p) {
     const value = parseJson(host.fs.readFile(p.outbox) || "");
     if (!value || value.schema !== 1 || !Array.isArray(value.attempts)) return { error: "the existing outbox ledger is unreadable" };
     const states = ["pending", "sent", "rate_limited", "failed", "unknown"];
-    const valid = value.attempts.every((item) => item && typeof item.idempotencyKey === "string" && typeof item.payloadHash === "string" && /^[a-f0-9]{64}$/.test(item.payloadHash) && states.includes(item.state) && item.sender && typeof item.sender.accountId === "string" && typeof item.sender.tenantId === "string" && typeof item.sender.identityKey === "string" && item.destination && validChatId(String(item.destination.id || "")) && typeof item.destination.label === "string" && Number.isFinite(Number(item.createdAt)) && Number.isFinite(Number(item.updatedAt)) && Number.isInteger(item.sendCount) && item.sendCount >= 0 && (item.state !== "rate_limited" || Number.isFinite(Number(item.retryAfter))));
+    const valid = value.attempts.every((item) => item && typeof item.idempotencyKey === "string" && typeof item.payloadHash === "string" && /^[a-f0-9]{64}$/.test(item.payloadHash) && states.includes(item.state) && item.sender && typeof item.sender.accountId === "string" && typeof item.sender.tenantId === "string" && typeof item.sender.identityKey === "string" && item.destination && validChatId(String(item.destination.id || "")) && typeof item.destination.label === "string" && Number.isFinite(Number(item.createdAt)) && Number.isFinite(Number(item.updatedAt)) && Number.isInteger(item.sendCount) && item.sendCount >= 0);
     if (!valid) return { error: "the existing outbox ledger contains an invalid or unrecognized attempt state" };
     return { ledger: value };
   } catch {
@@ -842,21 +842,12 @@ function parseSendArgs(args) {
   if (!text.length) return { error: "upstream-rejected: Message text must not be empty." };
   return { chatId: args[0], text, key };
 }
-function retryDeadline(message, currentTime) {
-  const line = message.match(/retry[- ]after"?\s*["']?\s*[:=]\s*["']?([0-9]+(?:\.[0-9]+)?|[^\r\n]+)/i);
-  if (!line) return null;
-  const value = line[1].trim().replace(/^['"]|['"]$/g, "").replace(/[;,]+$/, "");
-  if (/^[0-9]+(?:\.[0-9]+)?$/.test(value)) return currentTime + Number(value) * 1e3;
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : null;
-}
 function failureForUpstream(message) {
   const auth = authState(message);
   if (auth) return { kind: "reauth-needed", detail: auth.message, cause: auth.state };
   if (/not signed in|not logged in|no active connection|logged out|run m365 login/i.test(message)) return { kind: "not-logged-in" };
-  if (/\b429\b|too many requests|throttl/i.test(message)) {
-    const deadline = retryDeadline(message, now());
-    return deadline === null ? { kind: "upstream-rejected", detail: "m365 reported HTTP 429 but did not expose a usable Retry-After deadline; inspect Teams Client status before invoking again" } : { kind: "rate-limited", retryAfter: deadline };
+  if (/\b429\b|\b503\b|too many requests|throttl|service unavailable/i.test(message)) {
+    return { kind: "unknown", detail: "m365 may have retried this throttled send internally and may have delivered the message." };
   }
   if (/timeout|timed out|deadline exceeded|connection reset|connection closed|unexpected EOF|\bEOF\b|broken pipe|lost response|context cancel+ed|terminated|signal|killed|did not finish|could not confirm|unconfirmed/i.test(message)) return { kind: "unknown" };
   const code = message.match(/\b(?:HTTP|status(?: code)?)\s*[:=]?\s*(4\d\d|5\d\d)\b/i);
@@ -885,7 +876,7 @@ function runTeamsSend(args) {
   } catch (error) {
     return { ok: false, error: `m365 send process outcome could not be confirmed: ${String(error)}`, stderr: "" };
   }
-  if (!result || result.done === false) return { ok: false, error: "m365 send process did not finish; delivery outcome is unknown.", stderr: "" };
+  if (!result || result.done !== true) return { ok: false, error: "m365 send process did not finish; delivery outcome is unknown.", stderr: "" };
   const stdout = String(result.stdout || "");
   const stderr = String(result.stderr || "");
   if (result.error) return { ok: false, error: `m365 send process returned an unconfirmed result: ${String(result.error)}`, stderr, code: result.code };
@@ -911,27 +902,22 @@ function attemptResult(attempt) {
     deliveryGuarantee: "The plugin returns a recorded success for a sent idempotency key and never resends that key. m365 does not surface the Graph message id on success; ambiguous outcomes remain unknown. This is not an exactly-once delivery guarantee."
   }) };
 }
-function persistFailure(p, ledger, attempt, kind, detail, cause, retryAfter) {
+function persistFailure(p, ledger, attempt, kind, detail, cause) {
   attempt.failure = kind;
   attempt.failureCause = cause;
-  attempt.failureMessage = failureMessage(kind, kind === "rate-limited" ? retryAfter : detail, cause);
+  attempt.failureMessage = failureMessage(kind, detail, cause);
   attempt.updatedAt = now();
-  if (kind === "rate-limited" && retryAfter !== void 0) {
-    attempt.state = "rate_limited";
-    attempt.retryAfter = retryAfter;
-  } else if (kind === "unknown") {
+  delete attempt.retryAfter;
+  if (kind === "unknown") {
     attempt.state = "unknown";
-    delete attempt.retryAfter;
   } else {
     attempt.state = "failed";
-    delete attempt.retryAfter;
   }
   if (!persistOutbox(p, ledger)) {
     attempt.state = "unknown";
     attempt.failure = "unknown";
     attempt.failureCause = void 0;
     attempt.failureMessage = failureMessage("unknown");
-    delete attempt.retryAfter;
     persistOutbox(p, ledger);
     return rememberSendFailure("unknown", attempt.failureMessage);
   }
@@ -959,7 +945,7 @@ function sendCommand(sessionId, args) {
   if (attempt && attempt.state === "sent") return attemptResult(attempt);
   if (attempt && attempt.state === "unknown") return sendFailureResult("unknown");
   if (attempt && attempt.state === "pending") return persistFailure(p, ledger, attempt, "unknown", "a previous invocation ended before its send result was recorded");
-  if (attempt && attempt.state === "rate_limited" && Number(attempt.retryAfter) > now()) return sendFailureResult("rate-limited", attempt.retryAfter);
+  if (attempt && attempt.state === "rate_limited") return persistFailure(p, ledger, attempt, "unknown");
   const resolved = liveSender();
   if ("error" in resolved) return rememberPrefixedFailure(resolved.error);
   if (resolved.sender.accountId !== policy.senderAccountId || resolved.sender.tenantId !== policy.senderTenantId) {
@@ -985,13 +971,12 @@ function sendCommand(sessionId, args) {
   delete attempt.failure;
   delete attempt.failureCause;
   delete attempt.failureMessage;
-  delete attempt.retryAfter;
   if (!persistOutbox(p, ledger)) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; m365 was not contacted");
   const run = runTeamsSend(["teams", "chat", "message", "send", "--chatId", parsed.chatId, "--message", parsed.text, "--output", "json"]);
   if (!run.ok) {
     const upstream = failureForUpstream(`${run.error}
 ${run.stderr}`);
-    return persistFailure(p, ledger, attempt, upstream.kind, upstream.detail, upstream.cause, upstream.retryAfter);
+    return persistFailure(p, ledger, attempt, upstream.kind, upstream.detail, upstream.cause);
   }
   attempt.graphMessageId = messageIdFromOutput(run.stdout);
   attempt.state = "sent";
@@ -999,7 +984,6 @@ ${run.stderr}`);
   delete attempt.failure;
   delete attempt.failureCause;
   delete attempt.failureMessage;
-  delete attempt.retryAfter;
   if (!persistOutbox(p, ledger)) return persistFailure(p, ledger, attempt, "unknown");
   return attemptResult(attempt);
 }
@@ -1137,7 +1121,6 @@ var plugin = {
   __test_personalTenantId: PERSONAL_TENANT_ID,
   __test_failureMessage: failureMessage,
   __test_failureForUpstream: failureForUpstream,
-  __test_retryDeadline: retryDeadline,
   __test_setClock: (clock) => {
     injectedClock = clock;
   },
