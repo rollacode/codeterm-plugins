@@ -25,7 +25,8 @@ function mockHost(options = {}) {
   const root = mkdtempSync(join(os.tmpdir(), "telegram-client-test-"));
   const binDir = join(root, "bin");
   mkdirSync(binDir, { recursive: true, mode: 0o700 });
-  const binary = join(binDir, "tg");
+  const platform = options.platform || "darwin";
+  const binary = join(binDir, plugin.__test_binaryName(platform));
   writeFileSync(binary, "test binary", { mode: 0o700 });
   writeJson(join(root, "install.json"), { version: "0.11.0", asset: "pinned" });
   const config = join(root, "gotd.cli.yaml");
@@ -77,15 +78,20 @@ function mockHost(options = {}) {
     return { code: 1, stdout: "", stderr: `unexpected tg command: ${words.join(" ")}` };
   }
 
+  function pollResult(id) {
+    const value = loginJobs.get(id) || jobs.get(id);
+    return value ? { done: true, ...value } : { done: true, code: 1, error: "missing job" };
+  }
+
   globalThis.host = {
-    platform: () => options.platform || "darwin",
+    platform: () => platform,
     homeDir: () => root,
     envGet: () => null,
     settingsJson: () => JSON.stringify(options.settings || { historyCount: 20, historyMaxBytes: 32768 }),
     secretGet: (key) => secrets[key] || null,
     secretSet: (key, value) => { secrets[key] = value; return true; },
     secretDelete: (key) => { delete secrets[key]; return true; },
-    awaitJob: (id, then) => then(jobs.get(id)),
+    awaitJob: (id, then) => then(pollResult(id)),
     exec: {
       start: (opts) => {
         const id = `job-${++sequence}`;
@@ -98,7 +104,7 @@ function mockHost(options = {}) {
         if (commandArgs(opts.args || [])[0] === "login") loginJobs.set(id, value);
         return { jobId: id };
       },
-      poll: (id) => ({ done: true, ...(loginJobs.get(id) || jobs.get(id) || { code: 1, error: "missing job" }) }),
+      poll: pollResult,
       close: () => {},
     },
     fs: {
@@ -129,6 +135,19 @@ test("pinned OS and architecture mapping names release assets and refuses unsupp
   assert.equal(installer.resolveRelease("linux", "x64").asset, "tg_0.11.0_linux_amd64.tar.gz");
   assert.equal(installer.resolveRelease("win32", "arm64").binary, "tg.exe");
   assert.equal(installer.resolveRelease("freebsd", "arm64").error, "unsupported-platform");
+});
+
+test("plugin binary filename distinguishes Darwin from Windows", () => {
+  assert.equal(plugin.__test_binaryName("darwin"), "tg");
+  assert.equal(plugin.__test_binaryName("win32"), "tg.exe");
+  for (const [platform, expected] of [["darwin", "tg"], ["win32", "tg.exe"]]) {
+    const env = mockHost({ platform });
+    try {
+      const p = plugin.__test_paths();
+      assert.equal(path.basename(p.binary), expected);
+      assert.equal(existsSync(p.binary), true, "fixture binary uses the plugin's platform-derived name");
+    } finally { env.cleanup(); }
+  }
 });
 
 test("manifest exposes only Telegram capabilities and the helper binary", () => {
