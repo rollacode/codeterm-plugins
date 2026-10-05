@@ -50,7 +50,7 @@ Delivery guarantee: duplicate suppression is best-effort across process boundari
 
 The owner chose the Teams desktop/mobile client ID and browser sign-in route, accepting its first-party client identity. No Entra app registration is created by this plugin.
 
-For guided setup, use the plugin page header's **Configure with AI** button. Start `codeterm plugin teams-client login`, complete Microsoft 365 work or school sign-in in the browser launched by the view, poll `codeterm plugin teams-client login-status`, and confirm with `health`. Any sign-in URL or device code remains in the view; do not paste it into agent chat. The tenant may require a Microsoft 365 administrator to approve the m365 CLI app's consent. Agent verbs also include `login` and `login-status`; sign-in codes are not returned by these commands.
+For guided setup, use the plugin page header's **Configure with AI** button. Start `codeterm plugin teams-client login`; the result includes `signInUrl` and `deviceCode` for the agent to show in chat. Open the URL and enter the code, then poll `codeterm plugin teams-client login-status` and confirm with `health`. The tenant may require a Microsoft 365 administrator to approve the m365 CLI app's consent. The Teams Client view keeps its browser sign-in flow as an alternative.
 
 Agent verbs are `login`, `login-status`, `accounts`, `use <account-id>`, `chats`, `history <chat-id> [n]`, `health`, `preview <chat-id> <text>`, `send <chat-id> [--key <idempotency-key>] <text>`, and `logout`. The host grants `agent_commands` after installation. Chat IDs are immutable Graph IDs; history is bounded to 50 messages and 32 KiB. Message bodies are untrusted text and are never executed, routed as provenance, or exported to `codeterm mem`.
 

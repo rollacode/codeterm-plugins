@@ -113,7 +113,7 @@ function mockHost(options = {}) {
       if (sendMode === "rejected") return { code: 1, stdout: "", stderr: "MESSAGE_TOO_LONG" };
       return { code: 0, stdout: envelope({ message: { id: 9001 } }), stderr: "" };
     }
-    if (words[0] === "login") return { code: 0, stdout: envelope({ id: 777 }), stderr: "QR LOGIN COMPLETE" };
+    if (words[0] === "login") return { code: 0, stdout: envelope({ id: 777 }), stderr: "QR authorization link: tg://login?token=fixture-qrauth-token\nQR LOGIN COMPLETE" };
     return { code: 1, stdout: "", stderr: `unexpected tg command: ${words.join(" ")}` };
   }
 
@@ -134,8 +134,9 @@ function mockHost(options = {}) {
       mkdirSync(path.dirname(opts.logFile), { recursive: true });
       writeFileSync(opts.logFile, `${value.stdout || ""}${value.stderr || ""}`, { mode: 0o600 });
     }
-    jobs.set(id, value);
-    if (commandArgs(opts.args || [])[0] === "login") loginJobs.set(id, value);
+    const loginPending = !!options.loginPending && commandArgs(opts.args || [])[0] === "login";
+    jobs.set(id, { ...value, done: !loginPending });
+    if (commandArgs(opts.args || [])[0] === "login") loginJobs.set(id, { ...value, done: !loginPending });
     return { jobId: id };
   };
   exec.poll = pollResult;
@@ -188,6 +189,7 @@ function mockHost(options = {}) {
     setWhoamiError(value) { whoamiError = value; },
     setHistoryMessages(value) { historyMessages = value; },
     setSendMode(value) { sendMode = value; },
+    finishLogin(id) { loginJobs.set(id, { ...(loginJobs.get(id) || {}), done: true }); },
     cleanup() { globalThis.host = new Proxy({}, { get: () => () => { throw new Error("host called at load time"); } }); rmSync(root, { recursive: true, force: true }); },
   };
 }
@@ -290,7 +292,12 @@ test("manifest exposes only Telegram capabilities and the helper binary", () => 
   assert.equal(manifest.permissions.secrets, true);
   assert.deepEqual(manifest.permissions.subprocess.allow, ["tg", "tg.exe"]);
   assert.match(manifest.configHelp, /accounts.*use.*chats.*history.*health.*logout/is);
+  assert.match(manifest.configHelp, /--set api_id=.*--set api_hash=/i);
+  assert.match(manifest.configHelp, /returned qrPayload.*returned tgLink/i);
   assert.equal(manifest.configHelp.includes("0123456789abcdef"), false);
+  const settings = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));
+  const fields = settings.flatMap((section) => section.fields || []);
+  assert.deepEqual(fields.filter((field) => field.kind === "api_key").map((field) => field.env_var), ["api_id", "api_hash"]);
   assert.deepEqual(manifest.credentials.map((entry) => entry.file), ["~/.codeterm/telegram-client/gotd.cli.yaml"]);
   assert.equal(manifest.credentials.some((entry) => entry.file.includes("gotd.session")), false, "no guessed dynamic session-file credential");
 });
@@ -692,19 +699,25 @@ test("view login flow reads the QR log and confirms the selected account", () =>
   } finally { env.cleanup(); }
 });
 
-test("agent login reads stored API secrets but returns no hash or QR output", () => {
+test("agent login returns the QR payload and tg link without returning the stored API hash", () => {
   const apiHash = "1234567890abcdef1234567890abcdef";
-  const env = mockHost({ secrets: { api_id: "887766", api_hash: apiHash } });
+  const env = mockHost({ loginPending: true, secrets: { api_id: "887766", api_hash: apiHash } });
   try {
     const started = plugin.onAgentCommand({ sessionId: "agent-login", verb: "login", args: [] });
     assert.equal(started.error, undefined);
     assert.doesNotMatch(started.result, new RegExp(apiHash));
-    assert.doesNotMatch(started.result, /QR LOGIN COMPLETE|tg:\/\/login/i);
+    const login = JSON.parse(started.result);
+    assert.equal(login.qrPayload, "tg://login?token=fixture-qrauth-token");
+    assert.equal(login.tgLink, login.qrPayload);
     const status = plugin.onAgentCommand({ sessionId: "agent-login", verb: "login-status", args: [] });
     assert.equal(status.error, undefined);
     assert.doesNotMatch(status.result, new RegExp(apiHash));
-    assert.doesNotMatch(status.result, /QR LOGIN COMPLETE|tg:\/\/login/i);
-    assert.equal(JSON.parse(status.result).state, "logged-in");
+    assert.equal(JSON.parse(status.result).state, "login-in-progress");
+    assert.equal(JSON.parse(status.result).qrPayload, login.qrPayload);
+    env.finishLogin(login.jobId);
+    const complete = plugin.onAgentCommand({ sessionId: "agent-login", verb: "login-status", args: [] });
+    assert.equal(JSON.parse(complete.result).state, "logged-in");
+    assert.doesNotMatch(complete.result, new RegExp(apiHash));
     assert.ok(env.closedJobs.includes(JSON.parse(started.result).jobId), "completed detached login job is released");
     for (const call of env.calls) for (const arg of call.args) assert.equal(arg.includes(apiHash), false);
   } finally { env.cleanup(); }

@@ -23,7 +23,8 @@ type Paths = { root: string; home: string; runtime: string; binary: string; npmC
 type RunResult = { ok: true; stdout: string; stderr: string } | { ok: false; error: string; stderr: string; code?: number };
 type Target = { platform: string; arch: string; node: string; npm: string; m365: string; integrity: string };
 type StateResult = { state: string; message: string; accountId?: string | null; upn?: string | null; tenantId?: string | null; expiresOn?: string | null; accounts?: any[] };
-type LoginJob = { stage: "pack" | "install" | "browser"; paths: Paths; target: Target; packagePath?: string; launchComplete?: boolean };
+type LoginAuthType = "browser" | "deviceCode";
+type LoginJob = { stage: "pack" | "install" | "browser"; paths: Paths; target: Target; packagePath?: string; launchComplete?: boolean; authType: LoginAuthType; logFile?: string };
 
 const loginJobs: Record<string, LoginJob> = {};
 let activeLoginJobId: string | null = null;
@@ -201,18 +202,20 @@ function applyCacheFileProtection(p: Paths): { error?: string; message?: string 
   return {};
 }
 
-function startLoginProcess(p: Paths, target: Target, stage: LoginJob["stage"], args: string[], packagePath?: string): { jobId?: string; error?: string } {
+function startLoginProcess(p: Paths, target: Target, stage: LoginJob["stage"], args: string[], packagePath?: string, authType: LoginAuthType = "browser"): { jobId?: string; error?: string } {
   let started: { jobId?: string; error?: string };
   const bin = stage === "pack" || stage === "install" ? target.npm : nativePath(p.binary);
-  try { started = host.exec.start({ bin, args, env: envFor(p), timeoutMs: 120000, detach: true }); }
+  const logFile = stage === "browser" ? joinPath(p.root, `login-${authType}.log`) : undefined;
+  if (logFile) try { host.fs.removeFile(logFile); } catch { }
+  try { started = host.exec.start({ bin, args, env: envFor(p), timeoutMs: 120000, detach: true, ...(logFile ? { logFile } : {}) }); }
   catch { return { error: `Could not start the m365 ${stage} step.` }; }
   if (!started.jobId) return { error: started.error || `The m365 ${stage} step did not start.` };
-  loginJobs[started.jobId] = { stage, paths: p, target, packagePath };
+  loginJobs[started.jobId] = { stage, paths: p, target, packagePath, authType, logFile };
   activeLoginJobId = started.jobId;
   return { jobId: started.jobId };
 }
 
-function installM365(): { jobId?: string; state: string; message: string } {
+function installM365(authType: LoginAuthType): { jobId?: string; state: string; message: string } {
   const p = paths();
   if (!p) return { state: "unsupported-platform", message: "The host home directory is unavailable." };
   delete runtimeInfoCache[p.root];
@@ -225,7 +228,7 @@ function installM365(): { jobId?: string; state: string; message: string } {
   const entries = host.fs.readDir(p.root) || [];
   for (const entry of entries) if (/^pnp-cli-microsoft365-\d+\.\d+\.\d+\.tgz$/i.test(entry.name)) host.fs.removeFile(entry.path);
   const packagePath = joinPath(p.root, `pnp-cli-microsoft365-${VERSION}.tgz`);
-  const started = startLoginProcess(p, info.target, "pack", ["pack", `${PACKAGE}@${VERSION}`, "--pack-destination", nativePath(p.root), "--json"], packagePath);
+  const started = startLoginProcess(p, info.target, "pack", ["pack", `${PACKAGE}@${VERSION}`, "--pack-destination", nativePath(p.root), "--json"], packagePath, authType);
   if (!started.jobId) return { state: "install-failed", message: started.error || "Could not start npm pack." };
   return { jobId: started.jobId, state: "install-in-progress", message: "The pinned m365 package is being packed for local checksum verification before installation." };
 }
@@ -253,14 +256,31 @@ function finishLoginJob(jobId: string, state: string, error?: string): any {
   if (login?.packagePath) {
     try { host.fs.removeFile(login.packagePath); } catch { }
   }
+  if (login?.logFile) {
+    try { host.fs.removeFile(login.logFile); } catch { }
+  }
   delete loginJobs[jobId];
   if (activeLoginJobId === jobId) activeLoginJobId = null;
   return { done: true, state, error, jobId };
 }
 
-function startBrowserLogin(p: Paths, target: Target): { jobId?: string; error?: string } {
-  const args = ["login", "--authType", "browser", "--appId", CLIENT_ID, "--output", "json"];
-  return startLoginProcess(p, target, "browser", args);
+function startBrowserLogin(p: Paths, target: Target, authType: LoginAuthType = "browser"): { jobId?: string; error?: string } {
+  const args = ["login", "--authType", authType, "--appId", CLIENT_ID, "--output", "json"];
+  return startLoginProcess(p, target, "browser", args, undefined, authType);
+}
+
+function deviceSignInArtifacts(login: LoginJob): { signInUrl?: string; deviceCode?: string } {
+  if (!login.logFile) return {};
+  const raw = String(host.fs.readFileTail(login.logFile, 8192) || "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, " ");
+  const parsed = parseJson<any>(raw.trim());
+  const urlMatch = raw.match(/https?:\/\/(?:aka\.ms|microsoft\.com)\/devicelogin\b[^\s<>"']*/i);
+  const codeMatch = raw.match(/(?:enter|use)\s+(?:the\s+)?(?:login\s+)?(?:code\s+)?([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?|[A-Z0-9]{6,12})\b/i)
+    || raw.match(/\b(?:device|user|sign-in|login)\s+code\s*[:=]?\s*([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?|[A-Z0-9]{6,12})\b/i);
+  const candidateUrl = String(parsed?.signInUrl || parsed?.verificationUri || parsed?.verificationUrl || "");
+  const candidateCode = String(parsed?.deviceCode || parsed?.userCode || "");
+  const signInUrl = (urlMatch?.[0] || candidateUrl.match(/^https?:\/\/(?:aka\.ms|microsoft\.com)\/devicelogin\b[^\s<>"']*/i)?.[0])?.replace(/[),.;]+$/, "");
+  const deviceCode = /^[A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?$|^[A-Z0-9]{6,12}$/i.test(candidateCode) ? candidateCode : codeMatch?.[1];
+  return signInUrl && deviceCode ? { signInUrl, deviceCode } : {};
 }
 
 function targetState(): { state: string; message: string; paths?: Paths; target?: Target } {
@@ -1038,14 +1058,32 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
   switch (ctx.verb) {
     case "login": {
       if (args.length) return { error: "Usage: login." };
-      const started = loginStart();
-      return started.error ? { error: started.error } : { result: JSON.stringify({ state: started.state, jobId: started.jobId, message: "Complete Microsoft sign-in in the Teams Client view or browser; sign-in codes stay in the view." }) };
+      const started = loginStart("deviceCode");
+      if (started.error) return { error: started.error };
+      const current = loginPoll(started.jobId);
+      if (current.error) return { error: current.error };
+      const signInUrl = current.signInUrl;
+      const deviceCode = current.deviceCode;
+      return { result: JSON.stringify({
+        state: String(current.state || started.state || "login-in-progress"),
+        jobId: current.jobId || started.jobId,
+        signInUrl,
+        deviceCode,
+        message: signInUrl && deviceCode ? `Open ${signInUrl} and enter code ${deviceCode}.` : "Microsoft sign-in started. Poll login-status for the sign-in URL and device code.",
+      }) };
     }
     case "login-status": {
       if (args.length) return { error: "Usage: login-status." };
       if (!activeLoginJobId) return { result: JSON.stringify({ state: statusView().state, done: true }) };
       const current = loginPoll(activeLoginJobId);
-      return current.error ? { error: current.error } : { result: JSON.stringify(current) };
+      return current.error ? { error: current.error } : { result: JSON.stringify({
+        done: current.done === true,
+        state: String(current.state || "login-in-progress"),
+        jobId: current.jobId || activeLoginJobId,
+        signInUrl: current.signInUrl,
+        deviceCode: current.deviceCode,
+        message: current.signInUrl && current.deviceCode ? `Open ${current.signInUrl} and enter code ${current.deviceCode}.` : current.message,
+      }) };
     }
     case "accounts": return agentAccounts();
     case "use": return args.length === 1 ? useAccount(args[0]) : { error: "Usage: use <account-id>." };
@@ -1059,7 +1097,7 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
   }
 }
 
-function loginStart(): any {
+function loginStart(authType: LoginAuthType = "browser"): any {
   if (activeLoginJobId && loginJobs[activeLoginJobId]) {
     return { jobId: activeLoginJobId, state: "login-in-progress", message: "Microsoft sign-in is already running. Check its status instead of starting another login." };
   }
@@ -1068,16 +1106,16 @@ function loginStart(): any {
   const protectedState = protectStorage(p);
   if (protectedState.error) return { error: protectedState.message || lifecycleMessage("install-failed") };
   if (!host.fs.fileExists(p.binary)) {
-    const installed = installM365();
+    const installed = installM365(authType);
     return installed.jobId
       ? { jobId: installed.jobId, state: installed.state, message: installed.message }
       : { error: lifecycleMessage(installed.state, installed.message), state: installed.state };
   }
   const target = targetState();
   if (target.state !== "ready" || !target.paths) return { error: lifecycleMessage(target.state, target.message) };
-  const started = startBrowserLogin(target.paths, target.target!);
+  const started = startBrowserLogin(target.paths, target.target!, authType);
   if (!started.jobId) return { error: started.error || "m365 browser sign-in did not start.", state: "install-failed" };
-  return { jobId: started.jobId, state: "login-in-progress", message: "Complete Microsoft work or school sign-in in the browser, then check sign-in status." };
+  return { jobId: started.jobId, state: "login-in-progress", message: "Complete Microsoft work or school sign-in, then check sign-in status." };
 }
 
 function loginPoll(jobId: string): any {
@@ -1086,16 +1124,18 @@ function loginPoll(jobId: string): any {
   let poll: { done: boolean; code?: number; stdout?: string; stderr?: string; error?: string };
   if (login.stage === "browser" && login.launchComplete) {
     const current = statusView();
+    const artifacts = deviceSignInArtifacts(login);
     if (current.state === "logged-in") {
       const secured = protectCacheFiles(login.paths, true);
       if (secured.error) return finishLoginJob(jobId, "install-failed", secured.message || lifecycleMessage("install-failed"));
-      return finishLoginJob(jobId, "logged-in");
+      return { ...finishLoginJob(jobId, "logged-in"), ...artifacts };
     }
-    return { done: false, jobId, state: "login-in-progress", message: "The browser launch completed. Finish sign-in in the browser, then check status again." };
+    return { done: false, jobId, state: "login-in-progress", message: "Finish sign-in in the browser or device flow, then check status again.", ...artifacts };
   }
   try { poll = host.exec.poll(jobId); }
   catch { return { error: "Could not read the Microsoft sign-in job." }; }
-  if (!poll.done) return { done: false, jobId, state: "login-in-progress", message: login.stage === "browser" ? "Complete the sign-in in the browser, then check status again." : "The pinned m365 package setup is still running." };
+  const artifacts = deviceSignInArtifacts(login);
+  if (!poll.done) return { done: false, jobId, state: "login-in-progress", message: login.stage === "browser" ? "Complete the sign-in, then check status again." : "The pinned m365 package setup is still running.", ...artifacts };
   try { host.exec.close(jobId); } catch { }
   if (poll.error || poll.code !== 0) {
     const reason = `${poll.error || ""}\n${poll.stderr || ""}\n${poll.stdout || ""}`;
@@ -1110,7 +1150,7 @@ function loginPoll(jobId: string): any {
     const install = startLoginProcess(login.paths, login.target, "install", [
       "install", nativePath(packed.path), "--prefix", nativePath(login.paths.runtime),
       "--ignore-scripts", "--no-audit", "--no-fund", "--save-exact",
-    ], packed.path);
+    ], packed.path, login.authType);
     if (!install.jobId) {
       try { host.fs.removeFile(packed.path); } catch { }
       return { done: true, state: "install-failed", error: install.error || lifecycleMessage("install-failed") };
@@ -1127,16 +1167,16 @@ function loginPoll(jobId: string): any {
     }
     delete loginJobs[jobId];
     if (activeLoginJobId === jobId) activeLoginJobId = null;
-    const browser = startBrowserLogin(login.paths, login.target);
+    const browser = startBrowserLogin(login.paths, login.target, login.authType);
     if (!browser.jobId) return { done: true, state: "install-failed", error: browser.error || "m365 browser sign-in did not start." };
     return { done: false, jobId: browser.jobId, state: "login-in-progress", message: "The verified runtime is ready. Complete Microsoft work or school sign-in in the browser." };
   }
   login.launchComplete = true;
   const current = statusView();
-  if (current.state !== "logged-in") return { done: false, jobId, state: "login-in-progress", message: "The browser launch completed. Finish sign-in in the browser, then check status again." };
+  if (current.state !== "logged-in") return { done: false, jobId, state: "login-in-progress", message: "Finish sign-in in the browser or device flow, then check status again.", ...artifacts };
   const secured = protectCacheFiles(login.paths, true);
   if (secured.error) return finishLoginJob(jobId, "install-failed", secured.message || lifecycleMessage("install-failed"));
-  return finishLoginJob(jobId, "logged-in");
+  return { ...finishLoginJob(jobId, "logged-in"), ...artifacts };
 }
 
 function viewCall(method: string, args: any): unknown {

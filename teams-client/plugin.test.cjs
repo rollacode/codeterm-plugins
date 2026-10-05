@@ -56,7 +56,7 @@ function mockHost(options = {}) {
   function resultFor(opts) {
     const args = Array.isArray(opts.args) ? opts.args.map(String) : [];
     const bin = normalize(opts.bin || "").split("/").pop();
-    const record = { bin, args, env: { ...(opts.env || {}) }, detach: !!opts.detach, timeoutMs: opts.timeoutMs };
+    const record = { bin, args, env: { ...(opts.env || {}) }, detach: !!opts.detach, timeoutMs: opts.timeoutMs, logFile: opts.logFile };
     calls.push(record);
     if (args[0] === "-p") return options.nodeUnavailable
       ? { code: 1, stdout: "", stderr: "Node.js missing" }
@@ -156,7 +156,9 @@ function mockHost(options = {}) {
   }
   exec.start = (opts) => {
     const id = `job-${++nextJob}`;
-    jobs.set(id, { ...resultFor(opts), done: true });
+    const result = resultFor(opts);
+    if (opts.logFile) files.set(normalize(opts.logFile), options.loginOutput || "To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABCD-EFGH to authenticate.");
+    jobs.set(id, { ...result, done: true });
     return { jobId: id };
   };
   exec.poll = (id) => jobs.get(id) || { done: true, code: 1, error: "missing job" };
@@ -204,6 +206,10 @@ function mockHost(options = {}) {
       expandHome,
       fileExists: (file) => files.has(normalize(file)),
       readFile: (file) => deniedFiles.has(expandHome(file)) ? null : (files.get(normalize(file)) || null),
+      readFileTail: (file, maxBytes) => {
+        const value = files.get(normalize(file));
+        return typeof value === "string" ? value.slice(-maxBytes) : null;
+      },
       readJson: (file) => {
         const body = files.get(normalize(file));
         if (body === undefined) return null;
@@ -409,15 +415,36 @@ test("login-status keeps the detached browser job pending and completes after ac
   try {
     const started = command("login");
     const login = JSON.parse(started.result);
+    assert.equal(login.signInUrl, "https://microsoft.com/devicelogin");
+    assert.equal(login.deviceCode, "ABCD-EFGH");
+    assert.match(login.message, /ABCD-EFGH/);
     const pending = JSON.parse(command("login-status").result);
     assert.equal(pending.done, false);
     assert.equal(pending.jobId, login.jobId);
     assert.equal(env.calls.filter((call) => call.args[0] === "login").length, 1, "status polling does not start a second login listener");
+    assert.deepEqual(env.calls.find((call) => call.args[0] === "login").args.slice(0, 7), ["login", "--authType", "deviceCode", "--appId", "1fec8e78-bce4-4aaf-ab1b-5451cc387264", "--output", "json"]);
     env.setCurrentName("account-a");
     const complete = JSON.parse(command("login-status").result);
     assert.equal(complete.done, true);
     assert.equal(complete.state, "logged-in");
+    assert.equal(complete.signInUrl, "https://microsoft.com/devicelogin");
+    assert.equal(complete.deviceCode, "ABCD-EFGH");
     assert.equal(env.calls.filter((call) => call.args[0] === "login").length, 1);
+    assert.equal(env.files.has(normalize(env.calls.find((call) => call.args[0] === "login").logFile)), false, "sign-in code log is removed after completion");
+  } finally { env.cleanup(); }
+});
+
+test("agent login extracts only the verification URL and user code from JSON output", () => {
+  const env = mockHost({
+    platform: "linux",
+    status: "logged-out",
+    loginOutput: JSON.stringify({ verificationUri: "https://microsoft.com/devicelogin", userCode: "JSON-2345", accessToken: "fixture-secret" }),
+  });
+  try {
+    const result = JSON.parse(command("login").result);
+    assert.equal(result.signInUrl, "https://microsoft.com/devicelogin");
+    assert.equal(result.deviceCode, "JSON-2345");
+    assert.equal(JSON.stringify(result).includes("fixture-secret"), false);
   } finally { env.cleanup(); }
 });
 
@@ -1030,6 +1057,8 @@ test("manifest declares only denied cache files and the required view capabiliti
   assert.equal(manifest.permissions.subprocess.allow.some((bin) => ["open", "xdg-open", "powershell.exe"].includes(bin)), false);
   assert.match(manifest.configHelp, /accounts.*use.*chats.*history.*health.*logout/is);
   assert.match(manifest.configHelp, /agent_commands/i);
+  assert.match(manifest.configHelp, /returned signInUrl and deviceCode/i);
+  assert.match(manifest.configHelp, /tenant administrator/i);
 });
 
 test("probe report records the pinned cache paths, shape, addressability, and D5 decision", () => {

@@ -24,7 +24,7 @@ codeterm plugin get telegram-client
 
 ## Sign in
 
-For guided setup, use the plugin page header's **Configure with AI** button. Enter an API ID and API hash created for your own Telegram application at [my.telegram.org](https://my.telegram.org) in the Telegram Client view, choose an account label, and confirm the device identity. Credentials stay in the view and host secret store; do not paste them into agent chat. Run `codeterm plugin telegram-client login` to start QR login. The QR and `tg://` authorization link stay in the view; scan the QR in Telegram under **Settings → Devices → Link Desktop Device**. Poll `codeterm plugin telegram-client login-status`, then confirm with `health` and `accounts`. The view lists configured accounts and marks the currently selected sender; **Use sender** changes the default account used by agents. If the Telegram account uses two-step verification, the optional password field passes it to the login process through `TG_PASSWORD` and does not store it.
+For guided setup, use the plugin page header's **Configure with AI** button. The agent asks for an API ID and API hash created for your own Telegram application at [my.telegram.org](https://my.telegram.org), then stores them in secret settings with `codeterm plugin config telegram-client --set api_id=<API_ID> --set api_hash=<API_HASH>`. The stored API hash is never returned in command output. Run `codeterm plugin telegram-client login`; the result includes `qrPayload` and `tgLink` so the agent can show a scannable QR and link in chat. Scan it in Telegram under **Settings → Devices → Link Desktop Device**. Poll `codeterm plugin telegram-client login-status`, then confirm with `health` and `accounts`. The Telegram Client view remains an alternative for entering credentials and scanning the QR. The view lists configured accounts and marks the currently selected sender; **Use sender** changes the default account used by agents. If the Telegram account uses two-step verification, the optional password field passes it to the login process through `TG_PASSWORD` and does not store it.
 
 The release binary identifies itself as **Telegram Desktop (Windows)** in Telegram’s Devices list. This is the `gotd/cli` device profile, including on macOS. The plugin does not build a custom binary or inject credentials into build flags. It passes the owner’s API ID and hash to `tg init` or `tg accounts add` through `APP_ID` and `APP_HASH` in `ExecOpts.env`; neither value is an argument.
 
@@ -36,8 +36,8 @@ On macOS, `tg` stores the MTProto session in the login Keychain by default. Exis
 
 | Verb | Behavior |
 | --- | --- |
-| `login` | Start QR login using credentials entered in the view. QR data and authorization link are view-only. |
-| `login-status` | Poll the active login and report completion without returning QR output. |
+| `login` | Start QR login using credentials in the plugin secret store and return the QR payload and `tg://` authorization link. |
+| `login-status` | Poll the active login and return any available QR payload and authorization link with completion state. |
 | `accounts` | List account labels and session presence. |
 | `use <account-id>` | Select a configured account label as the sender. |
 | `chats` | List conversations using immutable numeric IDs such as `id:12345`; display labels are separate fields. |

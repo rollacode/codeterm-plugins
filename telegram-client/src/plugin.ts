@@ -70,6 +70,14 @@ function redact(text: string): string {
   return out;
 }
 
+function telegramLoginArtifacts(text: string): { qrPayload?: string; tgLink?: string } {
+  const safe = redact(String(text || "")).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, " ");
+  const match = safe.match(/tg:\/\/login\?token=[A-Za-z0-9_%=-]+/i);
+  if (!match) return {};
+  const link = match[0].replace(/[),.;]+$/, "");
+  return { qrPayload: link, tgLink: link };
+}
+
 function safeError(run: RunResult): string {
   if (run.ok) return "";
   const detail = redact(run.error || run.stderr || "tg command failed").trim();
@@ -823,7 +831,7 @@ function loginPoll(jobId: string): any {
       let partial = host.fs.readFileTail(loginLogPaths[jobId], 8192) || "";
       const password = loginPasswords[jobId] || "";
       if (password) partial = partial.split(password).join("[redacted]");
-      return { done: false, output: redact(partial), state: "login-in-progress" };
+      return { done: false, output: redact(partial), state: "login-in-progress", ...telegramLoginArtifacts(partial) };
     }
     try { host.exec.close(jobId); } catch { }
     delete loginLaunchPending[jobId];
@@ -841,16 +849,17 @@ function loginPoll(jobId: string): any {
   output = redact(output);
   const label = loginJobs[jobId];
   const verified = jsonCommand(["--account", label, "whoami"]);
-  if (verified.error) return { done: false, output, state: "login-in-progress", message: "Scan the QR, then refresh progress. Telegram session authorization is still pending." };
+  const artifacts = telegramLoginArtifacts(output);
+  if (verified.error) return { done: false, output, state: "login-in-progress", message: "Scan the QR, then refresh progress. Telegram session authorization is still pending.", ...artifacts };
   const selected = runTg(["accounts", "default", label]);
-  if (!selected.ok) return { done: false, output, state: "login-in-progress", message: safeError(selected) };
+  if (!selected.ok) return { done: false, output, state: "login-in-progress", message: safeError(selected), ...artifacts };
   delete loginJobs[jobId];
   if (activeLoginJobId === jobId) activeLoginJobId = null;
   delete loginPasswords[jobId];
   delete loginLogPaths[jobId];
   try { host.fs.removeFile(childPath(p.root, `login-${label}.log`)); } catch { }
   try { host.secretSet("configured_once", "true"); } catch { }
-  return { done: true, output, state: "logged-in", currentAccount: label };
+  return { done: true, output, state: "logged-in", currentAccount: label, ...artifacts };
 }
 
 function removeFiles(p: Paths): boolean {
@@ -899,7 +908,16 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
     case "login": {
       if (args.length) return { error: "Usage: login. Enter API credentials in the Telegram Client view first." };
       const started = loginStart({}, true);
-      return started.error ? { error: "Telegram login could not start. Check the Telegram Client view for details." } : { result: JSON.stringify({ state: started.state, jobId: started.jobId, message: "Telegram QR and authorization progress are available only in the Telegram Client view." }) };
+      if (started.error) return { error: "Telegram login could not start. Check the Telegram Client view for details." };
+      const current = loginPoll(started.jobId);
+      if (current.error) return { error: "Telegram login status needs attention. Check the Telegram Client view for details." };
+      return { result: JSON.stringify({
+        state: String(current.state || started.state),
+        jobId: started.jobId,
+        qrPayload: current.qrPayload,
+        tgLink: current.tgLink,
+        message: current.qrPayload ? "Scan the QR payload or open the tg:// link from Telegram Settings → Devices → Link Desktop Device." : "Telegram login started. Poll login-status for the QR payload and tg:// link.",
+      }) };
     }
     case "login-status": {
       if (args.length) return { error: "Usage: login-status." };
@@ -910,7 +928,9 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
         done: current.done === true,
         state: String(current.state || "login-in-progress"),
         currentAccount: current.currentAccount,
-        message: current.done ? "Telegram login status is complete." : "Login is still pending; QR progress remains in the Telegram Client view.",
+        qrPayload: current.qrPayload,
+        tgLink: current.tgLink,
+        message: current.done ? "Telegram login status is complete." : current.qrPayload ? "Scan the QR payload or open the tg:// link from Telegram Settings → Devices → Link Desktop Device." : "Login is still pending; poll again for the QR payload and tg:// link.",
       }) };
     }
     case "accounts": return agentAccounts();

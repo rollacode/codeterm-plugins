@@ -1,6 +1,24 @@
 [
   {
     "kind": "section",
+    "title": "Telegram API credentials",
+    "fields": [
+      {
+        "kind": "api_key",
+        "env_var": "api_id",
+        "label": "Telegram API ID",
+        "description": "Secret-store field for the API ID from my.telegram.org API development tools."
+      },
+      {
+        "kind": "api_key",
+        "env_var": "api_hash",
+        "label": "Telegram API hash",
+        "description": "Secret-store field for the API hash from my.telegram.org API development tools."
+      }
+    ]
+  },
+  {
+    "kind": "section",
     "title": "History limits",
     "fields": [
       {
