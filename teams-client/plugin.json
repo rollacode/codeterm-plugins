@@ -4,7 +4,7 @@
   "minCodeterm": "1.0.0",
   "hostApi": 2,
   "displayName": "Teams Client",
-  "description": "Sign in to Microsoft Teams and let agents list chats and read bounded recent history. Sending is disabled in this slice.",
+  "description": "Sign in to Microsoft Teams, inspect bounded chat history, and send only to an explicitly owner-approved chat.",
   "readme": "README.md",
   "iconHint": "💬",
   "iconColor": "#6264A7",
@@ -59,5 +59,5 @@
     }
   ],
   "settingsSchema": "settings.schema.json",
-  "configHelp": "Open the Teams Client view and click Sign in. The pinned m365 CLI installs into the plugin-owned runtime path during that action when Node.js 20+ and npm are available. Sign-in opens the browser for the owner's work/school account. Agent verbs: `accounts`; `use <account-id>`; `chats`; `history <chat-id> [n]`; `health`; `logout`. `send` and `preview` return an explicit refusal because sending is not enabled in this slice. History is capped at 50 messages and 32 KiB. Agent commands require the host grant `agent_commands` after plugin installation."
+  "configHelp": "Open the Teams Client view and click Sign in. The pinned m365 CLI installs into the plugin-owned runtime path during that action when Node.js 20+ and npm are available. Sign-in opens the browser for the owner's work/school account. Agent verbs: `accounts`; `use <account-id>`; `chats`; `history <chat-id> [n]`; `health`; `preview <chat-id> <text>`; `send <chat-id> [--key <idempotency-key>] <text>`; `logout`. Refresh chats, choose an immutable chat id, inspect the preview including sender tenant and exact text, then explicitly approve that one chat in the view before sending is enabled. There is no default send policy. History is capped at 50 messages and 32 KiB. Agent commands require the host grant `agent_commands` after plugin installation."
 }
