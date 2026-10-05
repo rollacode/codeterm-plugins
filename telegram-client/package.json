@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Read-only Telegram account, chat, and bounded history access for CodeTerm.",
+  "description": "Owner-gated Telegram account access, bounded history, resolved previews, and Saved-Messages-only sending for CodeTerm.",
   "devDependencies": {
     "@codeterm/plugin-sdk": "^1.10.22"
   }
