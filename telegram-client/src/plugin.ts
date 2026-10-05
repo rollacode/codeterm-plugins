@@ -24,7 +24,7 @@ function platformName(): string {
 }
 
 function binaryName(): string {
-  return host.path.isWindows() ? "tg.exe" : "tg";
+  return host.path.isWindows ? "tg.exe" : "tg";
 }
 
 function nativePath(value: string): string {
@@ -367,7 +367,7 @@ function resolveDestination(id: string, sender: any): { destination: any } | { e
     return { destination: { id, label: "Saved Messages" } };
   }
   const response = agentChats();
-  if (response.error) return { error: `Could not resolve destination ${id}: ${response.error}` };
+  if ("error" in response) return { error: `Could not resolve destination ${id}: ${response.error}` };
   const chats = parseJson(response.result).chats as any[];
   const match = chats.find((chat: any) => chat.id === id);
   if (!match) return { error: `No Telegram chat has immutable id ${id}. Refresh chats and select an id from that list.` };
@@ -662,7 +662,7 @@ function authFailure(message: string): boolean {
 function storageBackend(): { name: string; note: string } {
   const platform = platformName();
   if (platform === "darwin" || platform === "mac" || platform === "macos") return { name: "macOS login Keychain", note: "tg keeps the session in the login Keychain by default." };
-  if (host.path.isWindows()) return { name: "plugin-owned plaintext file", note: "tg stores the session under this plugin data directory on Windows. This plugin does not inspect or set a Windows ACL, so it makes no ACL protection claim." };
+  if (host.path.isWindows) return { name: "plugin-owned plaintext file", note: "tg stores the session under this plugin data directory on Windows. This plugin does not inspect or set a Windows ACL, so it makes no ACL protection claim." };
   return { name: "plugin-owned plaintext file", note: "On POSIX hosts tg stores the session in a 0600 file under this plugin's private data directory." };
 }
 
@@ -696,7 +696,7 @@ function status(): any {
     return { state: failure.state, message: failure.message, storage, accounts: [], currentAccount: null };
   }
   const platform = platformName();
-  const supportedPlatform = /^(darwin|mac|macos|linux)$/.test(platform) || host.path.isWindows();
+  const supportedPlatform = /^(darwin|mac|macos|linux)$/.test(platform) || host.path.isWindows;
   if (!supportedPlatform) {
     return { state: "unsupported-platform", message: `No pinned tg release is available for ${platformName() || "this operating system"}.`, storage, accounts: [], currentAccount: null };
   }
