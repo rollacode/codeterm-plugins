@@ -14,6 +14,7 @@ type Health = {
   storage?: { name: string; note: string };
   accounts?: Account[];
   currentAccount?: string | null;
+  loginJobId?: string | null;
   resolvedAccount?: unknown;
   sendPolicy?: { configured: boolean; mode?: string | null; senderAccountId?: string; allowedDestinations?: Array<{ id: string; label: string }> };
   sendState?: { state: string; failure?: string | null; message?: string | null; retryAfter?: number | null; destination?: unknown } | null;
@@ -57,6 +58,7 @@ function App() {
     try {
       const result = await window.ct!.invoke("status") as Health;
       setHealth(result);
+      if (result.loginJobId) setJobId(result.loginJobId);
       if (result.currentAccount) setAccountLabel(result.currentAccount);
       setMessage("");
     } catch (error) {
@@ -211,6 +213,7 @@ function App() {
   const previewMatchesInput = !!preview && preview.destination.id === chatId && preview.text === sendText;
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", maxWidth: 720, margin: "0 auto", padding: 20, color: "var(--ct-fg, #eee)", background: "var(--ct-bg, #14141c)" }}>
+      <p>For guided setup, use the “Configure with AI” button in the plugin page header.</p>
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16 }}>
         <div>
           <div style={{ fontSize: 20, fontWeight: 650 }}>Telegram Client</div>
@@ -253,6 +256,17 @@ function App() {
         <p style={{ margin: "0 0 14px", fontSize: 12, lineHeight: 1.5, color: "var(--ct-muted, #9aa)" }}>
           The pinned release identifies this device as Telegram Desktop (Windows) in Telegram’s Devices list. Use your own API ID and hash from my.telegram.org; these replace the release binary’s shared application credentials for this account.
         </p>
+        <details style={{ margin: "0 0 14px", padding: "10px 12px", borderRadius: 6, background: "rgba(0,0,0,.18)", fontSize: 12, lineHeight: 1.55 }}>
+          <summary style={{ cursor: "pointer", fontWeight: 600 }}>Where do I get the API ID and hash?</summary>
+          <ol style={{ margin: "8px 0 0", paddingLeft: 18 }}>
+            <li>Open <a href="https://my.telegram.org" target="_blank" rel="noopener noreferrer">my.telegram.org</a> (copy: <code>https://my.telegram.org</code>) in your browser.</li>
+            <li>Sign in with the phone number of the Telegram account you want to use here; Telegram sends the login code to that account in the Telegram app, not by SMS.</li>
+            <li>Choose <strong>API development tools</strong>.</li>
+            <li>If you have no application yet, fill in the form: <em>App title</em> and <em>Short name</em> can be anything (for example “CodeTerm” and “codeterm”), platform <em>Desktop</em>; URL and description may stay empty. Press <strong>Create application</strong>.</li>
+            <li>Copy <strong>App api_id</strong> (a number) into “Telegram API ID” and <strong>App api_hash</strong> (32 characters) into “Telegram API hash” below.</li>
+          </ol>
+          <p style={{ margin: "8px 0 0", color: "var(--ct-muted, #9aa)" }}>Keep the hash private. It is stored in the host secret store, never in a file or a command line.</p>
+        </details>
         <label style={{ display: "block", marginBottom: 10, fontSize: 12 }}>Telegram API ID
           <input style={inputStyle} value={apiId} inputMode="numeric" autoComplete="off" onChange={(event) => setApiId(event.target.value)} />
         </label>

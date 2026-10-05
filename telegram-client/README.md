@@ -10,7 +10,7 @@ From the `codeterm-plugins` checkout, run:
 node telegram-client/scripts/install-tg.cjs
 ```
 
-The installer maps the current OS and architecture to a v0.11.0 release asset, checks the archive against the pinned SHA-256 digest, extracts only the `tg` executable, and writes it under `~/.local/share/codeterm-plugins/telegram-client/bin/`. It does not build source, invoke a shell installer, or install globally. Unsupported combinations and checksum failures are named and recorded for the plugin health view.
+The installer maps the current OS and architecture to a v0.11.0 release asset, checks the archive against the pinned SHA-256 digest, extracts only the `tg` executable, and writes it under `~/.codeterm/telegram-client/bin/`. It does not build source, invoke a shell installer, or install globally. Unsupported combinations and checksum failures are named and recorded for the plugin health view.
 
 Supported release combinations are macOS amd64/arm64, Linux amd64/arm64/riscv64, and Windows amd64/arm64.
 
@@ -24,7 +24,7 @@ codeterm plugin get telegram-client
 
 ## Sign in
 
-Open the Telegram Client view. Enter an API ID and API hash created for your own Telegram application at [my.telegram.org](https://my.telegram.org), choose an account label, and confirm the device identity. The view starts QR login and shows the `tg` output when you press **Refresh login progress**. Scan the QR in Telegram under **Settings → Devices → Link Desktop Device**. The view lists configured accounts and marks the currently selected sender; **Use sender** changes the default account used by agents. If the Telegram account uses two-step verification, the optional password field passes it to the login process through `TG_PASSWORD` and does not store it.
+For guided setup, use the plugin page header's **Configure with AI** button. Enter an API ID and API hash created for your own Telegram application at [my.telegram.org](https://my.telegram.org) in the Telegram Client view, choose an account label, and confirm the device identity. Credentials stay in the view and host secret store; do not paste them into agent chat. Run `codeterm plugin telegram-client login` to start QR login. The QR and `tg://` authorization link stay in the view; scan the QR in Telegram under **Settings → Devices → Link Desktop Device**. Poll `codeterm plugin telegram-client login-status`, then confirm with `health` and `accounts`. The view lists configured accounts and marks the currently selected sender; **Use sender** changes the default account used by agents. If the Telegram account uses two-step verification, the optional password field passes it to the login process through `TG_PASSWORD` and does not store it.
 
 The release binary identifies itself as **Telegram Desktop (Windows)** in Telegram’s Devices list. This is the `gotd/cli` device profile, including on macOS. The plugin does not build a custom binary or inject credentials into build flags. It passes the owner’s API ID and hash to `tg init` or `tg accounts add` through `APP_ID` and `APP_HASH` in `ExecOpts.env`; neither value is an argument.
 
@@ -36,6 +36,8 @@ On macOS, `tg` stores the MTProto session in the login Keychain by default. Exis
 
 | Verb | Behavior |
 | --- | --- |
+| `login` | Start QR login using credentials entered in the view. QR data and authorization link are view-only. |
+| `login-status` | Poll the active login and report completion without returning QR output. |
 | `accounts` | List account labels and session presence. |
 | `use <account-id>` | Select a configured account label as the sender. |
 | `chats` | List conversations using immutable numeric IDs such as `id:12345`; display labels are separate fields. |
@@ -51,7 +53,7 @@ Message bodies are returned as untrusted text. They are not interpreted as instr
 
 The view starts with sending locked. The owner must preview a destination first. The view displays the exact resolved sender, immutable destination id, destination label, and message text. Only after that review can the owner explicitly enable the initial policy, which permits that sender's Telegram Saved Messages id only. The policy is persisted in `send-policy.json` inside this plugin's own runtime data directory. There is no implicit allow policy.
 
-Before `tg send` starts, the plugin writes a `pending` record to `outbox.json` in the same plugin-owned directory. The record contains an idempotency key, resolved sender and destination, SHA-256 payload hash, state, timestamps, and send count; it does not store message text. A caller may provide `--key`; otherwise the key is derived from the calling session, immutable destination id, and payload, then bound to the resolved sender in the record. Reusing a key already in `sent` returns the saved result without another `tg send` command.
+Before `tg send` starts, the plugin writes a `pending` record to `outbox.json` in the same plugin-owned directory. The record contains an idempotency key, resolved sender and destination, SHA-256 payload hash, state, timestamps, and send count; it does not store message text. A caller may provide `--key`; otherwise the default key uses the nonce from a fresh view preview and is bound to the resolved sender in the record. Reusing a key already in `sent` returns the saved result without another `tg send` command.
 
 The ledger uses `pending`, `sent`, `rate_limited`, `failed`, and `unknown` states. A rate limit records the wait time Telegram returned and refuses an invocation made before its deadline. The owner or agent must invoke send again after the deadline; the plugin does not wait or retry on a timer. A definitive rejection is recorded as `failed` and can be retried only by a later explicit invocation. A lost response or interrupted pending attempt becomes `unknown` and that key is never retried automatically. Inspect Saved Messages before choosing whether to take any manual action.
 

@@ -23,6 +23,7 @@ type Health = {
   tenantId?: string | null;
   upn?: string | null;
   expiresOn?: string | null;
+  loginJobId?: string | null;
 };
 
 type Chat = { id: string; topic?: string | null };
@@ -67,6 +68,7 @@ function App() {
     try {
       const current = await window.ct!.invoke("status") as Health;
       setHealth(current);
+      if (current.loginJobId) setJobId(current.loginJobId);
       const listed = await window.ct!.invoke("accounts") as { accounts?: Account[]; error?: string };
       setAccounts(Array.isArray(listed.accounts) ? listed.accounts : []);
       const chatResult = await window.ct!.invoke("chats") as { result?: string; error?: string };
@@ -109,11 +111,13 @@ function App() {
     try {
       const result = await window.ct!.invoke("loginPoll", { jobId }) as {
         done?: boolean;
+        jobId?: string;
         state?: string;
         error?: string;
         message?: string;
       };
       if (result.done) setJobId("");
+      else if (result.jobId) setJobId(result.jobId);
       if (result.error) setMessage(result.error);
       else setMessage(result.message || "Sign-in is still running. Complete it in the browser, then check again.");
       if (result.done) await refresh();
@@ -225,6 +229,7 @@ function App() {
 
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", maxWidth: 760, margin: "0 auto", padding: 20, color: "var(--ct-fg, #eee)" }}>
+      <p>For guided setup, use the “Configure with AI” button in the plugin page header.</p>
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16 }}>
         <div>
           <div style={{ fontSize: 20, fontWeight: 650 }}>Teams Client</div>
@@ -235,6 +240,11 @@ function App() {
 
       {message && <p role="status" style={{ color: "var(--ct-warn, #e0a030)", whiteSpace: "pre-wrap" }}>{message}</p>}
       {health?.message && <p style={{ color: "var(--ct-muted, #9aa)", lineHeight: 1.5 }}>{health.message}</p>}
+
+      <aside aria-labelledby="what-you-need" style={{ marginTop: 16, padding: 14, border: "1px solid var(--ct-border-default, rgba(255,255,255,.12))", borderRadius: 8 }}>
+        <h2 id="what-you-need" style={{ margin: "0 0 8px", fontSize: 15 }}>What you need</h2>
+        <p style={{ margin: 0, color: "var(--ct-muted, #9aa)", fontSize: 12, lineHeight: 1.55 }}>Use a Microsoft 365 work or school account. Sign-in opens in your browser; your tenant may require an administrator to approve the m365 CLI app's permissions. The agent can check the final connection with health.</p>
+      </aside>
 
       <section style={{ marginTop: 20, padding: 16, border: "1px solid var(--ct-border-default, rgba(255,255,255,.12))", borderRadius: 8 }}>
         <h2 style={{ margin: "0 0 10px", fontSize: 15 }}>Microsoft account</h2>

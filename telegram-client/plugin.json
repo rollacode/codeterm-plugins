@@ -1,7 +1,7 @@
 {
   "id": "telegram-client",
   "version": "1.0.0",
-  "minCodeterm": "1.0.0",
+  "minCodeterm": "1.12.3",
   "hostApi": 2,
   "displayName": "Telegram Client",
   "description": "Sign in to Telegram, inspect bounded history, preview resolved messages, and send only under an owner-approved Saved-Messages-only policy.",
@@ -14,6 +14,7 @@
     "glanceView": true
   },
   "permissions": {
+    "agent_commands": true,
     "secrets": true,
     "subprocess": {
       "allow": [
@@ -23,18 +24,18 @@
     }
   },
   "sessions": {
-    "rootDir": "~/.local/share/codeterm-plugins/telegram-client"
+    "rootDir": "~/.codeterm/telegram-client"
   },
   "credentials": [
     {
       "id": "telegram-config",
-      "file": "~/.local/share/codeterm-plugins/telegram-client/gotd.cli.yaml",
+      "file": "~/.codeterm/telegram-client/gotd.cli.yaml",
       "secret": {
         "app_hash": "app_hash"
       }
     }
   ],
   "settingsSchema": "settings.schema.json",
-  "configHelp": "Install the pinned tg v0.11.0 release into the plugin-owned runtime directory with `node telegram-client/scripts/install-tg.cjs` from the codeterm-plugins checkout. Open the Telegram Client view, enter your own Telegram API ID and API hash from my.telegram.org, and start QR login. Agent verbs: `accounts`; `use <account-id>`; `chats`; `history <chat-id> [n]`; `health`; `logout`; `preview <chat-id> <text>`; `send <chat-id> [--key <idempotency-key>] <text>`. Sending is closed until the owner explicitly enables the Saved-Messages-only policy after reviewing the resolved preview. History is capped at 50 messages and 32 KiB. API credentials are stored with host.secretSet and supplied in process environment, never arguments. The app_hash is also persisted by tg in its YAML config. On macOS sessions use the login Keychain; other platforms store a session file inside this plugin's private runtime directory.",
+  "configHelp": "Guide setup with Configure with AI and the Telegram Client view. Get the API ID and API hash at https://my.telegram.org → API development tools → create an application. Never ask the user to paste credentials into chat or return them in command output; have the user enter them in the view, which stores them in the plugin secret store. Start QR authorization with `codeterm plugin telegram-client login`; the QR progress and tg:// authorization link remain in the view for the user to scan from Telegram Settings → Devices → Link Desktop Device. Poll `codeterm plugin telegram-client login-status`, then confirm with `codeterm plugin telegram-client health` and `codeterm plugin telegram-client accounts`. Do not use command-line config to move secret values through chat. Install the pinned tg v0.11.0 release into the plugin-owned runtime directory with `node telegram-client/scripts/install-tg.cjs` from the codeterm-plugins checkout. Other agent verbs: `use <account-id>`, `chats`, `history <chat-id> [n]`, `logout`, `preview <chat-id> <text>`, and `send <chat-id> [--key <idempotency-key>] <text>`. Sending is closed until the owner explicitly enables the Saved-Messages-only policy after reviewing the resolved preview. History is capped at 50 messages and 32 KiB. API credentials are supplied in process environment, never arguments. The app_hash is persisted by tg in its YAML config. On macOS sessions use the login Keychain; other platforms store a session file inside this plugin private runtime directory.",
   "iconSvg": "<svg viewBox=\"0 0 24 24\" fill=\"currentColor\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M21.9 2.6 18.6 21c-.2 1.3-.9 1.6-1.9 1l-5.3-3.9-2.6 2.5c-.3.3-.6.6-1.2.6l.4-5.4 9.8-8.9c.4-.4-.1-.6-.6-.2L5.1 14.2.1 12.6c-1.1-.4-1.1-1.1.2-1.6L20 3.4c.9-.3 1.7.2 1.9-.8z\"/></svg>"
 }
