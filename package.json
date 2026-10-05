@@ -16,8 +16,8 @@
     "test": "npx tsx git/plugin.test.cjs && npx tsx bitwarden/plugin.test.cjs && npx tsx lmstudio/plugin.test.cjs && npx tsx chat-preprocessor/plugin.test.cjs && npx tsx transcriber/plugin.test.cjs"
   },
   "devDependencies": {
-    "@codeterm/chat-engine": "file:../codeterm-canvas/packages/chat-engine",
-    "@codeterm/plugin-sdk": "file:../codeterm-canvas/packages/plugin-sdk",
+    "@codeterm/chat-engine": "file:../codeterm/packages/chat-engine",
+    "@codeterm/plugin-sdk": "file:../codeterm/packages/plugin-sdk",
     "@git-diff-view/react": "^0.1.5",
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.14",
