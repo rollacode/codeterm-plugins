@@ -1119,7 +1119,6 @@ const plugin: PluginModule = {
   __test_logout: logout,
   __test_installM365: installM365,
   __test_agentAccounts: agentAccounts,
-  __test_agentChats: agentChats,
   __test_useAccount: useAccount,
   __test_agentHistory: agentHistory,
   __test_credentials: credentialPublic,
