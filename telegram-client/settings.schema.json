@@ -1,0 +1,26 @@
+[
+  {
+    "kind": "section",
+    "title": "History limits",
+    "fields": [
+      {
+        "kind": "number",
+        "key": "historyCount",
+        "label": "Default messages",
+        "default": 20,
+        "min": 1,
+        "max": 50,
+        "description": "Default maximum number of messages returned by history."
+      },
+      {
+        "kind": "number",
+        "key": "historyMaxBytes",
+        "label": "Maximum output bytes",
+        "default": 32768,
+        "min": 1024,
+        "max": 32768,
+        "description": "Hard upper bound for one history response."
+      }
+    ]
+  }
+]
