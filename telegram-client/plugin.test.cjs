@@ -152,7 +152,7 @@ test("plugin binary filename distinguishes Darwin from Windows", () => {
 
 test("manifest exposes only Telegram capabilities and the helper binary", () => {
   const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
-  assert.deepEqual(manifest.capabilities, { view: true, glanceView: true, onAgentCommand: true });
+  assert.deepEqual(manifest.capabilities, { view: true, glanceView: true });
   assert.equal(manifest.permissions.secrets, true);
   assert.deepEqual(manifest.permissions.subprocess.allow, ["tg", "tg.exe"]);
   assert.match(manifest.configHelp, /accounts.*use.*chats.*history.*health.*logout/is);
