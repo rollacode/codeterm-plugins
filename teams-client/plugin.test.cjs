@@ -1097,6 +1097,7 @@ test("browser sign-in starts a detached m365 job without credentials in argv", (
       assert.equal(normalize(call.env.USERPROFILE), plugin.__test_paths().home);
       assert.equal(call.args.some((arg) => /token|password|secret/i.test(arg)), false);
       assert.match(started.message, /browser/i);
+      assert.equal(plugin.__test_loginPoll(started.jobId).state, "logged-in", "each platform iteration releases its detached login job");
     } finally { env.cleanup(); }
   }
 });
