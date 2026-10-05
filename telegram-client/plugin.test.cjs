@@ -176,7 +176,15 @@ function mockHost(options = {}) {
   };
 }
 
-function approveSavedMessages() {
+function configureLoggedInFixture(env) {
+  const selected = env.accounts.find((account) => account.default);
+  assert.ok(selected && selected.has_session, "fixture must select an account with an established session");
+  writeFileSync(env.config, "app_id: 123\napp_hash: fixture\n", { mode: 0o600 });
+  env.secrets.config_initialized = "true";
+}
+
+function approveSavedMessages(env) {
+  configureLoggedInFixture(env);
   const previewResult = plugin.onAgentCommand({ sessionId: "policy-test", verb: "preview", args: ["id:777", "fixture message"] });
   assert.equal(previewResult.error, undefined, previewResult.error);
   const preview = JSON.parse(previewResult.result);
@@ -286,8 +294,7 @@ test("read and lifecycle verbs dispatch; send stays closed until an explicit pol
     { label: "work", has_session: true, default: false },
   ] });
   try {
-    writeFileSync(env.config, "app_id: 123\n", { mode: 0o600 });
-    env.secrets.config_initialized = "true";
+    configureLoggedInFixture(env);
     const command = (verb, args = []) => plugin.onAgentCommand({ sessionId: "test", verb, args });
     assertOk(JSON.parse(command("accounts").result).accounts.length === 2, "accounts routed");
     assert.equal(command("use", ["work"]).result, JSON.stringify({ currentAccount: "work" }));
@@ -310,6 +317,7 @@ test("payload ledger hash uses SHA-256", () => {
 test("preview exposes the resolved sender and immutable destination without a send or ledger write", () => {
   const env = mockHost();
   try {
+    configureLoggedInFixture(env);
     const result = plugin.onAgentCommand({ sessionId: "preview-test", verb: "preview", args: ["id:4242", "exact", "payload"] });
     assert.equal(result.error, undefined);
     const preview = JSON.parse(result.result);
@@ -330,6 +338,7 @@ test("preview resolves duplicate display names by immutable id and rejects a dis
     { peer: { id: 4243, label: "Alex" }, unread: 0 },
   ] });
   try {
+    configureLoggedInFixture(env);
     const chosen = plugin.onAgentCommand({ sessionId: "preview-test", verb: "preview", args: ["id:4243", "hello"] });
     assert.equal(JSON.parse(chosen.result).destination.id, "id:4243");
     const before = env.calls.length;
@@ -343,6 +352,7 @@ test("preview resolves duplicate display names by immutable id and rejects a dis
 test("no policy means policy-not-set with no attempt record and no send exec", () => {
   const env = mockHost();
   try {
+    configureLoggedInFixture(env);
     const result = plugin.onAgentCommand({ sessionId: "send-test", verb: "send", args: ["id:777", "hello"] });
     assert.match(result.error, /policy-not-set/i);
     assert.equal(existsSync(plugin.__test_paths().outbox), false);
@@ -356,7 +366,7 @@ test("no policy means policy-not-set with no attempt record and no send exec", (
 test("Saved-Messages-only policy refuses other destination ids before exec", () => {
   const env = mockHost();
   try {
-    approveSavedMessages();
+    approveSavedMessages(env);
     const policy = JSON.parse(readFileSync(plugin.__test_paths().policy, "utf8"));
     assert.equal(policy.mode, "saved-messages-only");
     assert.equal(policy.savedMessagesId, "id:777");
@@ -379,6 +389,7 @@ test("login and authorization failures return their named states before creating
 
   const reauth = mockHost({ whoamiError: "not authorized: session revoked" });
   try {
+    configureLoggedInFixture(reauth);
     writeJson(plugin.__test_paths().policy, { approved: true, mode: "saved-messages-only", savedMessagesId: "id:777", senderAccountId: "default", approvedAt: 0 });
     const previewResult = plugin.onAgentCommand({ sessionId: "send-test", verb: "preview", args: ["id:777", "hello"] });
     assert.match(previewResult.error, /^reauth-needed:/i);
@@ -392,7 +403,7 @@ test("login and authorization failures return their named states before creating
 test("definitive Telegram rejection is recorded as failed with upstream-rejected action", () => {
   const env = mockHost({ sendMode: "rejected" });
   try {
-    approveSavedMessages();
+    approveSavedMessages(env);
     const result = plugin.onAgentCommand({ sessionId: "send-test", verb: "send", args: ["id:777", "--key", "rejected-case", "hello"] });
     assert.match(result.error, /^upstream-rejected:/i);
     const ledger = JSON.parse(readFileSync(plugin.__test_paths().outbox, "utf8"));
@@ -412,7 +423,7 @@ test("unknown send outcome is recorded and never automatically retried", () => {
     },
   });
   try {
-    approveSavedMessages();
+    approveSavedMessages(env);
     const args = ["id:777", "--key", "unknown-case", "hello"];
     const first = plugin.onAgentCommand({ sessionId: "send-test", verb: "send", args });
     assert.equal(stateBeforeExec, "pending", "the pending ledger record exists before exec.start issues send");
@@ -434,7 +445,7 @@ test("unknown send outcome is recorded and never automatically retried", () => {
 test("same idempotency key keeps one sent record and returns its recorded result", () => {
   const env = mockHost({ secrets: { api_id: "11223344", api_hash: "0123456789abcdef0123456789abcdef" } });
   try {
-    approveSavedMessages();
+    approveSavedMessages(env);
     const args = ["id:777", "--key", "sent-case", "hello saved messages"];
     const first = plugin.onAgentCommand({ sessionId: "send-test", verb: "send", args });
     const callsAfterFirst = env.calls.length;
@@ -464,7 +475,7 @@ test("same idempotency key keeps one sent record and returns its recorded result
 test("derived idempotency key also prevents a duplicate exec in the same session", () => {
   const env = mockHost();
   try {
-    approveSavedMessages();
+    approveSavedMessages(env);
     const args = ["id:777", "same derived request"];
     const first = plugin.onAgentCommand({ sessionId: "derived-key-test", verb: "send", args });
     const callsAfterFirst = env.calls.length;
@@ -482,7 +493,7 @@ test("rate limiting persists an upstream-derived deadline and retries only on a 
   plugin.__test_setClock(() => clock);
   const env = mockHost({ sendMode: "rate-limited" });
   try {
-    approveSavedMessages();
+    approveSavedMessages(env);
     const args = ["id:777", "--key", "rate-case", "hello"];
     const first = plugin.onAgentCommand({ sessionId: "send-test", verb: "send", args });
     assert.match(first.error, /^rate-limited:/i);
