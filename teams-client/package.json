@@ -1,0 +1,10 @@
+{
+  "name": "@codeterm/plugin-teams-client",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only Microsoft Teams chats and bounded history for CodeTerm.",
+  "devDependencies": {
+    "@codeterm/plugin-sdk": "^1.10.22"
+  }
+}
