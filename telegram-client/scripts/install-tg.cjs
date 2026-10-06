@@ -1,11 +1,9 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const zlib = require("node:zlib");
 
 const VERSION = "0.11.0";
-const ROOT = path.join(os.homedir(), ".local", "share", "codeterm-plugins", "telegram-client");
 const CHECKSUMS = Object.freeze({
   "darwin/amd64": "ace7c122796053662781ce60e736930eb4c25c363c7801407aa3566d15cdcb4a",
   "darwin/arm64": "9e72b09903c69e0a3854dfdac722bd44b99d4f2f5b9721e28bf1fa201f2b62f7",
@@ -97,7 +95,7 @@ function recordRefusal(rootDir, state, message) {
   return { state, message };
 }
 
-function installArchive({ platform, arch, archive, rootDir = ROOT }) {
+function installArchive({ platform, arch, archive, rootDir }) {
   const release = resolveRelease(platform, arch);
   if (release.error) return recordRefusal(rootDir, release.error, release.message);
   if (!verifyArchive(archive, release.sha256)) {
@@ -137,7 +135,7 @@ async function downloadAsset(asset) {
   return data;
 }
 
-async function installPinned({ platform = process.platform, arch = process.arch, rootDir = ROOT, download = downloadAsset } = {}) {
+async function installPinned({ platform = process.platform, arch = process.arch, rootDir, download = downloadAsset } = {}) {
   const release = resolveRelease(platform, arch);
   if (release.error) return recordRefusal(rootDir, release.error, release.message);
   let archive;
@@ -146,8 +144,31 @@ async function installPinned({ platform = process.platform, arch = process.arch,
   return installArchive({ platform, arch, archive, rootDir });
 }
 
+// The runtime root is the host's per-instance plugin data dir: `--root`, or derived
+// from an installed copy at `<data dir>/plugins/telegram-client/scripts/`.
+function resolveRuntimeRoot(argv, scriptDir) {
+  const flag = argv.indexOf("--root");
+  if (flag >= 0) {
+    const value = argv[flag + 1];
+    if (!value || value.startsWith("--")) return { error: "--root needs the plugin runtime directory." };
+    return { root: path.resolve(value) };
+  }
+  const bundle = path.dirname(path.resolve(scriptDir));
+  const plugins = path.dirname(bundle);
+  if (path.basename(bundle) === "telegram-client" && path.basename(plugins) === "plugins") {
+    return { root: path.join(path.dirname(plugins), "telegram-client") };
+  }
+  return { error: "Pass --root <runtimeDir>; `codeterm plugin telegram-client health` reports runtimeDir and the exact installCommand." };
+}
+
 async function main() {
-  const result = await installPinned();
+  const resolved = resolveRuntimeRoot(process.argv.slice(2), __dirname);
+  if (resolved.error) {
+    process.stderr.write(`tg installer: ${resolved.error}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  const result = await installPinned({ rootDir: resolved.root });
   process.stdout.write(`${result.state}: ${result.message || result.binary}\n`);
   if (result.state !== "installed") process.exitCode = 1;
 }
@@ -157,4 +178,4 @@ if (require.main === module) main().catch((error) => {
   process.exitCode = 1;
 });
 
-module.exports = { VERSION, CHECKSUMS, normalizePlatform, resolveRelease, sha256, verifyArchive, extractBinary, installArchive, installPinned };
+module.exports = { VERSION, CHECKSUMS, resolveRuntimeRoot, normalizePlatform, resolveRelease, sha256, verifyArchive, extractBinary, installArchive, installPinned };

@@ -5,6 +5,7 @@ const path = require("node:path");
 const { copyFileSync, mkdtempSync, rmSync, writeFileSync, readFileSync, statSync, existsSync, mkdirSync } = fs;
 const { join } = path;
 const installer = require("./scripts/install-tg.cjs");
+const jsQR = require("jsqr");
 
 globalThis.host = new Proxy({}, { get: () => () => { throw new Error("host called at load time"); } });
 const testBundle = join(__dirname, ".plugin-test.cjs");
@@ -295,7 +296,8 @@ test("manifest exposes only Telegram capabilities and the helper binary", () => 
   assert.match(manifest.configHelp, /accounts.*use.*chats.*history.*health.*logout/is);
   assert.match(manifest.configHelp, /printf.*--secret api_id.*printf.*--secret api_hash/is);
   assert.doesNotMatch(manifest.configHelp, /--set\s+api_(?:id|hash)/i);
-  assert.match(manifest.configHelp, /returned qrPayload.*returned tgLink/i);
+  assert.match(manifest.configHelp, /`qrSvg`.*`tgLink`.*login-status/is);
+  assert.match(manifest.configHelp, /`installCommand`.*`runtimeDir`/is);
   assert.equal(manifest.configHelp.includes("0123456789abcdef"), false);
   const settings = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));
   const fields = settings.flatMap((section) => section.fields || []);
@@ -711,17 +713,29 @@ test("agent login returns the QR payload and tg link without returning the store
     const login = JSON.parse(started.result);
     assert.equal(login.qrPayload, "tg://login?token=fixture-qrauth-token");
     assert.equal(login.tgLink, login.qrPayload);
+    assert.match(login.qrSvg, /^<svg [^>]*xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
+    assert.equal(decodeQrSvg(login.qrSvg), login.tgLink, "qrSvg decodes to the tg link");
     const status = plugin.onAgentCommand({ sessionId: "agent-login", verb: "login-status", args: [] });
     assert.equal(status.error, undefined);
     assert.doesNotMatch(status.result, new RegExp(apiHash));
     assert.equal(JSON.parse(status.result).state, "login-in-progress");
     assert.equal(JSON.parse(status.result).qrPayload, login.qrPayload);
+    assert.equal(decodeQrSvg(JSON.parse(status.result).qrSvg), login.tgLink);
     env.finishLogin(login.jobId);
     const complete = plugin.onAgentCommand({ sessionId: "agent-login", verb: "login-status", args: [] });
     assert.equal(JSON.parse(complete.result).state, "logged-in");
     assert.doesNotMatch(complete.result, new RegExp(apiHash));
     assert.ok(env.closedJobs.includes(JSON.parse(started.result).jobId), "completed detached login job is released");
     for (const call of env.calls) for (const arg of call.args) assert.equal(arg.includes(apiHash), false);
+  } finally { env.cleanup(); }
+});
+
+test("agent login without stored credentials names the stdin secret command instead of the view", () => {
+  const env = mockHost();
+  try {
+    const result = plugin.onAgentCommand({ sessionId: "agent-missing", verb: "login", args: [] });
+    assert.match(result.error, /--secret api_id/);
+    assert.doesNotMatch(result.error, /view/i);
   } finally { env.cleanup(); }
 });
 
@@ -748,6 +762,49 @@ test("config stays in the private plugin root at mode 0600 and logout removes co
     assert.equal(env.secrets.api_id, undefined);
     assert.equal(env.secrets.api_hash, undefined);
   } finally { env.cleanup(); }
+});
+
+function decodeQrSvg(svg) {
+  const view = svg.match(/viewBox="0 0 (\d+) (\d+)"/);
+  assert.ok(view, "svg declares a module viewBox");
+  const modules = Number(view[1]);
+  const scale = 4;
+  const size = modules * scale;
+  const pixels = new Uint8ClampedArray(size * size * 4).fill(255);
+  const d = (svg.match(/<path d="([^"]*)"/) || [])[1] || "";
+  for (const run of d.matchAll(/M(\d+) (\d+)h(\d+)v1h-\d+z/g)) {
+    const [x, y, w] = [Number(run[1]), Number(run[2]), Number(run[3])];
+    for (let py = y * scale; py < (y + 1) * scale; py++) {
+      for (let px = x * scale; px < (x + w) * scale; px++) {
+        const i = (py * size + px) * 4;
+        pixels[i] = pixels[i + 1] = pixels[i + 2] = 0;
+      }
+    }
+  }
+  const decoded = jsQR(pixels, size, size);
+  return decoded ? decoded.data : null;
+}
+
+test("health reports the runtime dir and an install command rooted in it when tg is missing", () => {
+  const env = mockHost();
+  try {
+    rmSync(env.binary, { force: true });
+    const health = JSON.parse(plugin.onAgentCommand({ sessionId: "health", verb: "health", args: [] }).result);
+    assert.equal(health.state, "not-installed");
+    assert.equal(health.runtimeDir, plugin.__test_paths().root);
+    assert.ok(health.installCommand.includes(`--root "${health.runtimeDir}"`), health.installCommand);
+    assert.match(health.installCommand, /install-tg\.cjs/);
+  } finally { env.cleanup(); }
+});
+
+test("installer root comes from --root or from an installed plugin bundle, never a fixed home path", () => {
+  const data = path.resolve(os.tmpdir(), "ct-data-fixture");
+  const scripts = path.join(data, "plugins", "telegram-client", "scripts");
+  assert.deepEqual(installer.resolveRuntimeRoot([], scripts), { root: path.join(data, "telegram-client") });
+  const explicit = path.resolve(os.tmpdir(), "explicit-root-fixture");
+  assert.deepEqual(installer.resolveRuntimeRoot(["--root", explicit], scripts), { root: explicit });
+  assert.ok(installer.resolveRuntimeRoot([], path.join(data, "checkout", "telegram-client", "scripts")).error);
+  assert.ok(installer.resolveRuntimeRoot(["--root"], scripts).error);
 });
 
 async function main() {

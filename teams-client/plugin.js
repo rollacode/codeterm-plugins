@@ -314,7 +314,7 @@ function runM365(args) {
   if (!target.paths) return { ok: false, error: target.message, stderr: "" };
   if (target.state !== "ready") return { ok: false, error: target.message, stderr: "" };
   const p = target.paths;
-  if (!host.fs.fileExists(p.binary)) return { ok: false, error: "m365 is not installed. Click Sign in in the Teams Client view to install the pinned CLI.", stderr: "" };
+  if (!host.fs.fileExists(p.binary)) return { ok: false, error: "m365 is not installed. Run `codeterm plugin teams-client login` (or Sign in in the view) to install the pinned CLI.", stderr: "" };
   const secured = protectStorage(p);
   if (secured.error) return { ok: false, error: secured.message || "Could not secure the m365 runtime.", stderr: "" };
   const result = runProcess(nativePath(p.binary), args, envFor(p));
@@ -323,19 +323,19 @@ function runM365(args) {
 function authState(text) {
   const value = String(text || "");
   if (/AADSTS53003|conditional[ -]access|blocked by (?:your )?(?:organization|tenant) policy/i.test(value)) {
-    return { state: "conditional-access-blocked", message: "Your organization's Conditional Access policy blocked this sign-in. Ask your IT administrator which browser sign-in policy applies, then click Sign in again." };
+    return { state: "conditional-access-blocked", message: "Your organization's Conditional Access policy blocked this sign-in. Ask your IT administrator which browser sign-in policy applies, then sign in again." };
   }
   if (/AADSTS50076|AADSTS50079|multi[ -]?factor|\bMFA\b|additional authentication is required/i.test(value)) {
-    return { state: "mfa-required", message: "Complete the MFA step in the Microsoft browser sign-in, then click Sign in again in Teams Client." };
+    return { state: "mfa-required", message: "Complete the MFA step in the Microsoft browser sign-in, then sign in again." };
   }
   if (/AADSTS65001|AADSTS65004|consent_required|consent[^\n]*(?:not granted|withdrawn|revoked|removed)|(?:withdrawn|revoked|removed)[^\n]*consent|admin consent/i.test(value)) {
-    return { state: "consent-not-granted", message: "Microsoft Graph consent is missing or was withdrawn. If your tenant allows user consent, click Sign in again and review the consent prompt; otherwise ask a tenant administrator to approve the m365 app's requested permissions, then click Sign in again." };
+    return { state: "consent-not-granted", message: "Microsoft Graph consent is missing or was withdrawn. If your tenant allows user consent, sign in again and review the consent prompt; otherwise ask a tenant administrator to approve the m365 app's requested permissions, then sign in again." };
   }
   if (/AADSTS50173|refresh token[^\n]*(?:revoked|invalidated)|(?:revoked|invalidated)[^\n]*refresh token/i.test(value)) {
-    return { state: "refresh-token-revoked", message: "The Microsoft refresh token was revoked. Click Sign in again to create a new browser session." };
+    return { state: "refresh-token-revoked", message: "The Microsoft refresh token was revoked. Sign in again to create a new browser session." };
   }
   if (/AADSTS700082|AADSTS700084|login has expired|access token expired|token has expired|expired refresh token/i.test(value)) {
-    return { state: "token-expired", message: "The Microsoft token expired. Click Sign in again to renew the browser session." };
+    return { state: "token-expired", message: "The Microsoft token expired. Sign in again to renew the browser session." };
   }
   if (/can't open(?: the)? default browser|could not open.*browser|failed to (?:open|launch).*browser|browser instance/i.test(value)) {
     return { state: "browser-open-failed", message: "m365 could not open the default browser. Set a system default browser or start CodeTerm in a desktop session, then retry Sign in." };
@@ -344,13 +344,13 @@ function authState(text) {
 }
 function lifecycleMessage(state, detail) {
   const messages = {
-    "not-installed": "Node.js 20 or later with npm is required, or the pinned m365 CLI is not installed. Click Sign in to install it, or install Node.js 20+ and npm first.",
+    "not-installed": "Node.js 20 or later with npm is required, or the pinned m365 CLI is not installed. Run `codeterm plugin teams-client login` (or Sign in in the view) to install it, or install Node.js 20+ and npm first.",
     "unsupported-platform": detail || "This operating system and architecture are not supported by the pinned m365 CLI.",
     "install-failed": detail || "The pinned m365 CLI could not be verified or installed. Check npm access and retry Sign in.",
     "installed-not-configured": "The pinned m365 CLI is ready. Sign in with your work or school Microsoft account in the browser.",
-    "logged-out": "You are signed out. Click Sign in to start a browser sign-in.",
+    "logged-out": "You are signed out. Run `codeterm plugin teams-client login` (or Sign in in the view) to sign in.",
     "logged-in": "Microsoft Teams is connected.",
-    "reauth-needed": "The Microsoft session needs a new sign-in. Click Sign in again to open the browser."
+    "reauth-needed": "The Microsoft session needs a new sign-in. Sign in again with `codeterm plugin teams-client login` (or Sign in in the view)."
   };
   return messages[state] || detail || "Teams Client could not determine its current state.";
 }
@@ -522,7 +522,7 @@ function liveSender() {
   const current = status();
   const reauthStates = ["conditional-access-blocked", "mfa-required", "consent-not-granted", "refresh-token-revoked", "token-expired"];
   if (reauthStates.includes(current.state)) return { error: `reauth-needed: ${current.state}. ${current.message}` };
-  if (current.state === "reauth-needed") return { error: `reauth-needed: session status needs attention. ${current.message} Review the tenant sign-in and click Sign in again.` };
+  if (current.state === "reauth-needed") return { error: `reauth-needed: session status needs attention. ${current.message} Review the tenant sign-in and sign in again.` };
   if (["logged-out", "installed-not-configured"].includes(current.state)) return { error: "not-logged-in: Sign in to Teams Client with the intended work or school account before sending." };
   if (current.state !== "logged-in") return { error: `upstream-rejected: ${current.message} Resolve the Teams Client prerequisite, then review the preview again before sending.` };
   const sender = senderFromFields(current);
@@ -856,9 +856,9 @@ function agentHistory(args) {
 function failureMessage(kind, detail, cause) {
   switch (kind) {
     case "not-logged-in":
-      return "not-logged-in: Open Teams Client, sign in with the intended work or school account, and confirm its tenant before sending.";
+      return "not-logged-in: Sign in with the intended work or school account through `codeterm plugin teams-client login` (or Sign in in the view) and confirm its tenant before sending.";
     case "reauth-needed":
-      return `reauth-needed: ${String(cause || "reauth-needed")}. ${String(detail || "The Microsoft session needs a new sign-in. Click Sign in again and complete the tenant's required authentication step.")}`;
+      return `reauth-needed: ${String(cause || "reauth-needed")}. ${String(detail || "The Microsoft session needs a new sign-in. Sign in again and complete the tenant's required authentication step.")}`;
     case "policy-not-set":
       return "policy-not-set: Review the resolved account, tenant, destination, and exact text in Teams Client, then explicitly approve that single chat before sending.";
     case "destination-not-permitted":
@@ -938,7 +938,7 @@ function runTeamsSend(args, then) {
   if (!target.paths) return then({ ok: false, error: target.message, stderr: "" });
   if (target.state !== "ready") return then({ ok: false, error: target.message, stderr: "" });
   const p = target.paths;
-  if (!host.fs.fileExists(p.binary)) return then({ ok: false, error: "m365 is not installed. Open Teams Client and sign in to install the pinned CLI.", stderr: "" });
+  if (!host.fs.fileExists(p.binary)) return then({ ok: false, error: "m365 is not installed. Run `codeterm plugin teams-client login` (or Sign in in the view) to install the pinned CLI.", stderr: "" });
   const secured = protectStorage(p);
   if (secured.error) return then({ ok: false, error: secured.message || "Could not secure the m365 runtime.", stderr: "" });
   return host.exec.async({ bin: nativePath(p.binary), args, env: envFor(p), timeoutMs: 5e3 }, (result) => {

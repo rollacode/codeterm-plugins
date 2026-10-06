@@ -1,8 +1,11 @@
 import type { GlanceView, PluginModule, ViewNode } from "@codeterm/plugin-sdk";
+import { qrSvg } from "./qr";
 
 const VERSION = "0.11.0";
 const ROOT = "~/.codeterm/telegram-client";
+const BUNDLE = "~/.codeterm/plugins/telegram-client";
 const CONFIG_NAME = "gotd.cli.yaml";
+const SCAN_MESSAGE = "Render qrSvg in chat as a scannable QR and show tgLink as text. Scan it in Telegram Settings → Devices → Link Desktop Device, then poll login-status.";
 const INITIAL_SEND_POLICY_MODE = "saved-messages-only";
 const MAX_COUNT = 50;
 const MAX_BYTES = 32 * 1024;
@@ -70,12 +73,26 @@ function redact(text: string): string {
   return out;
 }
 
-function telegramLoginArtifacts(text: string): { qrPayload?: string; tgLink?: string } {
+function telegramLoginArtifacts(text: string): { qrPayload?: string; tgLink?: string; qrSvg?: string } {
   const safe = redact(String(text || "")).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, " ");
   const match = safe.match(/tg:\/\/login\?token=[A-Za-z0-9_%=-]+/i);
   if (!match) return {};
   const link = match[0].replace(/[),.;]+$/, "");
-  return { qrPayload: link, tgLink: link };
+  let svg: string | undefined;
+  try { svg = qrSvg(link); } catch { svg = undefined; }
+  return { qrPayload: link, tgLink: link, qrSvg: svg };
+}
+
+function installCommand(p: Paths): string {
+  let bundle: string | null = null;
+  try { bundle = host.fs.expandHome(BUNDLE); } catch { bundle = null; }
+  const script = bundle ? childPath(childPath(nativePath(bundle), "scripts"), "install-tg.cjs") : "telegram-client/scripts/install-tg.cjs";
+  return `node "${script}" --root "${p.root}"`;
+}
+
+function notInstalledMessage(p: Paths | null): string {
+  if (!p) return "The host home directory is unavailable.";
+  return `tg is not installed in ${p.root}. Install the pinned release with: ${installCommand(p)}`;
 }
 
 function safeError(run: RunResult): string {
@@ -93,7 +110,7 @@ function options(args: string[], env?: Record<string, string>, extra?: Record<st
 
 function startTg(args: string[], env?: Record<string, string>, extra?: Record<string, unknown>): TgJob {
   const opts = options(args, env, extra);
-  if (!opts) return { error: "tg is not installed. Run node telegram-client/scripts/install-tg.cjs from the plugins checkout." };
+  if (!opts) return { error: notInstalledMessage(paths()) };
   try {
     const started = host.exec.start(opts as any) as TgJob;
     if (!started || (!started.jobId && !started.error)) return { error: "tg start returned no job identifier.", ambiguousStart: true };
@@ -103,7 +120,7 @@ function startTg(args: string[], env?: Record<string, string>, extra?: Record<st
 
 function runTg(args: string[], env?: Record<string, string>): RunResult {
   const opts = options(args, env, { timeoutMs: 4500 });
-  if (!opts) return { ok: false, error: "tg is not installed. Run node telegram-client/scripts/install-tg.cjs from the plugins checkout.", stderr: "" };
+  if (!opts) return { ok: false, error: notInstalledMessage(paths()), stderr: "" };
   const raw = host.exec(JSON.stringify(opts));
   const result = parseJson(raw) as PollResult | null;
   if (!result) return { ok: false, error: "tg returned an unreadable process result.", stderr: "" };
@@ -709,7 +726,7 @@ function status(): any {
   }
   if (failure.state) return { state: "install-error", message: failure.message || "The pinned tg install did not complete.", storage, accounts: [], currentAccount: null };
   if (!host.fs.fileExists(p.binary)) {
-    return { state: "not-installed", message: "Install the pinned tg release with node telegram-client/scripts/install-tg.cjs.", storage, accounts: [], currentAccount: null };
+    return { state: "not-installed", message: notInstalledMessage(p), installCommand: installCommand(p), storage, accounts: [], currentAccount: null };
   }
   const install = host.fs.readJson(p.install) as any;
   if (install && install.version && install.version !== VERSION) {
@@ -723,7 +740,7 @@ function status(): any {
     const wasConfigured = host.secretGet("configured_once") === "true";
     return {
       state: wasConfigured ? "logged-out" : "installed-but-not-configured",
-      message: wasConfigured ? "Signed out. Enter your Telegram API ID and hash to sign in again." : "Enter your own Telegram API ID and hash, then start QR login.",
+      message: wasConfigured ? "Signed out. Store your Telegram API ID and hash again, then start QR login." : "Store your own Telegram API ID and hash (secrets api_id and api_hash), then start QR login.",
       storage, accounts: [], currentAccount: null,
     };
   }
@@ -731,8 +748,8 @@ function status(): any {
   if (listed.error) {
     const state = authFailure(listed.error) ? "reauth-needed" : "logged-out";
     const message = state === "reauth-needed"
-      ? "Telegram needs authorization again. Start QR login in the view."
-      : "Telegram account config could not be read. Re-enter your own API credentials in the view.";
+      ? "Telegram needs authorization again. Start QR login again."
+      : "Telegram account config could not be read. Store your own API credentials again, then start QR login.";
     return { state, message, storage, accounts: [], currentAccount: null };
   }
   const result = jsonCommand(["whoami"]);
@@ -745,9 +762,9 @@ function status(): any {
     const hasSession = active && active.hasSession;
     const state = authFailure(result.error) ? "reauth-needed" : (hasSession ? "logged-in" : "logged-out");
     const message = state === "reauth-needed"
-      ? "The Telegram session expired or was revoked. Start QR login in the view."
+      ? "The Telegram session expired or was revoked. Start QR login again."
       : state === "logged-out"
-        ? "No signed-in Telegram session is selected. Start QR login in the view."
+        ? "No signed-in Telegram session is selected. Start QR login."
         : "A session is present, but Telegram could not be reached. Refresh status when the connection is available.";
     return { state, message, storage, accounts: accountRows, currentAccount: active && active.label, resolvedAccount: null };
   }
@@ -764,7 +781,7 @@ function status(): any {
 function ensureAccount(label: string, apiId: string, apiHash: string): { error?: string } {
   const p = paths();
   if (!p) return { error: "The host home directory is unavailable." };
-  if (!host.fs.fileExists(p.binDir)) return { error: "The plugin runtime directory is missing. Reinstall the pinned tg binary." };
+  if (!host.fs.fileExists(p.binDir)) return { error: notInstalledMessage(p) };
   let configExists = false;
   try { configExists = host.secretGet("config_initialized") === "true"; } catch { configExists = false; }
   if (!configExists) {
@@ -796,13 +813,17 @@ function ensureAccount(label: string, apiId: string, apiHash: string): { error?:
 
 function loginStart(args: any, fromAgent = false): any {
   const p = paths();
-  if (!p || !host.fs.fileExists(p.binary)) return { error: "tg is not installed. Run node telegram-client/scripts/install-tg.cjs from the plugins checkout." };
-  if (activeLoginJobId && loginJobs[activeLoginJobId]) return { jobId: activeLoginJobId, state: "login-in-progress", message: "Telegram login is already running. Open the plugin view to view its QR and progress." };
+  if (!p || !host.fs.fileExists(p.binary)) return { error: notInstalledMessage(p) };
+  if (activeLoginJobId && loginJobs[activeLoginJobId]) return { jobId: activeLoginJobId, state: "login-in-progress", message: "Telegram login is already running. Poll its progress for the QR." };
   const apiId = String(fromAgent ? host.secretGet("api_id") || "" : args.apiId || "").trim();
   const apiHash = String(fromAgent ? host.secretGet("api_hash") || "" : args.apiHash || "").trim();
   const label = String(args.accountLabel || "default").trim();
   const twoFactorPassword = String(args.twoFactorPassword || "");
-  if (!/^[0-9]{1,12}$/.test(apiId) || !/^[A-Fa-f0-9]{32}$/.test(apiHash)) return { error: "Enter your own numeric Telegram API ID and 32-character API hash." };
+  if (!/^[0-9]{1,12}$/.test(apiId) || !/^[A-Fa-f0-9]{32}$/.test(apiHash)) {
+    if (!fromAgent) return { error: "Enter your own numeric Telegram API ID and 32-character API hash." };
+    const stored = apiId || apiHash ? "The stored Telegram API ID or hash is malformed (expected a numeric API ID and a 32-character hex API hash)." : "No Telegram API ID and hash are stored.";
+    return { error: `${stored} Store them from stdin: printf '%s' "<API_ID>" | codeterm plugin config telegram-client --secret api_id, then the same for api_hash.` };
+  }
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(label) || label === "all") return { error: "Account label must use letters, numbers, hyphens, or underscores." };
   if (!fromAgent && (!host.secretSet("api_id", apiId) || !host.secretSet("api_hash", apiHash))) return { error: "Could not store Telegram API credentials in the host secret store." };
   const setup = ensureAccount(label, apiId, apiHash);
@@ -906,31 +927,33 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
   const args = Array.isArray(ctx.args) ? ctx.args : [];
   switch (ctx.verb) {
     case "login": {
-      if (args.length) return { error: "Usage: login. Enter API credentials in the Telegram Client view first." };
+      if (args.length) return { error: "Usage: login. It takes no arguments; store api_id and api_hash with --secret first." };
       const started = loginStart({}, true);
-      if (started.error) return { error: "Telegram login could not start. Check the Telegram Client view for details." };
+      if (started.error) return { error: `Telegram login could not start: ${started.error}` };
       const current = loginPoll(started.jobId);
-      if (current.error) return { error: "Telegram login status needs attention. Check the Telegram Client view for details." };
+      if (current.error) return { error: `Telegram login needs attention: ${current.error}` };
       return { result: JSON.stringify({
         state: String(current.state || started.state),
         jobId: started.jobId,
         qrPayload: current.qrPayload,
         tgLink: current.tgLink,
-        message: current.qrPayload ? "Scan the QR payload or open the tg:// link from Telegram Settings → Devices → Link Desktop Device." : "Telegram login started. Poll login-status for the QR payload and tg:// link.",
+        qrSvg: current.qrSvg,
+        message: current.qrPayload ? SCAN_MESSAGE : "Telegram login started. Poll login-status for the QR and tg:// link.",
       }) };
     }
     case "login-status": {
       if (args.length) return { error: "Usage: login-status." };
       if (!activeLoginJobId) return { result: JSON.stringify({ state: status().state, done: true }) };
       const current = loginPoll(activeLoginJobId);
-      if (current.error) return { error: "Telegram login status needs attention. Check the Telegram Client view for details." };
+      if (current.error) return { error: `Telegram login needs attention: ${current.error}` };
       return { result: JSON.stringify({
         done: current.done === true,
         state: String(current.state || "login-in-progress"),
         currentAccount: current.currentAccount,
         qrPayload: current.qrPayload,
         tgLink: current.tgLink,
-        message: current.done ? "Telegram login status is complete." : current.qrPayload ? "Scan the QR payload or open the tg:// link from Telegram Settings → Devices → Link Desktop Device." : "Login is still pending; poll again for the QR payload and tg:// link.",
+        qrSvg: current.done ? undefined : current.qrSvg,
+        message: current.done ? "Telegram login status is complete." : current.qrPayload ? SCAN_MESSAGE : "Login is still pending; poll again for the QR and tg:// link.",
       }) };
     }
     case "accounts": return agentAccounts();
@@ -940,6 +963,7 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
     case "health": {
       const current = status();
       delete current.resolvedAccount;
+      current.runtimeDir = paths()?.root || null;
       current.sendPolicy = policySummary();
       current.sendState = latestSendState();
       return { result: JSON.stringify(current) };
@@ -978,10 +1002,10 @@ function renderGlance(): GlanceView {
   const nodes: ViewNode[] = [];
   if (!p || !host.fs.fileExists(p.binary)) {
     nodes.push({ kind: "badge", label: "tg not installed", tone: "warn" });
-    nodes.push({ kind: "text", text: "Install the pinned release from the Telegram Client README.", style: { tone: "muted" } });
+    nodes.push({ kind: "text", text: "Use Configure with AI to install the pinned release and sign in.", style: { tone: "muted" } });
   } else if (host.secretGet("config_initialized") !== "true") {
     nodes.push({ kind: "badge", label: "Not signed in", tone: "warn" });
-    nodes.push({ kind: "text", text: "Open Telegram Client to configure your account.", style: { tone: "muted" } });
+    nodes.push({ kind: "text", text: "Use Configure with AI or the Telegram Client view to sign in.", style: { tone: "muted" } });
   } else {
     nodes.push({ kind: "badge", label: "Configured", tone: "ok" });
     nodes.push({ kind: "text", text: storageBackend().name, style: { tone: "muted" } });

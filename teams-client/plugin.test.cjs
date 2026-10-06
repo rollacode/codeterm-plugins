@@ -1061,8 +1061,7 @@ test("manifest declares only denied cache files and the required view capabiliti
   assert.ok(manifest.permissions.subprocess.allow.includes("node"));
   assert.equal(manifest.permissions.subprocess.allow.some((bin) => ["open", "xdg-open", "powershell.exe"].includes(bin)), false);
   assert.match(manifest.configHelp, /accounts.*use.*chats.*history.*health.*logout/is);
-  assert.match(manifest.configHelp, /agent_commands/i);
-  assert.match(manifest.configHelp, /returned signInUrl and deviceCode/i);
+  assert.match(manifest.configHelp, /login-status.*`signInUrl`.*`deviceCode`/is);
   assert.match(manifest.configHelp, /tenant administrator/i);
 });
 

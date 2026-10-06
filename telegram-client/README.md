@@ -4,27 +4,19 @@ Telegram Client connects CodeTerm to the owner’s Telegram account through the 
 
 ## Install the pinned helper
 
-From the `codeterm-plugins` checkout, run:
+The plugin keeps everything in one runtime directory: the host's per-instance plugin data directory, `~/.codeterm/telegram-client` on a production install and `~/.codeterm-dev/telegram-client` (or `~/.codeterm-dev-<name>/telegram-client`) on a dev instance. `codeterm plugin telegram-client health` reports it as `runtimeDir`; while tg is missing it also returns the exact `installCommand`:
 
 ```sh
-node telegram-client/scripts/install-tg.cjs
+node "<data dir>/plugins/telegram-client/scripts/install-tg.cjs" --root "<runtimeDir>"
 ```
 
-The installer maps the current OS and architecture to a v0.11.0 release asset, checks the archive against the pinned SHA-256 digest, extracts only the `tg` executable, and writes it under `~/.codeterm/telegram-client/bin/`. It does not build source, invoke a shell installer, or install globally. Unsupported combinations and checksum failures are named and recorded for the plugin health view.
+Run from an installed plugin bundle, the installer derives the same root without `--root`; from a source checkout, `--root` is required. It maps the current OS and architecture to a v0.11.0 release asset, checks the archive against the pinned SHA-256 digest, extracts only the `tg` executable, and writes it under `<runtimeDir>/bin/`. It does not build source, invoke a shell installer, or install globally. Unsupported combinations and checksum failures are named and recorded for the plugin health view.
 
 Supported release combinations are macOS amd64/arm64, Linux amd64/arm64/riscv64, and Windows amd64/arm64.
 
-After that, the Orchestrator starts CodeTerm dev and confirms its health on port `7686`, then installs and discovers the plugin there:
-
-```sh
-curl -s http://127.0.0.1:7686/api/health
-codeterm plugin install --from-dir /Users/rollacode/Developer/codeterm-plugins/telegram-client
-codeterm plugin get telegram-client
-```
-
 ## Sign in
 
-For guided setup, use the plugin page header's **Configure with AI** button. The agent asks for an API ID and API hash created for your own Telegram application at [my.telegram.org](https://my.telegram.org), then stores each from stdin with `printf '%s' "<API_ID>" | codeterm plugin config telegram-client --secret api_id` and `printf '%s' "<API_HASH>" | codeterm plugin config telegram-client --secret api_hash`. These are secret fields; do not use `--set` for them, and the stored API hash is never returned in command output. Run `codeterm plugin telegram-client login`; the result includes `qrPayload` and `tgLink` so the agent can show a scannable QR and link in chat. Scan it in Telegram under **Settings → Devices → Link Desktop Device**. Poll `codeterm plugin telegram-client login-status`, then confirm with `health` and `accounts`. The Telegram Client view remains an alternative for entering credentials and scanning the QR. The view lists configured accounts and marks the currently selected sender; **Use sender** changes the default account used by agents. If the Telegram account uses two-step verification, the optional password field passes it to the login process through `TG_PASSWORD` and does not store it.
+Use the plugin page header's **Configure with AI** button. The helper agent works in its chat: it installs the pinned helper with the `installCommand` from `health` when needed, asks you in chat for an API ID and API hash created for your own Telegram application at [my.telegram.org](https://my.telegram.org), and stores each from stdin with `printf '%s' "<API_ID>" | codeterm plugin config telegram-client --secret api_id` and `printf '%s' "<API_HASH>" | codeterm plugin config telegram-client --secret api_hash`. These are secret fields; `--set` is not used for them, and the stored API hash is never returned in command output. `codeterm plugin telegram-client login` returns `qrSvg`, a QR image the plugin generates locally from `qrPayload` without any network call, plus `tgLink`; the agent renders the QR in chat and prints the link. Scan it in Telegram under **Settings → Devices → Link Desktop Device**. The agent polls `login-status` (re-rendering a rotated QR) and confirms with `health` and `accounts`. The Telegram Client view remains an alternative for entering credentials and scanning the QR, and is the place to finish a login that needs a two-step verification password: its optional password field passes the password to the login process through `TG_PASSWORD` without storing it. The view lists configured accounts and marks the currently selected sender; **Use sender** changes the default account used by agents.
 
 The release binary identifies itself as **Telegram Desktop (Windows)** in Telegram’s Devices list. This is the `gotd/cli` device profile, including on macOS. The plugin does not build a custom binary or inject credentials into build flags. It passes the owner’s API ID and hash to `tg init` or `tg accounts add` through `APP_ID` and `APP_HASH` in `ExecOpts.env`; neither value is an argument.
 
@@ -36,8 +28,8 @@ On macOS, `tg` stores the MTProto session in the login Keychain by default. Exis
 
 | Verb | Behavior |
 | --- | --- |
-| `login` | Start QR login using credentials in the plugin secret store and return the QR payload and `tg://` authorization link. |
-| `login-status` | Poll the active login and return any available QR payload and authorization link with completion state. |
+| `login` | Start QR login using credentials in the plugin secret store and return `qrSvg`, `qrPayload`, and the `tg://` authorization link. |
+| `login-status` | Poll the active login and return any available `qrSvg`, QR payload, and authorization link with completion state. |
 | `accounts` | List account labels and session presence. |
 | `use <account-id>` | Select a configured account label as the sender. |
 | `chats` | List conversations using immutable numeric IDs such as `id:12345`; display labels are separate fields. |

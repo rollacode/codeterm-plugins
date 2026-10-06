@@ -48,6 +48,7 @@ async function buildLogic() {
     // and es2020 keep it QuickJS-safe (no node/browser globals, no console).
     format: "cjs",
     platform: "neutral",
+    mainFields: ["module", "main"],
     target: "es2020",
     loader: { ".md": "text" },
     write: false,
