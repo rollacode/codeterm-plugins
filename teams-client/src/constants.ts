@@ -32,6 +32,8 @@ export const TIMEOUTS = {
   refresh: 60_000,
   chats: 120_000,
   send: 120_000,
+  sendFile: 300_000,
+  fileProbe: 120_000,
   history: 120_000,
   hash: 120_000,
   download: 600_000,
@@ -43,3 +45,10 @@ export const TIMEOUTS = {
 export const CHAT_CACHE_TTL_MS = 10 * 60 * 1000;
 export const MAX_COUNT = 50;
 export const MAX_BYTES = 32 * 1024;
+export const MAX_FILE_BYTES = 25 * 1024 * 1024;
+export const SEARCH_DEFAULT_LIMIT = 20;
+export const SEARCH_CHAT_MESSAGES = 200;
+export const SEARCH_RECENT_MESSAGES = 50;
+export const SEARCH_MAX_CHATS = 10;
+// Each get-chat re-lists every chat and resolves member names, so a cross-chat scan stops at a time budget.
+export const SEARCH_BUDGET_MS = 90_000;

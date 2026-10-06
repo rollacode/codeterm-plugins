@@ -233,3 +233,103 @@ export function normalizeArch(value: string): string {
   if (arch === "arm64" || arch === "aarch64") return "arm64";
   return arch;
 }
+
+export type FileProbe =
+  | { state: "file"; size: number; link: boolean; sha256: string | null }
+  | { state: "directory" | "missing" | "denied" | "unreadable" };
+
+// The probe prints only ASCII key=value lines: never the path (the console code page would mangle it) and never contents.
+export function parseFileProbe(stdout: string): FileProbe {
+  const fields: Record<string, string> = {};
+  for (const line of String(stdout || "").split(/\r?\n/)) {
+    const match = line.trim().match(/^([a-z0-9]+)=(.*)$/);
+    if (match) fields[match[1]] = match[2].trim();
+  }
+  if (fields.kind === "dir") return { state: "directory" };
+  if (fields.error) {
+    if (/ItemNotFound|FileNotFound|DirectoryNotFound|PathNotFound/i.test(fields.error)) return { state: "missing" };
+    if (/UnauthorizedAccess|Security/i.test(fields.error)) return { state: "denied" };
+    return { state: "unreadable" };
+  }
+  const size = /^[0-9]{1,15}$/.test(fields.size || "") ? Number(fields.size) : NaN;
+  if (!Number.isFinite(size)) return { state: "unreadable" };
+  const sha256 = /^[0-9a-f]{64}$/i.test(fields.sha256 || "") ? fields.sha256.toLowerCase() : null;
+  return { state: "file", size, link: /^true$/i.test(fields.link || ""), sha256 };
+}
+
+export function parseByteCount(stdout: string): number | null {
+  const match = String(stdout || "").match(/^\s*([0-9]{1,15})(?:\s|$)/);
+  return match ? Number(match[1]) : null;
+}
+
+export function fileSendFailure(text: string): { kind: SendFailureKind | "file-unreadable"; detail: string; cause?: string } {
+  const value = String(text || "");
+  const auth = classifyAuthFailure(value);
+  if (auth && auth.state === "logged-out") return { kind: "not-logged-in", detail: auth.message };
+  if (auth) return { kind: "reauth-needed", detail: auth.message, cause: auth.state };
+  if (/reading file /i.test(value) && !/sending file /i.test(value)) {
+    return { kind: "file-unreadable", detail: "exo-teams could not read the file, so nothing was uploaded or sent." };
+  }
+  // The chat message is posted only after the OneDrive upload and share link succeed.
+  if (/uploading to OneDrive|creating share link/i.test(value) && !/sending message with file/i.test(value)) {
+    return { kind: "upstream-rejected", detail: `the file could not be uploaded or shared, so no chat message was posted (a partial upload may remain in OneDrive "Microsoft Teams Chat Files").${quoted(value)}` };
+  }
+  return sendFailure(value);
+}
+
+function messageFileNames(message: any): string[] {
+  let files = message?.properties?.files;
+  if (typeof files === "string") files = parseJson<any>(files);
+  return (Array.isArray(files) ? files : [])
+    .map((file: any) => String(file && (file.fileName || file.title) || ""))
+    .filter(Boolean);
+}
+
+export function findSentFileMessageId(messages: any, fileName: string, selfName: string, sentAfterMs: number): string | null {
+  const wanted = fileName.toLowerCase();
+  const rows = (Array.isArray(messages) ? messages : []).filter((message: any) =>
+    message && typeof message.id === "string" && message.id &&
+    messageFileNames(message).some((name) => name.toLowerCase() === wanted) &&
+    (!selfName || !message.imdisplayname || sameName(String(message.imdisplayname), selfName)) &&
+    !(arrivalMs(message) < sentAfterMs));
+  rows.sort((a: any, b: any) => (arrivalMs(b) || 0) - (arrivalMs(a) || 0));
+  return rows.length ? String(rows[0].id) : null;
+}
+
+export type SearchHit = { chatId: string; chat: string; from: string; createdDateTime: string; messageId: string; snippet: string; files?: string[] };
+
+export function searchTerms(query: string): string[] {
+  return normalizeText(String(query || "")).toLowerCase().split(" ").filter(Boolean);
+}
+
+function snippetAround(text: string, terms: string[], radius = 80): string {
+  const flat = normalizeText(text);
+  const lower = flat.toLowerCase();
+  const at = Math.max(0, Math.min(...terms.map((term) => lower.indexOf(term)).filter((index) => index >= 0)));
+  const start = Math.max(0, at - radius);
+  const end = Math.min(flat.length, at + radius * 2);
+  return `${start > 0 ? "…" : ""}${flat.slice(start, end)}${end < flat.length ? "…" : ""}`;
+}
+
+// A hit needs every query word in the message text or an attached file name.
+export function searchMessages(messages: any, terms: string[], chat: { id: string; title: string }): SearchHit[] {
+  if (!terms.length) return [];
+  return (Array.isArray(messages) ? messages : [])
+    .filter((message: any) => message && /^(?:Text|RichText)/i.test(String(message.messagetype || "")) && typeof message.id === "string" && message.id)
+    .flatMap((message: any): SearchHit[] => {
+      const text = plainText(String(message.content || ""));
+      const files = messageFileNames(message);
+      const haystack = `${normalizeText(text)} ${files.join(" ")}`.toLowerCase();
+      if (!terms.every((term) => haystack.includes(term))) return [];
+      const snippet = terms.some((term) => normalizeText(text).toLowerCase().includes(term)) ? snippetAround(text, terms) : normalizeText(text).slice(0, 160);
+      return [{
+        chatId: chat.id,
+        chat: chat.title,
+        from: String(message.imdisplayname || ""),
+        createdDateTime: String(message.originalarrivaltime || message.composetime || ""),
+        messageId: String(message.id),
+        snippet,
+        ...(files.length ? { files } : {}),
+      }];
+    });
+}

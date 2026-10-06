@@ -177,8 +177,24 @@ function mockHost(options = {}) {
     chats: options.chats || RAW_CHATS,
     messages: options.messages || [],
     sendResult: options.sendResult || { code: 0, stdout: JSON.stringify({ ok: true }), stderr: "message sent\n" },
+    sendFileResult: options.sendFileResult || null,
     refresh: options.refresh || { code: 0, stdout: "", stderr: "tokens refreshed\n" },
+    chatMessages: options.chatMessages || null,
+    localFiles: options.localFiles || {},
+    onGetChat: options.onGetChat || null,
   };
+  const local = (file) => state.localFiles[normalize(file)];
+  const digest = (content) => require("node:crypto").createHash("sha256").update(content).digest("hex");
+  function probeWindows(env) {
+    const file = local(env.CT_FILE);
+    if (!file) return { code: 0, stdout: "error=ItemNotFoundException\r\n", stderr: "" };
+    if (file.dir) return { code: 0, stdout: "kind=dir\r\n", stderr: "" };
+    if (file.denied) return { code: 0, stdout: "error=UnauthorizedAccessException\r\n", stderr: "" };
+    const size = file.size ?? Buffer.byteLength(file.content);
+    const lines = [`size=${size}`, `link=${file.link ? "True" : "False"}`];
+    if (size <= Number(env.CT_MAX_BYTES)) lines.push(`sha256=${digest(file.content).toUpperCase()}`);
+    return { code: 0, stdout: `${lines.join("\r\n")}\r\n`, stderr: "" };
+  }
   function expandHome(value) {
     const text = String(value || "");
     if (text.startsWith("~/")) return normalize(`${home}/${text.slice(2)}`);
@@ -208,7 +224,20 @@ function mockHost(options = {}) {
       state.messages.push({ id: "1759744800999", content: args[2], imdisplayname: "Andrey Kovalev", originalarrivaltime: new Date(Date.now()).toISOString(), conv });
       return { code: 0, stdout: JSON.stringify({ ok: true, id: conv }), stderr: `found user: ${args[1]} (person@x.example)\ncreating conversation...\n` };
     }
-    if (args[0] === "get-chat") return { code: 0, stdout: JSON.stringify(state.messages), stderr: "fetching messages from chat: x...\n" };
+    if (args[0] === "send-file") {
+      if (state.sendFileResult) return state.sendFileResult;
+      const file = args[args.indexOf("--file") + 1];
+      const message = args.includes("--message") ? args[args.indexOf("--message") + 1] : "";
+      state.messages.push({ id: "1759744800555", messagetype: "RichText/Html", content: message, imdisplayname: "Andrey Kovalev", originalarrivaltime: new Date(Date.now()).toISOString(), properties: { files: JSON.stringify([{ fileName: normalize(file).split("/").pop(), itemid: "DRIVE-ITEM" }]) } });
+      return { code: 0, stdout: JSON.stringify({ ok: true }), stderr: `uploading ${file} (1 KB)...\nfile sent (1/1)\n` };
+    }
+    if (args[0] === "get-chat") {
+      if (state.onGetChat) state.onGetChat(args[1]);
+      if (state.getChatError) return { code: 1, stdout: "", stderr: state.getChatError };
+      const rows = state.chatMessages ? state.chatMessages[args[1]] : state.messages;
+      if (rows === undefined) return { code: 1, stdout: "", stderr: "Error: fetching messages: GET https://emea.ng.msg.teams.microsoft.com/v1/x returned status 404" };
+      return { code: 0, stdout: JSON.stringify(rows), stderr: "fetching messages from chat: x...\n" };
+    }
     return { code: 1, stdout: "", stderr: `Error: unknown command ${args[0]}` };
   }
   function run(opts) {
@@ -222,6 +251,19 @@ function mockHost(options = {}) {
       if (options.downloadFails) return { code: 22, stdout: "", stderr: "curl: (22) The requested URL returned error: 404" };
       files.set(normalize(args[args.indexOf("-o") + 1]), "go archive bytes");
       return { code: 0, stdout: "", stderr: "" };
+    }
+    if (bin === "powershell.exe" && opts.env && opts.env.CT_FILE !== undefined) return probeWindows(opts.env);
+    if (bin === "realpath") {
+      const file = local(args[0]);
+      return file ? { code: 0, stdout: `${file.real || normalize(args[0])}\n`, stderr: "" } : { code: 1, stdout: "", stderr: `realpath: ${args[0]}: No such file or directory` };
+    }
+    if (bin === "wc") {
+      const file = local(args[1]);
+      if (!file || file.dir) return { code: 1, stdout: "", stderr: `wc: ${args[1]}: read: Is a directory` };
+      return { code: 0, stdout: `  ${file.size ?? Buffer.byteLength(file.content)} ${args[1]}\n`, stderr: "" };
+    }
+    if ((bin === "shasum" || bin === "sha256sum") && local(args[args.length - 1])) {
+      return { code: 0, stdout: `${digest(local(args[args.length - 1]).content)}  file\n`, stderr: "" };
     }
     if (bin === "powershell.exe" || bin === "shasum" || bin === "sha256sum") {
       const target = `${platform}/${platform === "win32" ? "x64" : "arm64"}`;
@@ -583,6 +625,254 @@ test("plugin view shows the sign-in code and labels the typed states as words", 
   assert.equal(setupRows({ state: "logged-in", upn: "a@b.c" })[0].label, "exo-teams runtime");
   const code = renderToStaticMarkup(React.createElement(SignInLink, { url: "https://microsoft.com/devicelogin", code: "KX7PQ2LMN" }));
   assert.ok(code.includes("KX7PQ2LMN") && code.includes("https://microsoft.com/devicelogin"));
+});
+
+test("the file probe output parses to a typed state and never needs the path", () => {
+  const sha = "a".repeat(64);
+  assert.deepEqual(parse.parseFileProbe(`size=2048\r\nlink=False\r\nsha256=${sha.toUpperCase()}\r\n`), { state: "file", size: 2048, link: false, sha256: sha });
+  assert.deepEqual(parse.parseFileProbe("size=99999999999\r\nlink=False\r\n"), { state: "file", size: 99999999999, link: false, sha256: null });
+  assert.equal(parse.parseFileProbe("size=1\r\nlink=True\r\n").link, true);
+  assert.deepEqual(parse.parseFileProbe("kind=dir\r\n"), { state: "directory" });
+  assert.deepEqual(parse.parseFileProbe("error=ItemNotFoundException\r\n"), { state: "missing" });
+  assert.deepEqual(parse.parseFileProbe("error=UnauthorizedAccessException\r\n"), { state: "denied" });
+  assert.deepEqual(parse.parseFileProbe("error=IOException\r\n"), { state: "unreadable" });
+  assert.deepEqual(parse.parseFileProbe(""), { state: "unreadable" });
+  assert.equal(parse.parseByteCount("   1234 /tmp/a b.txt\n"), 1234);
+  assert.equal(parse.parseByteCount("wc: x: Is a directory"), null);
+});
+
+test("file send failures: a read or upload failure posted nothing, the chat post keeps the send taxonomy", () => {
+  assert.equal(parse.fileSendFailure("Error: reading file D:\\x\\a.pdf: open D:\\x\\a.pdf: Access is denied.").kind, "file-unreadable");
+  const upload = parse.fileSendFailure("Error: sending file D:\\x\\a.pdf: uploading to OneDrive: uploading to OneDrive: PUT https://graph.microsoft.com/v1.0/me/drive/root:/x:/content returned status 507");
+  assert.equal(upload.kind, "upstream-rejected");
+  assert.match(upload.detail, /no chat message was posted/);
+  assert.equal(parse.fileSendFailure("Error: sending file D:\\x\\a.pdf: creating share link: POST https://graph.microsoft.com/v1.0/me/drive/items/I/createLink returned status 403").kind, "upstream-rejected");
+  assert.equal(parse.fileSendFailure("Error: sending file D:\\x\\a.pdf: sending message with file: POST https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/x/messages returned status 429").kind, "unknown");
+  assert.equal(parse.fileSendFailure("Error: sending file D:\\x\\a.pdf: sending message with file: POST https://emea.ng.msg.teams.microsoft.com/v1/x returned status 403").kind, "upstream-rejected");
+  assert.equal(parse.fileSendFailure("Error: auto-refresh failed: refreshing graph token: token endpoint returned 400").kind, "reauth-needed");
+});
+
+test("the sent file message id is the newest own message carrying that file name", () => {
+  const files = (name) => ({ files: JSON.stringify([{ fileName: name }]) });
+  const messages = [
+    { id: "1", imdisplayname: "Andrey Kovalev", originalarrivaltime: "2026-10-06T08:00:00.000Z", properties: files("report.pdf") },
+    { id: "2", imdisplayname: "Andrey Kovalev", originalarrivaltime: "2026-10-06T10:00:01.000Z", properties: files("Report.PDF") },
+    { id: "3", imdisplayname: "Alexander Kouznetsov", originalarrivaltime: "2026-10-06T10:00:02.000Z", properties: files("report.pdf") },
+    { id: "4", imdisplayname: "Andrey Kovalev", originalarrivaltime: "2026-10-06T10:00:03.000Z", properties: { files: [{ title: "other.pdf" }] } },
+  ];
+  const after = Date.parse("2026-10-06T09:59:00.000Z");
+  assert.equal(parse.findSentFileMessageId(messages, "report.pdf", "Andrey Kovalev", after), "2");
+  assert.equal(parse.findSentFileMessageId(messages, "other.pdf", "Andrey Kovalev", after), "4");
+  assert.equal(parse.findSentFileMessageId(messages, "missing.pdf", "Andrey Kovalev", after), null);
+});
+
+test("message search needs every word in the text or a file name, skips system rows, and snips around the match", () => {
+  const long = `${"lead ".repeat(60)}the Invoice for <b>October</b> is ready ${"tail ".repeat(60)}`;
+  const messages = [
+    { id: "m1", messagetype: "RichText/Html", content: `<p>${long}</p>`, imdisplayname: "Anna Ivanova", originalarrivaltime: "2026-10-06T10:00:00.000Z" },
+    { id: "m2", messagetype: "Text", content: "invoice later", imdisplayname: "Anna Ivanova", originalarrivaltime: "2026-10-06T11:00:00.000Z" },
+    { id: "m3", messagetype: "RichText/Html", content: "", imdisplayname: "Anna Ivanova", originalarrivaltime: "2026-10-06T12:00:00.000Z", properties: { files: JSON.stringify([{ fileName: "october-invoice.pdf" }]) } },
+    { id: "m4", messagetype: "ThreadActivity/AddMember", content: "invoice october" },
+  ];
+  const hits = parse.searchMessages(messages, parse.searchTerms("  INVOICE   october "), { id: GROUP_CHAT, title: "Finance" });
+  assert.deepEqual(hits.map((hit) => hit.messageId), ["m1", "m3"]);
+  assert.equal(hits[0].chat, "Finance");
+  assert.equal(hits[0].from, "Anna Ivanova");
+  assert.match(hits[0].snippet, /^….*the Invoice for October is ready.*…$/);
+  assert.ok(hits[0].snippet.length < 260);
+  assert.deepEqual(hits[1].files, ["october-invoice.pdf"]);
+  assert.deepEqual(parse.searchMessages(messages, [], { id: "x", title: "x" }), []);
+});
+
+const REPORT = "C:/docs/report.pdf";
+const REPORT_CONTENT = "%PDF-1.7 SECRET-FILE-CONTENT";
+
+test("send-file probes the file, uploads through exo-teams send-file, and returns the message id read back", () => {
+  const env = mockHost({ localFiles: { [REPORT]: { content: REPORT_CONTENT } } });
+  env.install(); env.signIn();
+  const sent = result(command("send-file", [ALEX_CHAT, "C:\\docs\\report.pdf", "--message", "here", "&", "there", "--key", "f1"]));
+  assert.equal(sent.status, "sent");
+  assert.equal(sent.messageId, "1759744800555");
+  assert.deepEqual(sent.file, { name: "report.pdf", bytes: Buffer.byteLength(REPORT_CONTENT) });
+  assert.equal(sent.destination.label, "Alexander Kouznetsov");
+  const upload = env.exoCalls().find((call) => call.args[0] === "send-file");
+  assert.deepEqual(upload.args, ["send-file", ALEX_CHAT, "--file", "C:\\docs\\report.pdf", "--message", "here &amp; there", "--json"]);
+  assert.equal(upload.timeoutMs, C.TIMEOUTS.sendFile);
+  const probe = env.calls.find((call) => call.bin === "powershell.exe" && call.env.CT_FILE);
+  assert.match(probe.raw, /^D:\\Win\\System32\\/);
+  assert.equal(probe.env.CT_FILE, "C:\\docs\\report.pdf");
+  assert.equal(probe.env.CT_MAX_BYTES, String(C.MAX_FILE_BYTES));
+  assert.equal(probe.args.some((arg) => arg.includes("report.pdf")), false, "the path travels in the environment, not in a command string");
+  const outbox = JSON.stringify(JSON.parse(env.files.get(normalize(plugin.__test_paths().outbox))));
+  assert.equal(/report|there|SECRET/.test(outbox), false, "the ledger holds neither the file name, the message, nor contents");
+  for (const call of env.calls) assert.equal(JSON.stringify(call).includes("SECRET-FILE-CONTENT"), false, "file contents never reach a process argument or environment");
+  assert.equal(JSON.stringify(sent).includes("SECRET"), false);
+  const again = result(command("send-file", [ALEX_CHAT, "C:\\docs\\report.pdf", "--message", "here", "&", "there", "--key", "f1"]));
+  assert.equal(again.messageId, "1759744800555");
+  assert.equal(env.exoCalls().filter((call) => call.args[0] === "send-file").length, 1, "a sent key is never resent");
+  env.state.localFiles[REPORT] = { content: `${REPORT_CONTENT} v2` };
+  assert.match(command("send-file", [ALEX_CHAT, "C:\\docs\\report.pdf", "--message", "here", "&", "there", "--key", "f1"]).error, /^invalid-request:.*different chat, text or file/);
+});
+
+test("send-file to a person uses the existing 1:1 chat and refuses a person without one", () => {
+  const env = mockHost({ localFiles: { "C:/docs/my notes.txt": { content: "notes" } } });
+  env.install(); env.signIn();
+  const sent = result(command("send-file", ["Alexander", "Kouznetsov", "C:\\docs\\my", "notes.txt", "--key", "f2"]));
+  assert.equal(sent.destination.id, ALEX_CHAT);
+  assert.deepEqual(env.exoCalls().find((call) => call.args[0] === "send-file").args, ["send-file", ALEX_CHAT, "--file", "C:\\docs\\my notes.txt", "--json"]);
+  assert.match(command("send-file", ["Boris Petrov", "C:\\docs\\my notes.txt", "--key", "f3"]).error, /^invalid-request:.*existing chat/);
+  assert.equal(env.exoCalls().some((call) => call.args[0] === "new-dm"), false);
+});
+
+test("send-file refuses bad paths, oversize, unreadable, directory, link and plugin-data files before any upload", () => {
+  const env = mockHost({ localFiles: {
+    "C:/big.iso": { content: "x", size: C.MAX_FILE_BYTES + 1 },
+    "C:/limit.bin": { content: "y", size: C.MAX_FILE_BYTES },
+    "C:/dir": { dir: true },
+    "C:/locked.txt": { content: "z", denied: true },
+    "C:/link.txt": { content: "l", link: true },
+  } });
+  env.install(); env.signIn();
+  const big = command("send-file", [ALEX_CHAT, "C:\\big.iso"]).error;
+  assert.match(big, /^file-too-large:.*25 MiB/);
+  assert.match(command("send-file", [ALEX_CHAT, "C:\\missing.txt"]).error, /^file-unreadable: No file exists/);
+  assert.match(command("send-file", [ALEX_CHAT, "C:\\dir"]).error, /^file-unreadable:.*directory/);
+  assert.match(command("send-file", [ALEX_CHAT, "C:\\locked.txt"]).error, /^file-unreadable:.*may not read/);
+  assert.match(command("send-file", [ALEX_CHAT, "C:\\link.txt"]).error, /^invalid-request:.*link or junction/);
+  assert.match(command("send-file", [ALEX_CHAT, "docs\\report.pdf"]).error, /^invalid-request:.*absolute path/);
+  assert.match(command("send-file", [ALEX_CHAT]).error, /^invalid-request:/);
+  assert.match(command("send-file", [ALEX_CHAT, "C:\\a.txt", "--key"]).error, /^invalid-request:.*--key/);
+  assert.equal(env.exoCalls().some((call) => call.args[0] === "send-file"), false);
+  assert.equal(result(command("send-file", [ALEX_CHAT, "C:\\limit.bin", "--key", "edge"])).status, "sent", "exactly the limit is allowed");
+  assert.match(result(command("health")).lastSend.state, /sent/);
+});
+
+test("a token file or a link into the plugin data is never sent (macOS probe via realpath, wc and shasum)", () => {
+  const env = mockHost({ platform: "darwin" });
+  env.install(); env.signIn();
+  const token = `${env.root()}/exo-home/.exo-teams/token-skype.jwt`;
+  env.state.localFiles[token] = { content: "eyJsecret" };
+  env.state.localFiles["/tmp/innocent.txt"] = { content: "eyJsecret", real: token };
+  env.state.localFiles["/Users/me/report.pdf"] = { content: REPORT_CONTENT };
+  assert.match(command("send-file", [ALEX_CHAT, token]).error, /^invalid-request:.*data directory/);
+  assert.match(command("send-file", [ALEX_CHAT, "/tmp/innocent.txt"]).error, /^invalid-request:.*data directory/);
+  assert.equal(env.exoCalls().some((call) => call.args[0] === "send-file"), false);
+  const sent = result(command("send-file", ["Alexander Kouznetsov", "/Users/me/report.pdf", "--key", "mac1"]));
+  assert.equal(sent.file.name, "report.pdf");
+  assert.deepEqual(env.calls.filter((call) => ["realpath", "wc", "shasum"].includes(call.bin)).map((call) => call.bin).slice(-4), ["realpath", "realpath", "wc", "shasum"]);
+  assert.equal(env.exoCalls().find((call) => call.args[0] === "send-file").args[3], "/Users/me/report.pdf");
+});
+
+test("send-file outcomes keep the ledger rules: unreadable and upload failures are definite, a lost post stays unknown", () => {
+  let env = mockHost({ localFiles: { [REPORT]: { content: REPORT_CONTENT } }, sendFileResult: { code: 1, stdout: "", stderr: "Error: sending file C:\\docs\\report.pdf: uploading to OneDrive: uploading to OneDrive: PUT https://graph.microsoft.com/v1.0/me/drive/root:/x:/content returned status 403" } });
+  env.install(); env.signIn();
+  assert.match(command("send-file", [ALEX_CHAT, REPORT, "--key", "u1"]).error, /^upstream-rejected:.*no chat message was posted/);
+  assert.equal(JSON.parse(env.files.get(normalize(plugin.__test_paths().outbox))).attempts[0].state, "failed");
+  env = mockHost({ localFiles: { [REPORT]: { content: REPORT_CONTENT } }, sendFileResult: { code: 1, stdout: "", stderr: "Error: reading file C:\\docs\\report.pdf: open C:\\docs\\report.pdf: The process cannot access the file because it is being used by another process." } });
+  env.install(); env.signIn();
+  assert.match(command("send-file", [ALEX_CHAT, REPORT, "--key", "u2"]).error, /^file-unreadable:/);
+  env = mockHost({ localFiles: { [REPORT]: { content: REPORT_CONTENT } }, sendFileResult: { code: 1, stdout: "", stderr: "Error: sending file C:\\docs\\report.pdf: sending message with file: executing POST https://emea.ng.msg.teams.microsoft.com/v1/x: context deadline exceeded" } });
+  env.install(); env.signIn();
+  assert.match(command("send-file", [ALEX_CHAT, REPORT, "--key", "u3"]).error, /^unknown:/);
+  assert.match(command("send-file", [ALEX_CHAT, REPORT, "--key", "u3"]).error, /^unknown:/);
+  assert.equal(env.exoCalls().filter((call) => call.args[0] === "send-file").length, 1);
+  env = mockHost({ localFiles: { [REPORT]: { content: REPORT_CONTENT } } });
+  env.install(); env.signIn();
+  assert.equal(JSON.parse(plugin.viewCall("setSendScope", { mode: "only", chats: [{ id: GROUP_CHAT, title: "Group" }] }).result).mode, "only");
+  assert.match(command("send-file", [ALEX_CHAT, REPORT, "--key", "u4"]).error, /^chat-not-allowed:|Restrict agent sends/);
+  assert.equal(env.exoCalls().some((call) => call.args[0] === "send-file"), false);
+});
+
+const SEARCH_MESSAGES = {
+  [ALEX_CHAT]: [
+    { id: "a1", messagetype: "RichText/Html", content: "<p>the invoice for October is attached</p>", imdisplayname: "Alexander Kouznetsov", originalarrivaltime: "2026-10-06T09:00:00.000Z" },
+    { id: "a2", messagetype: "Text", content: "lunch?", imdisplayname: "Alexander Kouznetsov", originalarrivaltime: "2026-10-06T09:05:00.000Z" },
+  ],
+  [GROUP_CHAT]: [
+    { id: "g1", messagetype: "RichText/Html", content: "Invoice sent to the client", imdisplayname: "Anna Ivanova", originalarrivaltime: "2026-10-05T10:00:00.000Z" },
+    { id: "g2", messagetype: "RichText/Html", content: "new invoice draft", imdisplayname: "Andrey Kovalev", originalarrivaltime: "2026-10-06T12:00:00.000Z" },
+  ],
+  "19:meeting_x@thread.v2": [],
+};
+
+test("search-messages scans recent chats and returns chat, sender, time, snippet and message id, newest first", () => {
+  const env = mockHost({ chatMessages: SEARCH_MESSAGES });
+  env.install(); env.signIn();
+  const found = result(command("search-messages", ["invoice"]));
+  assert.deepEqual(found.hits.map((hit) => [hit.messageId, hit.chat, hit.from]), [
+    ["g2", "Alexander Kouznetsov, Anna Ivanova", "Andrey Kovalev"],
+    ["a1", "Alexander Kouznetsov", "Alexander Kouznetsov"],
+    ["g1", "Alexander Kouznetsov, Anna Ivanova", "Anna Ivanova"],
+  ]);
+  assert.deepEqual(Object.keys(found.hits[1]).sort(), ["chat", "chatId", "createdDateTime", "from", "messageId", "snippet", "untrusted"]);
+  assert.equal(found.hits[1].chatId, ALEX_CHAT);
+  assert.equal(found.hits[1].createdDateTime, "2026-10-06T09:00:00.000Z");
+  assert.equal(found.hits[1].snippet, "the invoice for October is attached");
+  assert.deepEqual(found.scanned, { chats: 3, of: 3, messagesPerChat: C.SEARCH_RECENT_MESSAGES, unreadable: [] });
+  assert.equal(found.complete, true);
+  assert.equal(found.chat, null);
+  for (const call of env.exoCalls().filter((call) => call.args[0] === "get-chat")) assert.deepEqual(call.args.slice(2), ["--json", "--count", String(C.SEARCH_RECENT_MESSAGES)]);
+  const limited = result(command("search-messages", ["invoice", "--limit", "1"]));
+  assert.equal(limited.hits.length, 1);
+  assert.equal(limited.truncated, true);
+  assert.deepEqual(result(command("search-messages", ["invoice", "october"])).hits.map((hit) => hit.messageId), ["a1"]);
+  assert.deepEqual(result(command("search-messages", ["nothing", "here"])).hits, []);
+  assert.equal(result(command("search", ["Alexander", "Kouznetsov"])).match.id, ALEX_CHAT, "search stays the chat lookup");
+});
+
+test("search-messages --chat reads one chat deeper, by id or name, and refuses an ambiguous or unknown chat", () => {
+  const env = mockHost({ chatMessages: SEARCH_MESSAGES });
+  env.install(); env.signIn();
+  const byName = result(command("search-messages", ["invoice", "--chat", "Alexander Kouznetsov"]));
+  assert.deepEqual(byName.chat, { id: ALEX_CHAT, title: "Alexander Kouznetsov" });
+  assert.deepEqual(byName.hits.map((hit) => hit.messageId), ["a1"]);
+  assert.equal(byName.scanned.messagesPerChat, C.SEARCH_CHAT_MESSAGES);
+  const reads = env.exoCalls().filter((call) => call.args[0] === "get-chat");
+  assert.deepEqual(reads.map((call) => call.args[1]), [ALEX_CHAT]);
+  assert.equal(reads[0].args.at(-1), String(C.SEARCH_CHAT_MESSAGES));
+  assert.deepEqual(result(command("search-messages", ["invoice", "--chat", GROUP_CHAT])).hits.map((hit) => hit.messageId), ["g2", "g1"]);
+  assert.match(command("search-messages", ["invoice", "--chat", "Nobody"]).error, /^chat-not-found:/);
+  assert.match(command("search-messages", ["invoice", "--chat", "19:nope@thread.v2"]).error, /^chat-not-found:/);
+  assert.match(command("search-messages", ["x"]).error, /^invalid-request:/);
+  assert.match(command("search-messages", ["invoice", "--limit", "99"]).error, /^invalid-request:/);
+  assert.match(command("search-messages", ["invoice", "--chat"]).error, /^invalid-request:/);
+  const twins = mockHost({ chatMessages: SEARCH_MESSAGES, chats: RAW_CHATS.concat([{ id: "19:alex2@unq.gbl.spaces", isOneOnOne: true, members: [{ friendlyName: "Andrey Kovalev" }, { friendlyName: "Alexander Petrov" }] }]) });
+  twins.install(); twins.signIn();
+  assert.match(command("search-messages", ["invoice", "--chat", "Alexander"]).error, /^invalid-request: Several chats match/);
+  assert.equal(twins.exoCalls().some((call) => call.args[0] === "get-chat"), false, "an ambiguous chat is never guessed");
+});
+
+test("search-messages stops at its time budget, reports unreadable chats, and surfaces an expired session", () => {
+  let clock = Date.parse("2026-10-06T12:00:00.000Z");
+  const env = mockHost({ chatMessages: { [ALEX_CHAT]: SEARCH_MESSAGES[ALEX_CHAT] }, onGetChat: () => { clock += C.SEARCH_BUDGET_MS / 2 + 1; } });
+  env.install(); env.signIn();
+  plugin.__test_setClock(() => clock);
+  try {
+    const partial = result(command("search-messages", ["invoice"]));
+    assert.equal(partial.scanned.chats, 2);
+    assert.equal(partial.complete, false);
+    assert.deepEqual(partial.scanned.unreadable, [GROUP_CHAT]);
+    assert.deepEqual(partial.hits.map((hit) => hit.messageId), ["a1"]);
+    assert.match(partial.note, /2 most recently active of 3 chats/);
+  } finally { plugin.__test_setClock(null); }
+  const none = mockHost({ chatMessages: {} });
+  none.install(); none.signIn();
+  assert.match(command("search-messages", ["invoice"]).error, /^upstream-rejected:/);
+  const expired = mockHost({ chatMessages: SEARCH_MESSAGES });
+  expired.install(); expired.signIn();
+  expired.state.getChatError = 'Error: auto-refresh failed: refreshing skype token: token endpoint returned 400: {"error":"invalid_grant","error_description":"AADSTS700082: The refresh token has expired due to inactivity."}';
+  assert.match(command("search-messages", ["invoice"]).error, /^reauth-needed:.*AADSTS700082/);
+});
+
+test("the manifest lets agents discover send-file and search-messages, and allows the unix probe tools", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "plugin.json"), "utf8"));
+  for (const verb of ["send-file <chat-or-person> <absolute path>", "search-messages <query> [--chat <chat>] [--limit N]", "search <name|email>"]) assert.ok(manifest.configHelp.includes(verb), verb);
+  assert.match(manifest.description, /search message text/);
+  assert.match(manifest.description, /files/);
+  for (const bin of ["wc", "realpath"]) assert.ok(manifest.permissions.subprocess.allow.includes(bin), bin);
+  const readme = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
+  assert.match(readme, /send-file/);
+  assert.match(readme, /search-messages/);
 });
 
 for (const [name, fn] of tests) {

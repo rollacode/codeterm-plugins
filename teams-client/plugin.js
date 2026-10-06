@@ -153,6 +153,8 @@ var TIMEOUTS = {
   refresh: 6e4,
   chats: 12e4,
   send: 12e4,
+  sendFile: 3e5,
+  fileProbe: 12e4,
   history: 12e4,
   hash: 12e4,
   download: 6e5,
@@ -163,6 +165,12 @@ var TIMEOUTS = {
 var CHAT_CACHE_TTL_MS = 10 * 60 * 1e3;
 var MAX_COUNT = 50;
 var MAX_BYTES = 32 * 1024;
+var MAX_FILE_BYTES = 25 * 1024 * 1024;
+var SEARCH_DEFAULT_LIMIT = 20;
+var SEARCH_CHAT_MESSAGES = 200;
+var SEARCH_RECENT_MESSAGES = 50;
+var SEARCH_MAX_CHATS = 10;
+var SEARCH_BUDGET_MS = 9e4;
 
 // teams-client/src/parse.ts
 var ANSI = /\u001b\[[0-?]*[ -/]*[@-~]/g;
@@ -332,6 +340,81 @@ function normalizeArch(value) {
   if (arch === "arm64" || arch === "aarch64") return "arm64";
   return arch;
 }
+function parseFileProbe(stdout) {
+  const fields = {};
+  for (const line of String(stdout || "").split(/\r?\n/)) {
+    const match = line.trim().match(/^([a-z0-9]+)=(.*)$/);
+    if (match) fields[match[1]] = match[2].trim();
+  }
+  if (fields.kind === "dir") return { state: "directory" };
+  if (fields.error) {
+    if (/ItemNotFound|FileNotFound|DirectoryNotFound|PathNotFound/i.test(fields.error)) return { state: "missing" };
+    if (/UnauthorizedAccess|Security/i.test(fields.error)) return { state: "denied" };
+    return { state: "unreadable" };
+  }
+  const size = /^[0-9]{1,15}$/.test(fields.size || "") ? Number(fields.size) : NaN;
+  if (!Number.isFinite(size)) return { state: "unreadable" };
+  const sha256 = /^[0-9a-f]{64}$/i.test(fields.sha256 || "") ? fields.sha256.toLowerCase() : null;
+  return { state: "file", size, link: /^true$/i.test(fields.link || ""), sha256 };
+}
+function parseByteCount(stdout) {
+  const match = String(stdout || "").match(/^\s*([0-9]{1,15})(?:\s|$)/);
+  return match ? Number(match[1]) : null;
+}
+function fileSendFailure(text) {
+  const value = String(text || "");
+  const auth = classifyAuthFailure(value);
+  if (auth && auth.state === "logged-out") return { kind: "not-logged-in", detail: auth.message };
+  if (auth) return { kind: "reauth-needed", detail: auth.message, cause: auth.state };
+  if (/reading file /i.test(value) && !/sending file /i.test(value)) {
+    return { kind: "file-unreadable", detail: "exo-teams could not read the file, so nothing was uploaded or sent." };
+  }
+  if (/uploading to OneDrive|creating share link/i.test(value) && !/sending message with file/i.test(value)) {
+    return { kind: "upstream-rejected", detail: `the file could not be uploaded or shared, so no chat message was posted (a partial upload may remain in OneDrive "Microsoft Teams Chat Files").${quoted(value)}` };
+  }
+  return sendFailure(value);
+}
+function messageFileNames(message) {
+  let files = message?.properties?.files;
+  if (typeof files === "string") files = parseJson(files);
+  return (Array.isArray(files) ? files : []).map((file) => String(file && (file.fileName || file.title) || "")).filter(Boolean);
+}
+function findSentFileMessageId(messages, fileName, selfName, sentAfterMs) {
+  const wanted = fileName.toLowerCase();
+  const rows = (Array.isArray(messages) ? messages : []).filter((message) => message && typeof message.id === "string" && message.id && messageFileNames(message).some((name) => name.toLowerCase() === wanted) && (!selfName || !message.imdisplayname || sameName(String(message.imdisplayname), selfName)) && !(arrivalMs(message) < sentAfterMs));
+  rows.sort((a, b) => (arrivalMs(b) || 0) - (arrivalMs(a) || 0));
+  return rows.length ? String(rows[0].id) : null;
+}
+function searchTerms(query) {
+  return normalizeText(String(query || "")).toLowerCase().split(" ").filter(Boolean);
+}
+function snippetAround(text, terms, radius = 80) {
+  const flat = normalizeText(text);
+  const lower = flat.toLowerCase();
+  const at = Math.max(0, Math.min(...terms.map((term) => lower.indexOf(term)).filter((index) => index >= 0)));
+  const start = Math.max(0, at - radius);
+  const end = Math.min(flat.length, at + radius * 2);
+  return `${start > 0 ? "\u2026" : ""}${flat.slice(start, end)}${end < flat.length ? "\u2026" : ""}`;
+}
+function searchMessages(messages, terms, chat) {
+  if (!terms.length) return [];
+  return (Array.isArray(messages) ? messages : []).filter((message) => message && /^(?:Text|RichText)/i.test(String(message.messagetype || "")) && typeof message.id === "string" && message.id).flatMap((message) => {
+    const text = plainText(String(message.content || ""));
+    const files = messageFileNames(message);
+    const haystack = `${normalizeText(text)} ${files.join(" ")}`.toLowerCase();
+    if (!terms.every((term) => haystack.includes(term))) return [];
+    const snippet = terms.some((term) => normalizeText(text).toLowerCase().includes(term)) ? snippetAround(text, terms) : normalizeText(text).slice(0, 160);
+    return [{
+      chatId: chat.id,
+      chat: chat.title,
+      from: String(message.imdisplayname || ""),
+      createdDateTime: String(message.originalarrivaltime || message.composetime || ""),
+      messageId: String(message.id),
+      snippet,
+      ...files.length ? { files } : {}
+    }];
+  });
+}
 
 // teams-client/src/plugin.ts
 var installJobs = {};
@@ -400,9 +483,10 @@ function paths() {
 }
 function toolsFor(platform, systemRoot = "C:/Windows") {
   const sys = (name) => nativePath(`${systemRoot}/System32/${name}`);
-  if (platform === "win32") return { curl: sys("curl.exe"), tar: sys("tar.exe"), hash: [sys("WindowsPowerShell/v1.0/powershell.exe"), "-NoProfile", "-NonInteractive", "-Command", "(Get-FileHash -Algorithm SHA256 -LiteralPath $env:CT_HASH_FILE).Hash"], icacls: sys("icacls.exe"), whoami: sys("whoami.exe"), kill: [sys("taskkill.exe"), "/PID", "{pid}", "/T", "/F"] };
-  if (platform === "darwin") return { curl: "curl", tar: "tar", hash: ["shasum", "-a", "256", "{file}"], icacls: "", whoami: "", kill: ["kill", "{pid}"] };
-  return { curl: "curl", tar: "tar", hash: ["sha256sum", "{file}"], icacls: "", whoami: "", kill: ["kill", "{pid}"] };
+  const powershell = sys("WindowsPowerShell/v1.0/powershell.exe");
+  if (platform === "win32") return { curl: sys("curl.exe"), tar: sys("tar.exe"), hash: [powershell, "-NoProfile", "-NonInteractive", "-Command", "(Get-FileHash -Algorithm SHA256 -LiteralPath $env:CT_HASH_FILE).Hash"], icacls: sys("icacls.exe"), whoami: sys("whoami.exe"), kill: [sys("taskkill.exe"), "/PID", "{pid}", "/T", "/F"], powershell, wc: "", realpath: "" };
+  if (platform === "darwin") return { curl: "curl", tar: "tar", hash: ["shasum", "-a", "256", "{file}"], icacls: "", whoami: "", kill: ["kill", "{pid}"], powershell: "", wc: "wc", realpath: "realpath" };
+  return { curl: "curl", tar: "tar", hash: ["sha256sum", "{file}"], icacls: "", whoami: "", kill: ["kill", "{pid}"], powershell: "", wc: "wc", realpath: "realpath" };
 }
 function resolveTarget(platform, arch, systemRoot) {
   const archive = GO_ARCHIVES[`${platform}/${arch}`];
@@ -844,7 +928,7 @@ function previewCommand(args, origin = "agent") {
     restriction: decision.allow ? null : decision.message
   }) };
 }
-var SEND_FAILURES = ["invalid-request", "not-logged-in", "reauth-needed", "chat-not-found", "chat-not-allowed", "upstream-rejected", "unknown"];
+var SEND_FAILURES = ["invalid-request", "not-logged-in", "reauth-needed", "chat-not-found", "chat-not-allowed", "file-too-large", "file-unreadable", "upstream-rejected", "unknown"];
 function failureMessage(kind, detail, cause) {
   switch (kind) {
     case "invalid-request":
@@ -857,8 +941,12 @@ function failureMessage(kind, detail, cause) {
       return `chat-not-found: No chat of this account has id ${String(detail || "unavailable")}. Look it up with \`chats <name>\` and use an id from that result.`;
     case "chat-not-allowed":
       return String(detail || `chat-not-allowed: The owner's "Restrict agent sends" setting does not include this chat. Ask the owner to add it in the Teams Client view.`);
+    case "file-too-large":
+      return `file-too-large: ${String(detail || "The file is over the limit.")} The limit is ${MAX_FILE_BYTES / (1024 * 1024)} MiB; nothing was uploaded or sent.`;
+    case "file-unreadable":
+      return `file-unreadable: ${String(detail || "The file could not be read.")} Give an absolute path to an existing, readable regular file; nothing was uploaded or sent.`;
     case "upstream-rejected":
-      return `upstream-rejected: ${String(detail || "the Teams chat service refused the operation")}. Correct the cause, then send again only if you still want delivery.`;
+      return `upstream-rejected:${String(detail || "the Teams chat service refused the operation")}. Correct the cause, then send again only if you still want delivery.`;
     case "unknown":
       return `unknown: ${String(detail || "Teams may have accepted this message but confirmation was lost.")} Do not retry this idempotency key and do not report it as delivered; inspect the chat and decide manually.`;
   }
@@ -911,7 +999,7 @@ function parseSendArgs(args, target, usage) {
   if (!text.trim().length) return { error: failureMessage("invalid-request", "Message text must not be empty.") };
   return { target: args[0], text, key };
 }
-function attemptResult(attempt) {
+function attemptResult(attempt, extra = {}) {
   lastSendState = { state: "sent", message: attempt.messageId ? `Teams accepted message ${attempt.messageId}.` : "Teams accepted the message; its id could not be read back.", updatedAt: now() };
   return { result: JSON.stringify({
     status: "sent",
@@ -919,6 +1007,7 @@ function attemptResult(attempt) {
     destination: attempt.destination,
     idempotencyKey: attempt.idempotencyKey,
     messageId: attempt.messageId || null,
+    ...extra,
     ...attempt.messageId ? {} : { messageIdNote: "exo-teams confirmed the send, but the message id was not found when the chat was read back. Check the chat before resending." },
     deliveryGuarantee: "A sent idempotency key is never resent. An unconfirmed send stays unknown. This is not an exactly-once delivery guarantee."
   }) };
@@ -939,26 +1028,31 @@ function persistFailure(p, ledger, attempt, kind, detail, cause) {
   }
   return rememberSendFailure(kind, attempt.failureMessage);
 }
-function exoFailure(p, ledger, attempt, run) {
-  const failure = sendFailure(failureText(run));
-  const kind = failure.kind === "not-logged-in" ? "not-logged-in" : failure.kind;
-  return persistFailure(p, ledger, attempt, kind, failure.detail, failure.cause);
+function exoFailure(p, ledger, attempt, run, classify = sendFailure) {
+  const failure = classify(failureText(run));
+  return persistFailure(p, ledger, attempt, failure.kind, failure.detail, failure.cause);
 }
-function deliver(origin, plan, text, explicitKey) {
-  const matchingPreview = plan.kind === "chat" ? Object.values(previewTokens).reverse().find((token) => token.destination.id === plan.chatId && token.text === text) : null;
+function payloadHash(payload) {
+  return payload.kind === "text" ? sha256Hex(payload.text) : sha256Hex(`file\0${payload.file.name}\0${payload.file.sha256}\0${payload.message}`);
+}
+function fileSummary(payload) {
+  return payload.kind === "file" ? { file: { name: payload.file.name, bytes: payload.file.size } } : {};
+}
+function deliver(origin, plan, payload, explicitKey) {
+  const matchingPreview = plan.kind === "chat" && payload.kind === "text" ? Object.values(previewTokens).reverse().find((token) => token.destination.id === plan.chatId && token.text === payload.text) : null;
   let key = explicitKey || matchingPreview?.previewNonce;
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
   const loaded = loadOutbox(p);
   if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error || "the outbox could not be read");
   const ledger = loaded.ledger;
-  const payloadHash = sha256Hex(text);
+  const hash = payloadHash(payload);
   const destinationKey = plan.kind === "chat" ? plan.chatId : `person:${sha256Hex(personQuery(plan.query).toLowerCase()).slice(0, 24)}`;
   let attempt = key ? ledger.attempts.find((item) => item.idempotencyKey === key) : void 0;
-  if (attempt && (attempt.payloadHash !== payloadHash || (attempt.target || attempt.destination.id) !== destinationKey)) {
-    return sendFailureResult("invalid-request", "This idempotency key is already bound to a different chat or text; choose a new key only for an intentional new send.");
+  if (attempt && (attempt.payloadHash !== hash || (attempt.target || attempt.destination.id) !== destinationKey)) {
+    return sendFailureResult("invalid-request", "This idempotency key is already bound to a different chat, text or file; choose a new key only for an intentional new send.");
   }
-  if (attempt && attempt.state === "sent") return attemptResult(attempt);
+  if (attempt && attempt.state === "sent") return attemptResult(attempt, fileSummary(payload));
   if (attempt && attempt.state === "unknown") return sendFailureResult("unknown");
   if (attempt && attempt.state === "pending") return persistFailure(p, ledger, attempt, "unknown", "a previous invocation ended before its send result was recorded");
   const resolved = liveSender();
@@ -981,7 +1075,9 @@ function deliver(origin, plan, text, explicitKey) {
       return sendFailureResult("invalid-request", `Several chats match "${plan.query}": ${found.candidates.slice(0, 8).map((chat) => `${chat.title} (${chat.chatType}, ${chat.id})`).join("; ")}. Ask the owner which one and send to its id.`);
     }
     if (found.match) destination = { id: found.match.id, label: found.match.title };
-    else {
+    else if (payload.kind === "file") {
+      return sendFailureResult("invalid-request", `No 1:1 chat with "${plan.query}" exists, and a file can only go to an existing chat. Start the chat with send-to <full name> <text> first, or send the file to a chat id.`);
+    } else {
       if (personQuery(plan.query).split(/\s+/).filter(Boolean).length < 2) {
         return sendFailureResult("invalid-request", `No chat with "${plan.query}" exists. To start a new 1:1 chat, give the person's full name.`);
       }
@@ -994,7 +1090,7 @@ function deliver(origin, plan, text, explicitKey) {
   if (!decision.allow) return sendFailureResult("chat-not-allowed", decision.message);
   if (!key) key = sha256Hex(`send\0${now()}\0${++previewSequence}\0${destination.id}`).slice(0, 32);
   if (!attempt) {
-    attempt = { idempotencyKey: key, sender: resolved.sender, target: destinationKey, destination, payloadHash, state: "pending", createdAt: now(), updatedAt: now(), sendCount: 0 };
+    attempt = { idempotencyKey: key, sender: resolved.sender, target: destinationKey, destination, payloadHash: hash, state: "pending", createdAt: now(), updatedAt: now(), sendCount: 0 };
     ledger.attempts.push(attempt);
   }
   attempt.destination = destination;
@@ -1006,10 +1102,15 @@ function deliver(origin, plan, text, explicitKey) {
   delete attempt.failureMessage;
   if (!persistOutbox(p, ledger)) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; Teams was not contacted");
   const sentAfter = now() - 12e4;
-  const body = htmlMessage(text);
   let chatId = destination.id;
-  if (newDm) {
-    const run = runExo(p, ["new-dm", person, body, "--json"], TIMEOUTS.send);
+  if (payload.kind === "file") {
+    const message = payload.message ? ["--message", htmlMessage(payload.message)] : [];
+    const run = runExo(p, ["send-file", chatId, "--file", nativePath(payload.file.path), ...message, "--json"], TIMEOUTS.sendFile);
+    if (!run.ok) return exoFailure(p, ledger, attempt, run, fileSendFailure);
+    const ok = parseJson(run.stdout.trim());
+    if (!ok || ok.ok !== true) return persistFailure(p, ledger, attempt, "unknown", "exo-teams exited cleanly but did not report the file as sent.");
+  } else if (newDm) {
+    const run = runExo(p, ["new-dm", person, htmlMessage(payload.text), "--json"], TIMEOUTS.send);
     if (!run.ok) return exoFailure(p, ledger, attempt, run);
     const created = parseJson(run.stdout.trim());
     const createdId = created && typeof created.id === "string" ? created.id : "";
@@ -1019,7 +1120,7 @@ function deliver(origin, plan, text, explicitKey) {
     attempt.destination = { id: createdId, label: resolvedName };
     memoryChats = null;
   } else {
-    const run = runExo(p, ["send", chatId, body, "--json"], TIMEOUTS.send);
+    const run = runExo(p, ["send", chatId, htmlMessage(payload.text), "--json"], TIMEOUTS.send);
     if (!run.ok) return exoFailure(p, ledger, attempt, run);
     const ok = parseJson(run.stdout.trim());
     if (!ok || ok.ok !== true) return persistFailure(p, ledger, attempt, "unknown", "exo-teams exited cleanly but did not report the send as accepted.");
@@ -1027,21 +1128,201 @@ function deliver(origin, plan, text, explicitKey) {
   attempt.state = "sent";
   attempt.updatedAt = now();
   const read = readMessages(p, chatId, 20);
-  attempt.messageId = "messages" in read ? findSentMessageId(read.messages, text, resolved.sender.user, sentAfter) : null;
+  attempt.messageId = !("messages" in read) ? null : payload.kind === "file" ? findSentFileMessageId(read.messages, payload.file.name, resolved.sender.user, sentAfter) : findSentMessageId(read.messages, payload.text, resolved.sender.user, sentAfter);
   if (!persistOutbox(p, ledger)) return persistFailure(p, ledger, attempt, "unknown", "Teams accepted the message but the sent result could not be recorded.");
-  return attemptResult(attempt);
+  return attemptResult(attempt, fileSummary(payload));
 }
 function sendCommand(origin, args) {
   const parsed = parseSendArgs(args, validChatId, "Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>; chat names are not ids. Use send-to <person> for a person.");
   if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
-  return deliver(origin, { kind: "chat", chatId: parsed.target }, parsed.text, parsed.key);
+  return deliver(origin, { kind: "chat", chatId: parsed.target }, { kind: "text", text: parsed.text }, parsed.key);
 }
 function sendToCommand(args) {
   const separator = args.indexOf("--");
   const rest = separator > 0 ? [args.slice(0, separator).join(" "), ...args.slice(separator + 1)] : args;
   const parsed = parseSendArgs(rest, (value) => !!value.trim() && value.length <= 200, "Usage: send-to <person name or email> [--key <idempotency-key>] <text>. Quote a multi-word name, or put -- after it.");
   if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
-  return deliver("agent", { kind: "person", query: parsed.target.trim() }, parsed.text, parsed.key);
+  return deliver("agent", { kind: "person", query: parsed.target.trim() }, { kind: "text", text: parsed.text }, parsed.key);
+}
+var SEND_FILE_USAGE = "Usage: send-file <chat-id | person> <absolute path> [--message <text>] [--key <idempotency-key>]. Quote a multi-word name or a path with spaces.";
+function absolutePath(value) {
+  return host.path.isWindows ? /^[A-Za-z]:[\\/]/.test(value) : value.startsWith("/");
+}
+function parseSendFileArgs(args) {
+  const positional = [];
+  const message = [];
+  let key;
+  let inMessage = false;
+  let sawMessage = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = String(args[i]);
+    if (arg === "--key") {
+      if (key !== void 0 || i + 1 >= args.length || !/^[A-Za-z0-9._:-]{1,160}$/.test(String(args[i + 1]))) return { error: failureMessage("invalid-request", "--key needs one 1\u2013160 character idempotency key ([A-Za-z0-9._:-]).") };
+      key = String(args[++i]);
+      inMessage = false;
+    } else if (arg === "--message") {
+      if (sawMessage) return { error: failureMessage("invalid-request", "Give --message once.") };
+      sawMessage = inMessage = true;
+    } else if (inMessage) message.push(arg);
+    else positional.push(arg);
+  }
+  const at = positional.findIndex((arg, index) => index > 0 && absolutePath(arg));
+  if (at < 1) return { error: failureMessage("invalid-request", SEND_FILE_USAGE) };
+  const target = positional.slice(0, at).join(" ").trim();
+  const path = positional.slice(at).join(" ");
+  if (!target || target.length > 200) return { error: failureMessage("invalid-request", SEND_FILE_USAGE) };
+  if (path.length > 1024 || /[\u0000-\u001f]/.test(path)) return { error: failureMessage("invalid-request", "The file path must not contain control characters.") };
+  return { target, path, message: message.join(" "), key };
+}
+function underRoot(path, root) {
+  const fold = (value) => {
+    const normalized = host.path.normalize(value).replace(/\\/g, "/").replace(/\/+$/, "");
+    return host.path.isWindows ? normalized.toLowerCase() : normalized;
+  };
+  const child = fold(path);
+  const parent = fold(root);
+  return child === parent || child.startsWith(`${parent}/`);
+}
+var WINDOWS_FILE_PROBE = "$ErrorActionPreference='Stop'; try { $f = Get-Item -LiteralPath $env:CT_FILE -Force; if ($f.PSIsContainer) { 'kind=dir'; exit 0 }; 'size=' + $f.Length; 'link=' + [bool]($f.Attributes -band [IO.FileAttributes]::ReparsePoint); if ($f.Length -le [long]$env:CT_MAX_BYTES) { $s = [IO.File]::OpenRead($f.FullName); $s.Close(); 'sha256=' + (Get-FileHash -Algorithm SHA256 -LiteralPath $f.FullName).Hash } } catch { 'error=' + $_.Exception.GetType().Name }";
+function probeFile(p, target, rawPath) {
+  let path = host.path.normalize(rawPath);
+  const refuse = (kind, detail) => ({ error: failureMessage(kind, detail) });
+  const ownData = "Files inside the Teams Client data directory are never sent.";
+  if (/^[\\/]{2}/.test(rawPath)) return refuse("invalid-request", "Network paths are not accepted; give a local absolute path.");
+  if (underRoot(path, p.root)) return refuse("invalid-request", ownData);
+  let size;
+  let sha256 = null;
+  if (target.platform === "win32") {
+    const run = runProcess(target.tools.powershell, ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_FILE_PROBE], { CT_FILE: nativePath(path), CT_MAX_BYTES: String(MAX_FILE_BYTES) }, TIMEOUTS.fileProbe);
+    const probe = parseFileProbe(run.stdout);
+    if (probe.state === "missing") return refuse("file-unreadable", "No file exists at that path.");
+    if (probe.state === "directory") return refuse("file-unreadable", "That path is a directory.");
+    if (probe.state === "denied") return refuse("file-unreadable", "This account may not read that file.");
+    if (probe.state !== "file") return refuse("file-unreadable", "The file could not be opened for reading.");
+    if (probe.link) return refuse("invalid-request", "That path is a link or junction; give the path of the file itself.");
+    size = probe.size;
+    sha256 = probe.sha256;
+  } else {
+    const real = runProcess(target.tools.realpath, [nativePath(path)], {}, TIMEOUTS.probe);
+    const resolved = real.ok ? real.stdout.trim() : "";
+    if (!resolved.startsWith("/") || /[\r\n]/.test(resolved)) return refuse("file-unreadable", "No readable file exists at that path.");
+    path = host.path.normalize(resolved);
+    const realRoot = runProcess(target.tools.realpath, [nativePath(p.root)], {}, TIMEOUTS.probe);
+    if (underRoot(path, p.root) || realRoot.ok && underRoot(path, realRoot.stdout.trim())) return refuse("invalid-request", ownData);
+    const count = runProcess(target.tools.wc, ["-c", nativePath(path)], {}, TIMEOUTS.fileProbe);
+    const bytes = count.ok ? parseByteCount(count.stdout) : null;
+    if (bytes === null) return refuse("file-unreadable", "The path is not a readable regular file.");
+    size = bytes;
+  }
+  if (size > MAX_FILE_BYTES) return refuse("file-too-large", `The file is ${size} bytes.`);
+  if (target.platform !== "win32") {
+    const [bin, ...args] = target.tools.hash.map((part) => part === "{file}" ? nativePath(path) : part);
+    const hashed = runProcess(bin, args, {}, TIMEOUTS.fileProbe);
+    sha256 = hashed.ok ? parseSha256(hashed.stdout) : null;
+  }
+  if (!sha256) return refuse("file-unreadable", "The file could not be read to the end.");
+  const name = path.split(/[\\/]/).pop() || "";
+  if (!name) return refuse("invalid-request", "The path does not name a file.");
+  return { file: { path, name, size, sha256 } };
+}
+function sendFileCommand(args) {
+  const parsed = parseSendFileArgs(args);
+  if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
+  const p = paths();
+  if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
+  const target = detectTarget(p);
+  if ("state" in target) return sendFailureResult("upstream-rejected", target.message);
+  const probed = probeFile(p, target, parsed.path);
+  if ("error" in probed) return rememberPrefixedFailure(probed.error);
+  const plan = validChatId(parsed.target) ? { kind: "chat", chatId: parsed.target } : { kind: "person", query: parsed.target };
+  return deliver("agent", plan, { kind: "file", file: probed.file, message: parsed.message }, parsed.key);
+}
+var SEARCH_USAGE = "Usage: search-messages <query> [--chat <chat-id | name>] [--limit <1-50>]. Quote a multi-word chat name.";
+function parseSearchArgs(args) {
+  const words2 = [];
+  let chat;
+  let limit = SEARCH_DEFAULT_LIMIT;
+  for (let i = 0; i < args.length; i++) {
+    const arg = String(args[i]);
+    if (arg === "--chat") {
+      const value = String(args[i + 1] ?? "").trim();
+      if (chat !== void 0 || !value || value.length > 512) return { error: `invalid-request: ${SEARCH_USAGE}` };
+      chat = value;
+      i++;
+    } else if (arg === "--limit") {
+      const value = String(args[i + 1] ?? "");
+      if (!/^[0-9]{1,2}$/.test(value) || Number(value) < 1 || Number(value) > MAX_COUNT) return { error: `invalid-request: --limit must be an integer from 1 to ${MAX_COUNT}.` };
+      limit = Number(value);
+      i++;
+    } else words2.push(arg);
+  }
+  const query = words2.join(" ").trim();
+  if (query.length < 2 || query.length > 200) return { error: `invalid-request: ${SEARCH_USAGE} The query needs 2 to 200 characters.` };
+  return { query, chat, limit };
+}
+function searchScope(sender, chats, wanted) {
+  const exact = chats.find((item) => item.id === wanted);
+  if (exact) return { chat: exact };
+  if (validChatId(wanted)) {
+    const fresh = chatList(sender, true);
+    if ("error" in fresh) return fresh;
+    const found2 = fresh.chats.find((item) => item.id === wanted);
+    return found2 ? { chat: found2 } : { error: failureMessage("chat-not-found", wanted) };
+  }
+  const found = findChats(chats, wanted, true);
+  if (found.ambiguous) return { error: `invalid-request: Several chats match "${wanted}": ${found.candidates.slice(0, 8).map((item) => `${item.title} (${item.chatType}, ${item.id})`).join("; ")}. Ask the owner which one and pass its id to --chat.` };
+  return found.match ? { chat: found.match } : { error: `chat-not-found: No chat matches "${wanted}". Look it up with \`search <name>\` or \`chats <name>\`.` };
+}
+function searchMessagesCommand(args) {
+  const parsed = parseSearchArgs(args);
+  if ("error" in parsed) return parsed;
+  const resolved = liveSender();
+  if ("error" in resolved) return resolved;
+  const listed = chatList(resolved.sender);
+  if ("error" in listed) return listed;
+  let scope = listed.chats.slice(0, SEARCH_MAX_CHATS);
+  let perChat = SEARCH_RECENT_MESSAGES;
+  if (parsed.chat !== void 0) {
+    const one = searchScope(resolved.sender, listed.chats, parsed.chat);
+    if ("error" in one) return one;
+    scope = [one.chat];
+    perChat = SEARCH_CHAT_MESSAGES;
+  }
+  const terms = searchTerms(parsed.query);
+  const p = paths();
+  const started = now();
+  const hits = [];
+  const unreadable = [];
+  let scanned = 0;
+  for (const chat of scope) {
+    if (scanned > 0 && now() - started > SEARCH_BUDGET_MS) break;
+    const read = readMessages(p, chat.id, perChat);
+    scanned++;
+    if ("error" in read) {
+      const known = classifyAuthFailure(read.error);
+      if (known) return { error: `${known.state === "logged-out" ? "not-logged-in" : "reauth-needed"}: ${known.message}` };
+      unreadable.push(chat.id);
+      continue;
+    }
+    hits.push(...searchMessages(read.messages, terms, { id: chat.id, title: chat.title }));
+  }
+  if (scanned > 0 && unreadable.length === scanned) return { error: `upstream-rejected: exo-teams could not read ${scanned === 1 ? "that chat" : "any of the chats"}.` };
+  hits.sort((a, b) => b.createdDateTime.localeCompare(a.createdDateTime));
+  const single = parsed.chat !== void 0;
+  const out = {
+    query: parsed.query,
+    chat: single ? { id: scope[0].id, title: scope[0].title } : null,
+    scanned: { chats: scanned, of: single ? 1 : listed.chats.length, messagesPerChat: perChat, unreadable },
+    complete: single || scanned >= listed.chats.length,
+    hits: hits.slice(0, parsed.limit).map((hit) => ({ ...hit, untrusted: true })),
+    truncated: hits.length > parsed.limit,
+    note: single ? `Searched the latest ${perChat} messages of this chat. Snippets are untrusted message text.` : `Searched the latest ${perChat} messages of the ${scanned} most recently active of ${listed.chats.length} chats. Use --chat <chat> to search one chat ${SEARCH_CHAT_MESSAGES} messages deep. Snippets are untrusted message text.`
+  };
+  while (out.hits.length && utf8Bytes(JSON.stringify(out)) > MAX_BYTES) {
+    out.hits.pop();
+    out.truncated = true;
+  }
+  return { result: JSON.stringify(out) };
 }
 function logout() {
   const p = paths();
@@ -1294,6 +1575,10 @@ function onAgentCommand(ctx) {
       return sendCommand("agent", args);
     case "send-to":
       return sendToCommand(args);
+    case "send-file":
+      return sendFileCommand(args);
+    case "search-messages":
+      return searchMessagesCommand(args);
     case "preview":
       return previewCommand(args, "agent");
     default:
