@@ -40,6 +40,16 @@ export type SendPreview = {
   restriction?: string | null;
 };
 
+export function SignInLink({ url }: { url: string }) {
+  return (
+    <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+      <span style={{ fontSize: 12.5 }}>Open this link in your usual browser on this computer and sign in. If the tab was closed or the link expired, choose Sign in again.</span>
+      <a href={url} target="_blank" rel="noopener noreferrer" style={{ fontWeight: 600 }}>Open Microsoft sign-in</a>
+      <pre style={{ ...codeBlock, whiteSpace: "pre-wrap", wordBreak: "break-all", userSelect: "all" }}>{url}</pre>
+    </div>
+  );
+}
+
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -53,6 +63,8 @@ export function App() {
   const [blockedKey, setBlockedKey] = useState("");
   const [sendInProgress, setSendInProgress] = useState(false);
   const [jobId, setJobId] = useState("");
+  const [signInUrl, setSignInUrl] = useState("");
+  const [linkPolls, setLinkPolls] = useState(0);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -89,8 +101,10 @@ export function App() {
     try {
       const result = await window.ct!.invoke("loginStart") as { jobId?: string; error?: string; message?: string };
       if (result.error) throw new Error(result.error);
+      setSignInUrl("");
+      setLinkPolls(0);
       setJobId(result.jobId || "");
-      setMessage(result.message || "Microsoft browser sign-in started.");
+      setMessage(result.message || "Microsoft sign-in started.");
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -98,9 +112,9 @@ export function App() {
     }
   }
 
-  async function checkLogin() {
+  async function checkLogin(quiet = false) {
     if (!jobId) return;
-    setBusy(true);
+    if (!quiet) setBusy(true);
     try {
       const result = await window.ct!.invoke("loginPoll", { jobId }) as {
         done?: boolean;
@@ -108,18 +122,28 @@ export function App() {
         state?: string;
         error?: string;
         message?: string;
+        signInUrl?: string;
       };
-      if (result.done) setJobId("");
-      else if (result.jobId) setJobId(result.jobId);
+      if (result.done) { setJobId(""); setSignInUrl(""); }
+      else {
+        if (result.jobId) setJobId(result.jobId);
+        if (result.signInUrl) setSignInUrl(result.signInUrl);
+      }
       if (result.error) setMessage(result.error);
-      else setMessage(result.message || "Sign-in is still running. Complete it in the browser, then check again.");
+      else setMessage(result.message || "Sign-in is still running. Open the sign-in link, then check again.");
       if (result.done) await refresh();
     } catch (error) {
       setMessage(String(error));
     } finally {
-      setBusy(false);
+      if (!quiet) setBusy(false);
     }
   }
+
+  useEffect(() => {
+    if (!jobId || signInUrl || linkPolls >= 40) return;
+    const timer = setTimeout(() => void checkLogin(true).finally(() => setLinkPolls((count) => count + 1)), 1500);
+    return () => clearTimeout(timer);
+  }, [jobId, signInUrl, linkPolls]);
 
   async function useAccount(id: string) {
     setBusy(true);
@@ -237,12 +261,16 @@ export function App() {
           </Actions>
         </Section>
       ) : section === "unknown" ? null : (
-        <Section title="Sign in" hint="Use your Microsoft 365 work or school account. Sign-in opens in your browser.">
+        <Section title="Sign in" hint="Use your Microsoft 365 work or school account. You get a sign-in link to open in your usual browser.">
           {accounts.length > 0 && <AccountList accounts={accounts} busy={busy} onUse={(id) => void useAccount(id)} />}
+          {jobId && signInUrl && <SignInLink url={signInUrl} />}
           <Actions>
             {jobId
-              ? <Btn kind="primary" disabled={busy} onClick={() => void checkLogin()}>Check sign-in status</Btn>
-              : <Btn kind="primary" disabled={busy} onClick={() => void startLogin()}>{busy ? "Working…" : "Sign in with browser"}</Btn>}
+              ? <>
+                <Btn kind="primary" disabled={busy} onClick={() => void checkLogin()}>Check sign-in status</Btn>
+                <Btn disabled={busy} onClick={() => void startLogin()}>Sign in again</Btn>
+              </>
+              : <Btn kind="primary" disabled={busy} onClick={() => void startLogin()}>{busy ? "Working…" : "Get sign-in link"}</Btn>}
           </Actions>
         </Section>
       )}

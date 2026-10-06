@@ -28,6 +28,12 @@ test("plugin view does not repeat the plugin name and shows status as a label, n
     if (state) assert.equal(bar.includes(state), false, `${state} is never shown raw`);
   }
 });
+const REAL_SIGN_IN_URL = (port) => `https://login.microsoftonline.com/common/oauth2/authorize?response_type=code&client_id=1fec8e78-bce4-4aaf-ab1b-5451cc387264&redirect_uri=http://localhost:${port}&state=0a1b2c3d4e5f60718293&resource=https://graph.microsoft.com&prompt=select_account`;
+const REAL_SIGN_IN_LOG = (port) => `codeterm-signin: url ${REAL_SIGN_IN_URL(port)}
+To sign in, use the web browser that just has been opened. Please sign-in there.
+`;
+const LOGIN_ARGS = ["login", "--authType", "browser", "--appId", "1fec8e78-bce4-4aaf-ab1b-5451cc387264", "--output", "json"];
+function loginCalls(env) { return env.calls.filter((call) => call.args[0] === "-e" && call.args[5] === "login"); }
 function assertOk(value, message) { assert.equal(!!value, true, message); }
 function normalize(value) { return path.posix.normalize(String(value).replaceAll("\\", "/")); }
 
@@ -79,6 +85,9 @@ function mockHost(options = {}) {
     if (args[0] === "-p") return options.nodeUnavailable
       ? { code: 1, stdout: "", stderr: "Node.js missing" }
       : { code: 0, stdout: `${platform}/${arch}/22.22.0`, stderr: "" };
+    if (args[0] === "-e" && args[5] === "login") return options.loginError
+      ? { code: 1, stdout: "", stderr: options.loginError }
+      : { code: 0, stdout: "", stderr: "" };
     if (args[0] === "-e") return args[1]?.includes("createHash('sha512')")
       ? { code: 0, stdout: options.mismatchedIntegrity ? "sha512-wrong" : plugin.__test_integrityByTarget[`${platform}/${arch}`], stderr: "" }
       : { code: 0, stdout: JSON.stringify(snapshot()), stderr: "" };
@@ -184,7 +193,7 @@ function mockHost(options = {}) {
   exec.start = (opts) => {
     const id = `job-${++nextJob}`;
     const result = resultFor(opts);
-    if (opts.logFile) files.set(normalize(opts.logFile), options.loginOutput || (result.code !== 0 ? `${result.stdout || ""}${result.stderr || ""}` : "To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABCD-EFGH to authenticate."));
+    if (opts.logFile) files.set(normalize(opts.logFile), options.loginOutput || (result.code !== 0 ? `${result.stdout || ""}${result.stderr || ""}` : REAL_SIGN_IN_LOG(50000 + nextJob)));
     jobs.set(id, opts.detach ? { done: true, code: 0, stdout: "", stderr: "" } : { ...result, done: true });
     return { jobId: id };
   };
@@ -392,7 +401,7 @@ test("install verifies npm pack locally before ignore-scripts installation", () 
       const browser = plugin.__test_loginPoll(packed.jobId);
       assert.equal(browser.state, "login-in-progress");
       assert.equal(env.calls.some((call) => call.args[0] === "--version" && (call.bin === "m365" || call.bin === "m365.cmd")), false, "installed version comes from the package manifest, not a slow CLI start");
-      assert.ok(env.calls.some((call) => call.args[0] === "login" && call.detach), "browser login is detached and polled");
+      assert.ok(loginCalls(env).some((call) => call.detach), "browser login is detached and polled");
       assert.ok(env.calls.filter((call) => ["pack", "install"].includes(call.args[0])).every((call) => !call.detach), "npm stages run attached so their result is observable");
       const complete = plugin.__test_loginPoll(browser.jobId);
       assert.equal(complete.state, "logged-in");
@@ -435,38 +444,40 @@ test("Windows sign-in protects the plugin root using the blocking whoami result 
   } finally { env.cleanup(); }
 });
 
-test("login-status keeps the detached browser job pending and completes after account state changes", () => {
+test("login-status keeps the detached browser job pending, returns the sign-in link, and completes after account state changes", () => {
   const env = mockHost({ platform: "darwin", status: "logged-out" });
   try {
-    const started = command("login");
-    const login = JSON.parse(started.result);
-    assert.equal(login.signInUrl, "https://microsoft.com/devicelogin");
-    assert.equal(login.deviceCode, "ABCD-EFGH");
-    assert.match(login.message, /ABCD-EFGH/);
+    const login = JSON.parse(command("login").result);
+    assert.equal(login.state, "waiting-for-sign-in");
+    assert.equal(login.signIn, "link");
+    assert.match(login.signInUrl, /^https:\/\/login\.microsoftonline\.com\/common\/oauth2\/authorize\?/);
+    assert.match(login.signInUrl, /redirect_uri=http:\/\/localhost:\d+/);
+    assert.equal(login.deviceCode, undefined);
+    assert.match(login.message, /usual browser on this computer/);
     const pending = JSON.parse(command("login-status").result);
     assert.equal(pending.done, false);
     assert.equal(pending.jobId, login.jobId);
-    assert.equal(env.calls.filter((call) => call.args[0] === "login").length, 1, "status polling does not start a second login listener");
-    assert.deepEqual(env.calls.find((call) => call.args[0] === "login").args.slice(0, 7), ["login", "--authType", "browser", "--appId", "1fec8e78-bce4-4aaf-ab1b-5451cc387264", "--output", "json"]);
+    assert.equal(pending.signInUrl, login.signInUrl);
+    assert.equal(loginCalls(env).length, 1, "status polling does not start a second login listener");
+    assert.deepEqual(loginCalls(env)[0].args.slice(5), LOGIN_ARGS);
     env.setCurrentName("account-a");
     const complete = JSON.parse(command("login-status").result);
     assert.equal(complete.done, true);
     assert.equal(complete.state, "logged-in");
-    assert.equal(complete.signInUrl, "https://microsoft.com/devicelogin");
-    assert.equal(complete.deviceCode, "ABCD-EFGH");
-    assert.equal(env.calls.filter((call) => call.args[0] === "login").length, 1);
-    assert.equal(env.files.has(normalize(env.calls.find((call) => call.args[0] === "login").logFile)), false, "sign-in code log is removed after completion");
+    assert.equal(loginCalls(env).length, 1);
+    assert.equal(env.files.has(normalize(loginCalls(env)[0].logFile)), false, "sign-in log is removed after completion");
   } finally { env.cleanup(); }
 });
 
-test("agent login without a device code reports a browser sign-in", () => {
+test("agent login before the wrapper prints a link reports a preparing state", () => {
   const env = mockHost({ platform: "linux", status: "logged-out", loginOutput: "Launching the sign-in page." });
   try {
     const result = JSON.parse(command("login").result);
-    assert.equal(result.signIn, "browser");
+    assert.equal(result.state, "login-in-progress");
+    assert.equal(result.signIn, undefined);
     assert.equal(result.signInUrl, undefined);
-    assert.equal(env.calls.find((call) => call.args[0] === "login").args[2], "browser");
-    assert.equal(JSON.parse(command("login-status").result).signIn, "browser");
+    assert.match(result.message, /Poll login-status until it returns signInUrl/);
+    assert.equal(loginCalls(env)[0].args[7], "browser");
     env.setCurrentName("account-a");
     assert.equal(JSON.parse(command("login-status").result).state, "logged-in");
   } finally { env.cleanup(); }
@@ -1239,23 +1250,140 @@ test("read path uses m365 only, never direct Graph fetch or mem export", () => {
   assert.equal(source.includes("Teamwork.Migrate.All"), false);
 });
 
-test("browser sign-in starts a detached m365 job without credentials in argv", () => {
+test("browser sign-in runs the m365 wrapper detached under node without credentials in argv", () => {
   for (const platform of ["darwin", "linux", "win32"]) {
     const env = mockHost({ platform, isWindows: platform === "win32" });
     try {
       const started = plugin.__test_loginStart();
       assert.ok(started.jobId);
-      const call = env.calls.find((item) => item.args[0] === "login");
+      const [call] = loginCalls(env);
       assert.ok(call);
-      assert.equal(call.bin, platform === "win32" ? "m365.cmd" : "m365");
-      assert.deepEqual(call.args.slice(0, 7), ["login", "--authType", "browser", "--appId", "1fec8e78-bce4-4aaf-ab1b-5451cc387264", "--output", "json"]);
+      assert.equal(call.bin, platform === "win32" ? "node.exe" : "node", "node runs the wrapper directly, without the .cmd shim");
+      assert.equal(call.detach, true);
+      assert.equal(call.args[1], plugin.__test_signInWrapper);
+      assert.equal(normalize(call.args[2]), normalize(`${plugin.__test_paths().root}/login.lease`));
+      assert.equal(env.files.get(normalize(call.args[2])), call.args[3], "the lease holds this job's nonce");
+      assert.equal(call.args[4], String(plugin.__test_signInTtlMs));
+      assert.deepEqual(call.args.slice(5), LOGIN_ARGS);
       assert.equal(normalize(call.env.HOME), plugin.__test_paths().home);
       assert.equal(normalize(call.env.USERPROFILE), plugin.__test_paths().home);
-      assert.equal(call.args.some((arg) => /token|password|secret/i.test(arg)), false);
-      assert.match(started.message, /browser/i);
+      assert.equal(call.args.slice(2).some((arg) => /token|password|secret/i.test(arg)), false);
+      assert.match(started.message, /sign-in link/i);
       assert.equal(plugin.__test_loginPoll(started.jobId).state, "logged-in", "each platform iteration releases its detached login job");
     } finally { env.cleanup(); }
   }
+});
+
+test("sign-in log parser types every state from real m365 and wrapper lines", () => {
+  const parse = plugin.__test_parseSignInLog;
+  const url = REAL_SIGN_IN_URL(58950);
+  assert.deepEqual(parse(""), { state: "starting" });
+  assert.deepEqual(parse("To sign in, use the web browser that just has been opened. Please sign-in there.\n"), { state: "starting" });
+  assert.deepEqual(parse(REAL_SIGN_IN_LOG(58950)), { state: "awaiting-browser", signInUrl: url });
+  assert.deepEqual(parse(REAL_SIGN_IN_LOG(58950).replaceAll("\n", "\r\n")), { state: "awaiting-browser", signInUrl: url }, "Windows line endings");
+  assert.deepEqual(parse(`${REAL_SIGN_IN_LOG(1)}${REAL_SIGN_IN_LOG(2)}`), { state: "awaiting-browser", signInUrl: REAL_SIGN_IN_URL(2) }, "the newest link wins");
+  assert.deepEqual(parse(`${REAL_SIGN_IN_LOG(58950)}codeterm-signin: cancelled\n`), { state: "cancelled" });
+  assert.deepEqual(parse(`${REAL_SIGN_IN_LOG(58950)}codeterm-signin: expired\n`), { state: "expired" });
+  assert.deepEqual(parse(`${REAL_SIGN_IN_LOG(58950)}Error: post_request_failed: invalid_grant\n`), { state: "failed", failure: { state: "sign-in-failed", message: "Microsoft sign-in failed: post_request_failed: invalid_grant" } });
+  assert.equal(parse(`${REAL_SIGN_IN_LOG(58950)}AADSTS65001 consent_required\n`).failure.state, "consent-not-granted");
+  assert.deepEqual(parse("\u001b[33m🌶️  To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABCD-EFGH to authenticate.\u001b[0m"), { state: "awaiting-device-code", signInUrl: "https://microsoft.com/devicelogin", deviceCode: "ABCD-EFGH" });
+  assert.deepEqual(parse("codeterm-signin: url https://evil.example/common/oauth2/authorize?redirect_uri=http://localhost:1\n"), { state: "starting" }, "only Microsoft authorize URLs are surfaced");
+  assert.deepEqual(parse("codeterm-signin: url https://login.microsoftonline.com/common/oauth2/authorize?redirect_uri=https://attacker.example\n"), { state: "starting" }, "only loopback redirects are surfaced");
+});
+
+test("login again cancels the pending sign-in and yields a fresh link", () => {
+  const env = mockHost({ platform: "win32", arch: "x64", isWindows: true, status: "logged-out" });
+  try {
+    const first = JSON.parse(command("login").result);
+    const lease = normalize(`${plugin.__test_paths().root}/login.lease`);
+    const firstNonce = env.files.get(lease);
+    assert.ok(first.signInUrl);
+    const second = JSON.parse(command("login").result);
+    assert.notEqual(second.jobId, first.jobId);
+    assert.ok(second.signInUrl);
+    assert.notEqual(second.signInUrl, first.signInUrl, "the new listener has its own redirect port");
+    assert.equal(loginCalls(env).length, 2, "a second wrapper was started");
+    assert.notEqual(env.files.get(lease), firstNonce, "the first wrapper loses its lease and exits");
+    assert.equal(env.files.get(lease), loginCalls(env)[1].args[3]);
+    assert.ok(env.closedJobs.includes(first.jobId), "the first job is released");
+    assert.match(plugin.__test_loginPoll(first.jobId).error, /Unknown Microsoft sign-in job/, "the first job's pending state is gone");
+    const status = JSON.parse(command("login-status").result);
+    assert.equal(status.jobId, second.jobId);
+    assert.equal(status.signInUrl, second.signInUrl);
+    const viewRestart = plugin.viewCall("loginStart", {});
+    assert.notEqual(viewRestart.jobId, second.jobId, "the view's Sign in again also replaces the pending sign-in");
+    assert.equal(env.files.get(lease), loginCalls(env)[2].args[3]);
+  } finally { env.cleanup(); }
+});
+
+test("login-status ends an expired or cancelled sign-in instead of waiting forever", () => {
+  let clock = Date.parse("2026-10-06T10:00:00Z");
+  const env = mockHost({ platform: "win32", arch: "x64", isWindows: true, status: "logged-out" });
+  plugin.__test_setClock(() => clock);
+  try {
+    const login = JSON.parse(command("login").result);
+    const lease = normalize(`${plugin.__test_paths().root}/login.lease`);
+    clock += plugin.__test_signInTtlMs + 60000;
+    const expired = JSON.parse(command("login-status").result);
+    assert.equal(expired.done, true);
+    assert.equal(expired.state, "sign-in-expired");
+    assert.match(expired.message, /Run login again for a fresh link/);
+    assert.equal(env.files.has(lease), false, "an expired sign-in drops its lease");
+    assert.equal(JSON.parse(command("login-status").result).done, true, "no stale pending job remains");
+    const again = JSON.parse(command("login").result);
+    assert.notEqual(again.jobId, login.jobId);
+    env.files.set(normalize(loginCalls(env)[1].logFile), `${REAL_SIGN_IN_LOG(50002)}codeterm-signin: expired\n`);
+    assert.equal(JSON.parse(command("login-status").result).state, "sign-in-expired");
+    command("login");
+    env.files.set(normalize(loginCalls(env)[2].logFile), `${REAL_SIGN_IN_LOG(50003)}codeterm-signin: cancelled\n`);
+    const cancelled = JSON.parse(command("login-status").result);
+    assert.equal(cancelled.done, true);
+    assert.equal(cancelled.state, "sign-in-cancelled");
+  } finally { plugin.__test_setClock(null); env.cleanup(); }
+});
+
+test("logout cancels a pending sign-in", () => {
+  const env = mockHost({ platform: "darwin", status: "logged-out" });
+  try {
+    const login = JSON.parse(command("login").result);
+    command("logout");
+    assert.equal(env.files.has(normalize(`${plugin.__test_paths().root}/login.lease`)), false);
+    assert.match(plugin.__test_loginPoll(login.jobId).error, /Unknown Microsoft sign-in job/);
+  } finally { env.cleanup(); }
+});
+
+test("the sign-in wrapper prints the URL instead of opening a browser and exits when its lease is replaced", () => {
+  const os = require("node:os");
+  const { spawnSync } = require("node:child_process");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "teams-signin-"));
+  try {
+    const dist = path.join(dir, "runtime/node_modules/@pnp/cli-microsoft365/dist");
+    fs.mkdirSync(path.join(dist, "utils"), { recursive: true });
+    fs.writeFileSync(path.join(dist, "../package.json"), JSON.stringify({ name: "@pnp/cli-microsoft365", type: "module" }));
+    fs.writeFileSync(path.join(dist, "utils/browserUtil.js"), `import fs from "node:fs";\nexport const browserUtil = { async open(url) { fs.writeFileSync(${JSON.stringify(path.join(dir, "browser-launched"))}, url); } };\n`);
+    fs.writeFileSync(path.join(dist, "index.js"), [
+      `import http from "node:http";`,
+      `import { browserUtil } from "./utils/browserUtil.js";`,
+      `const server = http.createServer(() => {}).listen(0, "127.0.0.1", async () => {`,
+      `  const port = server.address().port;`,
+      `  await browserUtil.open("https://login.microsoftonline.com/common/oauth2/authorize?response_type=code&client_id=" + process.argv[process.argv.indexOf("--appId") + 1] + "&redirect_uri=http://localhost:" + port + "&state=abc&resource=https://graph.microsoft.com&prompt=select_account");`,
+      `  process.stderr.write("To sign in, use the web browser that just has been opened. Please sign-in there.\\n");`,
+      `});`,
+    ].join("\n"));
+    const wrapperFile = path.join(dir, "wrapper.txt");
+    fs.writeFileSync(wrapperFile, plugin.__test_signInWrapper);
+    const run = spawnSync(process.execPath, [path.join(__dirname, "../scripts/fixtures/teams-signin-driver.cjs"), wrapperFile, dir, JSON.stringify(LOGIN_ARGS)], { encoding: "utf8", timeout: 30000 });
+    const result = JSON.parse(String(run.stdout || "").trim().split(/\r?\n/).pop() || "{}");
+    assert.equal(result.error, undefined, `${result.log || ""}${run.stderr || ""}`);
+    assert.equal(fs.existsSync(path.join(dir, "browser-launched")), false, "the browser opener m365 would call never runs");
+    const parsed = plugin.__test_parseSignInLog(result.log.replace("codeterm-signin: cancelled", ""));
+    assert.equal(parsed.state, "awaiting-browser");
+    assert.match(parsed.signInUrl, new RegExp(`redirect_uri=http://localhost:${result.port}&`));
+    assert.match(parsed.signInUrl, /client_id=1fec8e78-bce4-4aaf-ab1b-5451cc387264/);
+    assert.equal(plugin.__test_parseSignInLog(result.log).state, "cancelled");
+    assert.equal(result.code, 3, "the replaced wrapper exits");
+    assert.equal(result.listening, false, "its loopback listener is released");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("a detached sign-in's final Error line is a named failure; device-code output is not", () => {
@@ -1322,6 +1450,21 @@ test("view renders the signed-in account and tenant in its setup summary", () =>
   const signedOut = renderToStaticMarkup(React.createElement(SetupSummary, { health: { state: "logged-out", message: "" } }));
   assert.ok(signedOut.includes("Not signed in"));
   assert.equal(signedOut.includes("jordan"), false);
+});
+
+test("view shows the sign-in link as a link and as copyable text, with typed sign-in labels", () => {
+  const React = require("react");
+  const { renderToStaticMarkup } = require("react-dom/server");
+  const { SignInLink } = require("./ui/src/app.tsx");
+  const { statusView } = require("./ui/src/status.ts");
+  const url = REAL_SIGN_IN_URL(58950);
+  const html = renderToStaticMarkup(React.createElement(SignInLink, { url }));
+  const escaped = url.replaceAll("&", "&amp;");
+  assert.ok(html.includes(`href="${escaped}"`), "clickable link");
+  assert.ok(html.includes(`>${escaped}</pre>`), "selectable copy of the URL");
+  assert.match(html, /Sign in again/);
+  assert.equal(statusView("waiting-for-sign-in").label, "Waiting for sign-in");
+  assert.equal(statusView("sign-in-expired").label, "Sign-in link expired");
 });
 
 for (const [name, fn] of tests) {

@@ -27,8 +27,20 @@ type StateResult = { state: string; message: string; accountId?: string | null; 
 type LoginAuthType = "browser" | "deviceCode";
 // The pinned Teams client id is refused device-code grants (invalid_grant), so agents use the browser sign-in.
 const AGENT_LOGIN_AUTH: LoginAuthType = "browser";
-const BROWSER_SIGN_IN_MESSAGE = "A Microsoft sign-in page opened in the default browser. Sign in there with the work or school account, then poll login-status.";
-type LoginJob = { stage: "pack" | "install" | "browser"; paths: Paths; target: Target; packagePath?: string; launchComplete?: boolean; authType: LoginAuthType; logFile?: string };
+const SIGN_IN_TTL_MS = 10 * 60 * 1000;
+const SIGN_IN_MARKER = "codeterm-signin:";
+const PREPARING_SIGN_IN_MESSAGE = "The Microsoft sign-in link is being prepared. Poll login-status until it returns signInUrl.";
+// m365 would launch the browser itself with this runtime's sandboxed HOME/APPDATA, so the browser starts on an empty
+// profile. The wrapper prints the URL instead and exits when the lease file no longer holds its nonce or the TTL passes.
+const SIGN_IN_WRAPPER = "const fs=require('node:fs');const path=require('node:path');const {pathToFileURL}=require('node:url');const [lease,nonce,ttl,...cli]=process.argv.slice(1);const say=s=>process.stderr.write('" + SIGN_IN_MARKER + " '+s+'\\n');const owned=()=>{try{return fs.readFileSync(lease,'utf8').trim()===nonce}catch{return false}};const stop=(s,c)=>{say(s);process.exit(c)};if(!owned())stop('cancelled',3);setInterval(()=>{if(!owned())stop('cancelled',3)},1000).unref();setTimeout(()=>stop('expired',4),Number(ttl)||600000).unref();process.env.CLIMICROSOFT365_NOUPDATE='1';const dist=path.resolve(process.env.M365_RUNTIME,'node_modules/@pnp/cli-microsoft365/dist');const load=f=>import(pathToFileURL(path.join(dist,f)).href);load('utils/browserUtil.js').then(async m=>{m.browserUtil.open=async url=>say('url '+url);process.argv=[process.argv[0],path.join(dist,'index.js'),...cli];await load('index.js')}).catch(e=>{process.stderr.write('Error: '+String(e&&e.message||e).split('\\n')[0]+'\\n');process.exit(1)});";
+type LoginJob = { stage: "pack" | "install" | "browser"; paths: Paths; target: Target; packagePath?: string; launchComplete?: boolean; authType: LoginAuthType; logFile?: string; leaseFile?: string; startedAt?: number };
+export type SignInLog =
+  | { state: "starting" }
+  | { state: "awaiting-browser"; signInUrl: string }
+  | { state: "awaiting-device-code"; signInUrl: string; deviceCode: string }
+  | { state: "cancelled" }
+  | { state: "expired" }
+  | { state: "failed"; failure: { state: string; message: string } };
 
 const loginJobs: Record<string, LoginJob> = {};
 let activeLoginJobId: string | null = null;
@@ -224,9 +236,9 @@ function applyCacheFileProtection(p: Paths): { error?: string; message?: string 
   return {};
 }
 
-function startLoginProcess(p: Paths, target: Target, stage: LoginJob["stage"], args: string[], packagePath?: string, authType: LoginAuthType = "browser"): { jobId?: string; error?: string } {
+function startLoginProcess(p: Paths, target: Target, stage: LoginJob["stage"], args: string[], packagePath?: string, authType: LoginAuthType = "browser", leaseFile?: string): { jobId?: string; error?: string } {
   let started: { jobId?: string; error?: string };
-  const bin = stage === "pack" || stage === "install" ? target.npm : nativePath(p.binary);
+  const bin = stage === "pack" || stage === "install" ? target.npm : target.node;
   const logFile = stage === "browser" ? joinPath(p.root, `login-${authType}.log`) : undefined;
   if (logFile) try { host.fs.removeFile(logFile); } catch { }
   // A detached job discards stdout, so only the long-lived browser sign-in detaches; npm stages must report their result.
@@ -234,9 +246,25 @@ function startLoginProcess(p: Paths, target: Target, stage: LoginJob["stage"], a
   try { started = host.exec.start({ bin, args, env: envFor(p), timeoutMs: 120000, detach, ...(logFile ? { logFile } : {}) }); }
   catch { return { error: `Could not start the m365 ${stage} step.` }; }
   if (!started.jobId) return { error: started.error || `The m365 ${stage} step did not start.` };
-  loginJobs[started.jobId] = { stage, paths: p, target, packagePath, authType, logFile };
+  loginJobs[started.jobId] = { stage, paths: p, target, packagePath, authType, logFile, leaseFile, startedAt: stage === "browser" ? now() : undefined };
   activeLoginJobId = started.jobId;
   return { jobId: started.jobId };
+}
+
+function leasePath(p: Paths): string {
+  return joinPath(p.root, "login.lease");
+}
+
+// Dropping the lease makes any running sign-in wrapper exit within a second and release its loopback listener.
+function cancelPendingSignIn(): boolean {
+  const jobId = activeLoginJobId;
+  const login = jobId ? loginJobs[jobId] : null;
+  const p = login?.paths || paths();
+  if (p) try { host.fs.removeFile(leasePath(p)); } catch { }
+  if (!jobId || !login || login.stage !== "browser") return false;
+  try { host.exec.close(jobId); } catch { }
+  finishLoginJob(jobId, "sign-in-cancelled");
+  return true;
 }
 
 function installM365(authType: LoginAuthType): { jobId?: string; state: string; message: string } {
@@ -289,8 +317,11 @@ function finishLoginJob(jobId: string, state: string, error?: string): any {
 }
 
 function startBrowserLogin(p: Paths, target: Target, authType: LoginAuthType = "browser"): { jobId?: string; error?: string } {
-  const args = ["login", "--authType", authType, "--appId", CLIENT_ID, "--output", "json"];
-  return startLoginProcess(p, target, "browser", args, undefined, authType);
+  const lease = leasePath(p);
+  const nonce = `${now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  if (!host.fs.writeFile(lease, nonce)) return { error: "Could not prepare the Microsoft sign-in lease file." };
+  const args = ["-e", SIGN_IN_WRAPPER, nativePath(lease), nonce, String(SIGN_IN_TTL_MS), "login", "--authType", authType, "--appId", CLIENT_ID, "--output", "json"];
+  return startLoginProcess(p, target, "browser", args, undefined, authType, lease);
 }
 
 function signInLogFailure(text: string): { state: string; message: string } | null {
@@ -301,23 +332,38 @@ function signInLogFailure(text: string): { state: string; message: string } | nu
   return /^Error:/.test(last) ? { state: "sign-in-failed", message: `Microsoft sign-in failed: ${last.slice(6).trim()}` } : null;
 }
 
-function browserLogFailure(login: LoginJob): { state: string; message: string } | null {
-  if (!login.logFile) return null;
-  return signInLogFailure(String(host.fs.readFileTail(login.logFile, 8192) || ""));
-}
+const AUTHORIZE_URL = /^https:\/\/login\.(?:microsoftonline\.(?:com|us)|chinacloudapi\.cn|partner\.microsoftonline\.cn)\/[\w.-]+\/oauth2\/(?:v2\.0\/)?authorize\?\S*redirect_uri=http:\/\/localhost:\d+\S*$/;
+const DEVICE_LOGIN_URL = /https?:\/\/(?:aka\.ms|microsoft\.com)\/devicelogin\b[^\s<>"']*/i;
+const USER_CODE = /^[A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?$|^[A-Z0-9]{6,12}$/i;
 
-function deviceSignInArtifacts(login: LoginJob): { signInUrl?: string; deviceCode?: string } {
-  if (!login.logFile) return {};
-  const raw = String(host.fs.readFileTail(login.logFile, 8192) || "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, " ");
+function parseSignInLog(text: string): SignInLog {
+  const raw = String(text || "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, " ");
+  const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const markers = lines.filter((line) => line.startsWith(SIGN_IN_MARKER)).map((line) => line.slice(SIGN_IN_MARKER.length).trim());
+  if (markers.includes("cancelled")) return { state: "cancelled" };
+  if (markers.includes("expired")) return { state: "expired" };
+  const failure = signInLogFailure(lines.filter((line) => !line.startsWith(SIGN_IN_MARKER)).join("\n"));
+  if (failure) return { state: "failed", failure };
+  const browserUrl = markers.filter((marker) => marker.startsWith("url ")).map((marker) => marker.slice(4).trim()).reverse().find((url) => AUTHORIZE_URL.test(url));
+  if (browserUrl) return { state: "awaiting-browser", signInUrl: browserUrl };
   const parsed = parseJson<any>(raw.trim());
-  const urlMatch = raw.match(/https?:\/\/(?:aka\.ms|microsoft\.com)\/devicelogin\b[^\s<>"']*/i);
   const codeMatch = raw.match(/(?:enter|use)\s+(?:the\s+)?(?:login\s+)?(?:code\s+)?([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?|[A-Z0-9]{6,12})\b/i)
     || raw.match(/\b(?:device|user|sign-in|login)\s+code\s*[:=]?\s*([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?|[A-Z0-9]{6,12})\b/i);
   const candidateUrl = String(parsed?.signInUrl || parsed?.verificationUri || parsed?.verificationUrl || "");
   const candidateCode = String(parsed?.deviceCode || parsed?.userCode || "");
-  const signInUrl = (urlMatch?.[0] || candidateUrl.match(/^https?:\/\/(?:aka\.ms|microsoft\.com)\/devicelogin\b[^\s<>"']*/i)?.[0])?.replace(/[),.;]+$/, "");
-  const deviceCode = /^[A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?$|^[A-Z0-9]{6,12}$/i.test(candidateCode) ? candidateCode : codeMatch?.[1];
-  return signInUrl && deviceCode ? { signInUrl, deviceCode } : {};
+  const signInUrl = (raw.match(DEVICE_LOGIN_URL)?.[0] || candidateUrl.match(DEVICE_LOGIN_URL)?.[0])?.replace(/[),.;]+$/, "");
+  const deviceCode = USER_CODE.test(candidateCode) ? candidateCode : codeMatch?.[1];
+  return signInUrl && deviceCode ? { state: "awaiting-device-code", signInUrl, deviceCode } : { state: "starting" };
+}
+
+function readSignInLog(login: LoginJob): SignInLog {
+  return login.logFile ? parseSignInLog(String(host.fs.readFileTail(login.logFile, 8192) || "")) : { state: "starting" };
+}
+
+function signInArtifacts(log: SignInLog): { signInUrl?: string; deviceCode?: string } {
+  if (log.state === "awaiting-browser") return { signInUrl: log.signInUrl };
+  if (log.state === "awaiting-device-code") return { signInUrl: log.signInUrl, deviceCode: log.deviceCode };
+  return {};
 }
 
 function targetState(): { state: string; message: string; paths?: Paths; target?: Target } {
@@ -1087,6 +1133,7 @@ function logout(): { result: string } | { error: string } {
   const target = targetState();
   if (target.state !== "ready") return { error: lifecycleMessage(target.state, target.message) };
   const p = target.paths!;
+  cancelPendingSignIn();
   if (!host.fs.fileExists(p.binary)) {
     cachedChats = null;
     clearPreviewTokens();
@@ -1114,31 +1161,16 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
       const started = loginStart(AGENT_LOGIN_AUTH);
       if (started.error) return { error: started.error };
       const current = loginPoll(started.jobId);
-      if (current.error) return { error: current.error };
-      const signInUrl = current.signInUrl;
-      const deviceCode = current.deviceCode;
-      return { result: JSON.stringify({
-        state: String(current.state || started.state || "login-in-progress"),
-        jobId: current.jobId || started.jobId,
-        signIn: signInUrl && deviceCode ? "device-code" : AGENT_LOGIN_AUTH,
-        signInUrl,
-        deviceCode,
-        message: signInUrl && deviceCode ? `Open ${signInUrl} and enter code ${deviceCode}.` : String(current.state || started.state) === "login-in-progress" ? BROWSER_SIGN_IN_MESSAGE : "Microsoft sign-in is being prepared. Poll login-status; the sign-in page opens in the default browser when the runtime is ready.",
-      }) };
+      if (current.error && !current.done) return { error: current.error };
+      return { result: JSON.stringify(agentLoginView(current, started.jobId)) };
     }
     case "login-status": {
       if (args.length) return { error: "Usage: login-status." };
       if (!activeLoginJobId) return { result: JSON.stringify({ state: statusView().state, done: true }) };
-      const current = loginPoll(activeLoginJobId);
-      return current.error ? { error: current.error } : { result: JSON.stringify({
-        done: current.done === true,
-        state: String(current.state || "login-in-progress"),
-        jobId: current.jobId || activeLoginJobId,
-        signIn: current.signInUrl && current.deviceCode ? "device-code" : AGENT_LOGIN_AUTH,
-        signInUrl: current.signInUrl,
-        deviceCode: current.deviceCode,
-        message: current.signInUrl && current.deviceCode ? `Open ${current.signInUrl} and enter code ${current.deviceCode}.` : current.message,
-      }) };
+      const jobId = activeLoginJobId;
+      const current = loginPoll(jobId);
+      if (current.error && !current.done) return { error: current.error };
+      return { result: JSON.stringify(agentLoginView(current, jobId)) };
     }
     case "accounts": return agentAccounts();
     case "use": return args.length === 1 ? useAccount(args[0]) : { error: "Usage: use <account-id>." };
@@ -1152,14 +1184,30 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
   }
 }
 
+function agentLoginView(current: any, fallbackJobId?: string): Record<string, unknown> {
+  const signIn = current.deviceCode ? "device-code" : current.signInUrl ? "link" : undefined;
+  return {
+    done: current.done === true,
+    state: String(current.state || "login-in-progress"),
+    jobId: current.jobId || fallbackJobId,
+    signIn,
+    signInUrl: current.signInUrl,
+    deviceCode: current.deviceCode,
+    message: current.error || current.message,
+    ...(current.error ? { error: current.error } : {}),
+  };
+}
+
 function loginStart(authType: LoginAuthType = "browser"): any {
-  if (activeLoginJobId && loginJobs[activeLoginJobId]) {
-    return { jobId: activeLoginJobId, state: "login-in-progress", message: "Microsoft sign-in is already running. Check its status instead of starting another login." };
+  const running = activeLoginJobId ? loginJobs[activeLoginJobId] : null;
+  if (activeLoginJobId && running && running.stage !== "browser") {
+    return { jobId: activeLoginJobId, state: "install-in-progress", message: "The pinned m365 runtime is still installing. Poll login-status; the sign-in link follows when it is ready." };
   }
   const p = paths();
   if (!p) return { error: lifecycleMessage("unsupported-platform") };
   const protectedState = protectStorage(p);
   if (protectedState.error) return { error: protectedState.message || lifecycleMessage("install-failed") };
+  cancelPendingSignIn();
   if (!host.fs.fileExists(p.binary)) {
     const installed = installM365(authType);
     return installed.jobId
@@ -1170,32 +1218,46 @@ function loginStart(authType: LoginAuthType = "browser"): any {
   if (target.state !== "ready" || !target.paths) return { error: lifecycleMessage(target.state, target.message) };
   const started = startBrowserLogin(target.paths, target.target!, authType);
   if (!started.jobId) return { error: started.error || "m365 browser sign-in did not start.", state: "install-failed" };
-  return { jobId: started.jobId, state: "login-in-progress", message: "Complete Microsoft work or school sign-in in the browser, then check sign-in status." };
+  return { jobId: started.jobId, state: "login-in-progress", message: PREPARING_SIGN_IN_MESSAGE };
+}
+
+function signInPending(jobId: string, log: SignInLog): any {
+  const artifacts = signInArtifacts(log);
+  if (artifacts.deviceCode) return { done: false, jobId, state: "waiting-for-sign-in", ...artifacts, message: `Open ${artifacts.signInUrl} and enter code ${artifacts.deviceCode}.` };
+  if (artifacts.signInUrl) return { done: false, jobId, state: "waiting-for-sign-in", ...artifacts, message: "Open the sign-in link in your usual browser on this computer and sign in with your Microsoft 365 work or school account. The link expires in 10 minutes; run login again for a fresh one." };
+  return { done: false, jobId, state: "login-in-progress", message: PREPARING_SIGN_IN_MESSAGE };
+}
+
+function pollSignIn(jobId: string, login: LoginJob): any {
+  const log = readSignInLog(login);
+  if (log.state === "failed") return finishLoginJob(jobId, log.failure.state, log.failure.message);
+  const current = statusView();
+  if (current.state === "logged-in" && log.state !== "cancelled") {
+    const secured = protectCacheFiles(login.paths, true);
+    if (secured.error) return finishLoginJob(jobId, "install-failed", secured.message || lifecycleMessage("install-failed"));
+    return finishLoginJob(jobId, "logged-in");
+  }
+  if (log.state === "cancelled") return finishLoginJob(jobId, "sign-in-cancelled", "This sign-in was replaced or cancelled. Run login again for a fresh link.");
+  if (log.state === "expired" || now() - (login.startedAt || 0) > SIGN_IN_TTL_MS + 30000) {
+    if (login.leaseFile) try { host.fs.removeFile(login.leaseFile); } catch { }
+    return finishLoginJob(jobId, "sign-in-expired", "The sign-in link expired. Run login again for a fresh link.");
+  }
+  return signInPending(jobId, log);
 }
 
 function loginPoll(jobId: string): any {
   const login = jobId ? loginJobs[jobId] : null;
   if (!login) return { error: "Unknown Microsoft sign-in job." };
+  if (login.stage === "browser" && login.launchComplete) return pollSignIn(jobId, login);
   let poll: { done: boolean; code?: number; stdout?: string; stderr?: string; error?: string };
-  if (login.stage === "browser" && login.launchComplete) {
-    const failed = browserLogFailure(login);
-    if (failed) return finishLoginJob(jobId, failed.state, failed.message);
-    const current = statusView();
-    const artifacts = deviceSignInArtifacts(login);
-    if (current.state === "logged-in") {
-      const secured = protectCacheFiles(login.paths, true);
-      if (secured.error) return finishLoginJob(jobId, "install-failed", secured.message || lifecycleMessage("install-failed"));
-      return { ...finishLoginJob(jobId, "logged-in"), ...artifacts };
-    }
-    return { done: false, jobId, state: "login-in-progress", message: "Finish sign-in in the browser or device flow, then check status again.", ...artifacts };
-  }
   try { poll = host.exec.poll(jobId); }
   catch { return { error: "Could not read the Microsoft sign-in job." }; }
-  const artifacts = deviceSignInArtifacts(login);
-  if (!poll.done) return { done: false, jobId, state: "login-in-progress", message: login.stage === "browser" ? "Complete the sign-in, then check status again." : "The pinned m365 package setup is still running.", ...artifacts };
+  if (!poll.done) return login.stage === "browser" ? signInPending(jobId, readSignInLog(login)) : { done: false, jobId, state: "install-in-progress", message: "The pinned m365 package setup is still running." };
   try { host.exec.close(jobId); } catch { }
   if (poll.error || poll.code !== 0) {
-    const reason = `${poll.error || ""}\n${poll.stderr || ""}\n${poll.stdout || ""}`;
+    const reason = `${poll.error || ""}
+${poll.stderr || ""}
+${poll.stdout || ""}`;
     const auth = authState(reason);
     return finishLoginJob(jobId, auth ? auth.state : "install-failed", auth ? auth.message : lifecycleMessage("install-failed"));
   }
@@ -1225,16 +1287,10 @@ function loginPoll(jobId: string): any {
     if (activeLoginJobId === jobId) activeLoginJobId = null;
     const browser = startBrowserLogin(login.paths, login.target, login.authType);
     if (!browser.jobId) return { done: true, state: "install-failed", error: browser.error || "m365 browser sign-in did not start." };
-    return { done: false, jobId: browser.jobId, state: "login-in-progress", message: "The verified runtime is ready. Complete Microsoft work or school sign-in in the browser." };
+    return { done: false, jobId: browser.jobId, state: "login-in-progress", message: PREPARING_SIGN_IN_MESSAGE };
   }
   login.launchComplete = true;
-  const failed = browserLogFailure(login);
-  if (failed) return finishLoginJob(jobId, failed.state, failed.message);
-  const current = statusView();
-  if (current.state !== "logged-in") return { done: false, jobId, state: "login-in-progress", message: "Finish sign-in in the browser or device flow, then check status again.", ...artifacts };
-  const secured = protectCacheFiles(login.paths, true);
-  if (secured.error) return finishLoginJob(jobId, "install-failed", secured.message || lifecycleMessage("install-failed"));
-  return { ...finishLoginJob(jobId, "logged-in"), ...artifacts };
+  return pollSignIn(jobId, login);
 }
 
 function viewCall(method: string, args: any): unknown {
@@ -1303,6 +1359,9 @@ const plugin: PluginModule = {
   __test_credentials: credentialPublic,
   __test_windowsAclCommands: windowsAclCommands,
   __test_signInLogFailure: signInLogFailure,
+  __test_parseSignInLog: parseSignInLog,
+  __test_signInTtlMs: SIGN_IN_TTL_MS,
+  __test_signInWrapper: SIGN_IN_WRAPPER,
   __test_metadataReader: METADATA_READER,
 };
 
