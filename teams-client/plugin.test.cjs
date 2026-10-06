@@ -33,11 +33,10 @@ const RAW_CHATS = [
   { id: GROUP_CHAT, title: "", isOneOnOne: false, chatType: "chat", tenantId: "t1", members: [
     { mri: "8:orgid:self", friendlyName: "Andrey Kovalev" }, { mri: "8:orgid:alex", friendlyName: "Alexander Kouznetsov" }, { mri: "8:orgid:anna", friendlyName: "Anna Ivanova" },
   ], lastMessage: { originalarrivaltime: "2026-10-05T10:00:00.000Z" } },
-  { id: ALEX_CHAT, title: "", isOneOnOne: true, chatType: "chat", tenantId: "t1", members: [
+  { id: ALEX_CHAT, title: "", isOneOnOne: true, hidden: true, chatType: "chat", tenantId: "t1", members: [
     { mri: "8:orgid:self", friendlyName: "Andrey Kovalev" }, { mri: "8:orgid:alex", friendlyName: "Alexander Kouznetsov" },
   ], lastMessage: { originalarrivaltime: "2026-10-06T09:00:00.000Z" } },
   { id: "19:meeting_x@thread.v2", title: "Sprint review", isOneOnOne: false, chatType: "meeting", members: [], lastMessage: { composetime: "2026-09-01T09:00:00.000Z" } },
-  { id: "19:hidden@thread.v2", title: "Old", hidden: true, members: [] },
   { id: "not a chat id", title: "bad" },
 ];
 
@@ -85,7 +84,7 @@ test("whoami output parses and only a valid skype and chatsvcagg session is usab
   assert.equal(parse.parseWhoami("not json"), null);
 });
 
-test("conversation list maps 1:1 chats to the other member's name, sorts by activity, and drops hidden or malformed rows", () => {
+test("conversation list maps 1:1 chats to the other member's name, sorts by activity, keeps the 1:1 threads chatsvcagg flags hidden, and drops malformed rows", () => {
   const chats = parse.mapChats(RAW_CHATS, "Andrey Kovalev");
   assert.deepEqual(chats.map((chat) => chat.id), [ALEX_CHAT, GROUP_CHAT, "19:meeting_x@thread.v2"]);
   assert.deepEqual(chats[0], { id: ALEX_CHAT, title: "Alexander Kouznetsov", topic: null, chatType: "oneOnOne", members: ["Alexander Kouznetsov"], username: null, lastActivity: "2026-10-06T09:00:00.000Z" });
@@ -136,6 +135,9 @@ test("send failures map to the ledger taxonomy: retried statuses stay unknown, d
   assert.equal(parse.classifyAuthFailure("spawn C:\\x\\exo-teams.exe: The system cannot find the file specified."), null, "a process failure is never mistaken for a missing sign-in");
   assert.equal(parse.sendFailure("Error: auto-refresh failed: refreshing skype token: token endpoint returned 400").kind, "reauth-needed");
   assert.equal(parse.sendFailure("something odd").kind, "unknown");
+  assert.equal(parse.sendFailure("Error: creating DM: creating new DM: POST https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations returned status 405").kind, "upstream-rejected", "a refused DM creation sent nothing");
+  assert.equal(parse.sendFailure("Error: creating DM: creating new DM: executing POST https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations: context deadline exceeded").kind, "upstream-rejected");
+  assert.equal(parse.sendFailure("Error: sending message: POST https://emea.ng.msg.teams.microsoft.com/v1/x returned status 405").kind, "upstream-rejected");
 });
 
 test("checksum and module download output parse on every platform's tool", () => {

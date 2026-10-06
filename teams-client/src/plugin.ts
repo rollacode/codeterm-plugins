@@ -31,6 +31,7 @@ let memoryChats: { identityKey: string; chats: Chat[]; at: number } | null = nul
 let injectedClock: (() => number) | null = null;
 let lastSendState: { state: string; message: string; updatedAt: number } | null = null;
 let lastStatus: StateResult | null = null;
+const CHAT_CACHE_SCHEMA = 2;
 
 function now(): number {
   const value = injectedClock ? Number(injectedClock()) : Date.now();
@@ -383,8 +384,8 @@ function chatList(sender: Sender, refresh = false): { chats: Chat[] } | { error:
   if (!p) return { error: lifecycleMessage("unsupported-platform") };
   if (!refresh && memoryChats && memoryChats.identityKey === sender.identityKey && now() - memoryChats.at < CHAT_CACHE_TTL_MS) return { chats: memoryChats.chats };
   if (!refresh) {
-    const cached = host.fs.readJson(p.chatCache) as { identityKey?: string; at?: number; chats?: Chat[] } | null;
-    if (cached && cached.identityKey === sender.identityKey && Array.isArray(cached.chats) && now() - Number(cached.at) < CHAT_CACHE_TTL_MS) {
+    const cached = host.fs.readJson(p.chatCache) as { schema?: number; identityKey?: string; at?: number; chats?: Chat[] } | null;
+    if (cached && cached.schema === CHAT_CACHE_SCHEMA && cached.identityKey === sender.identityKey && Array.isArray(cached.chats) && now() - Number(cached.at) < CHAT_CACHE_TTL_MS) {
       memoryChats = { identityKey: sender.identityKey, chats: cached.chats, at: Number(cached.at) };
       return { chats: cached.chats };
     }
@@ -398,7 +399,7 @@ function chatList(sender: Sender, refresh = false): { chats: Chat[] } | { error:
   if (!Array.isArray(source)) return { error: "upstream-rejected: exo-teams returned an unreadable chat list." };
   const chats = mapChats(source, sender.user);
   memoryChats = { identityKey: sender.identityKey, chats, at: now() };
-  try { host.fs.writeFile(p.chatCache, JSON.stringify({ identityKey: sender.identityKey, at: memoryChats.at, chats })); } catch { }
+  try { host.fs.writeFile(p.chatCache, JSON.stringify({ schema: CHAT_CACHE_SCHEMA, identityKey: sender.identityKey, at: memoryChats.at, chats })); } catch { }
   return { chats };
 }
 

@@ -126,7 +126,8 @@ export function mapChats(source: any, selfName: string): Chat[] {
   const rows = Array.isArray(source) ? source : [];
   const chats = rows.flatMap((raw: any): Chat[] => {
     const id = typeof raw?.id === "string" ? raw.id : "";
-    if (!/^[A-Za-z0-9:._@-]{1,512}$/.test(id) || raw.hidden === true) return [];
+    // chatsvcagg marks every 1:1 thread hidden, so the flag is not a filter.
+    if (!/^[A-Za-z0-9:._@-]{1,512}$/.test(id)) return [];
     const members = (Array.isArray(raw.members) ? raw.members : [])
       .map((member: any) => String(member && member.friendlyName || "").trim())
       .filter((name: string) => name && !sameName(name, selfName));
@@ -198,12 +199,16 @@ export function sendFailure(text: string): { kind: SendFailureKind; detail: stri
   const auth = classifyAuthFailure(value);
   if (auth && auth.state === "logged-out") return { kind: "not-logged-in", detail: auth.message };
   if (auth) return { kind: "reauth-needed", detail: auth.message, cause: auth.state };
+  // new-dm posts the message only after the chat exists, so a failure while creating it sent nothing.
+  if (/creating (?:new )?DM/i.test(value) && !/sending message/i.test(value)) {
+    return { kind: "upstream-rejected", detail: `the Teams chat service refused to open the 1:1 chat, so no message was sent.${quoted(value)}` };
+  }
   // exo-teams retries 429, 5xx and transport errors itself, so a surfaced one may follow a delivered attempt.
   if (/returned status (?:429|5\d\d)|too many requests|timed out|timeout|deadline exceeded|connection reset|EOF|context canceled|executing POST/i.test(value)) {
     return { kind: "unknown", detail: `exo-teams could not confirm delivery.${quoted(value)}` };
   }
   if (/returned status 401/.test(value)) return { kind: "reauth-needed", detail: `Teams refused the session token.${quoted(value)} Run login to sign in again.`, cause: "expired" };
-  if (/returned status (?:400|403|404|409|413)/.test(value)) {
+  if (/returned status (?:400|403|404|405|409|413)/.test(value)) {
     return { kind: "upstream-rejected", detail: `the Teams chat service rejected the message before delivery.${quoted(value)}` };
   }
   return { kind: "unknown", detail: `exo-teams returned an outcome that does not prove delivery.${quoted(value)}` };

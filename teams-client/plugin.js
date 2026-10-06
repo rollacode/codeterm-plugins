@@ -258,7 +258,7 @@ function mapChats(source, selfName) {
   const rows = Array.isArray(source) ? source : [];
   const chats = rows.flatMap((raw) => {
     const id = typeof raw?.id === "string" ? raw.id : "";
-    if (!/^[A-Za-z0-9:._@-]{1,512}$/.test(id) || raw.hidden === true) return [];
+    if (!/^[A-Za-z0-9:._@-]{1,512}$/.test(id)) return [];
     const members = (Array.isArray(raw.members) ? raw.members : []).map((member) => String(member && member.friendlyName || "").trim()).filter((name) => name && !sameName(name, selfName));
     const topic = typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : null;
     const chatType = raw.isOneOnOne === true ? "oneOnOne" : String(raw.chatType || "").toLowerCase() === "meeting" ? "meeting" : "group";
@@ -304,11 +304,14 @@ function sendFailure(text) {
   const auth = classifyAuthFailure(value);
   if (auth && auth.state === "logged-out") return { kind: "not-logged-in", detail: auth.message };
   if (auth) return { kind: "reauth-needed", detail: auth.message, cause: auth.state };
+  if (/creating (?:new )?DM/i.test(value) && !/sending message/i.test(value)) {
+    return { kind: "upstream-rejected", detail: `the Teams chat service refused to open the 1:1 chat, so no message was sent.${quoted(value)}` };
+  }
   if (/returned status (?:429|5\d\d)|too many requests|timed out|timeout|deadline exceeded|connection reset|EOF|context canceled|executing POST/i.test(value)) {
     return { kind: "unknown", detail: `exo-teams could not confirm delivery.${quoted(value)}` };
   }
   if (/returned status 401/.test(value)) return { kind: "reauth-needed", detail: `Teams refused the session token.${quoted(value)} Run login to sign in again.`, cause: "expired" };
-  if (/returned status (?:400|403|404|409|413)/.test(value)) {
+  if (/returned status (?:400|403|404|405|409|413)/.test(value)) {
     return { kind: "upstream-rejected", detail: `the Teams chat service rejected the message before delivery.${quoted(value)}` };
   }
   return { kind: "unknown", detail: `exo-teams returned an outcome that does not prove delivery.${quoted(value)}` };
@@ -339,6 +342,7 @@ var memoryChats = null;
 var injectedClock = null;
 var lastSendState = null;
 var lastStatus = null;
+var CHAT_CACHE_SCHEMA = 2;
 function now() {
   const value = injectedClock ? Number(injectedClock()) : Date.now();
   return Number.isFinite(value) ? value : Date.now();
@@ -672,7 +676,7 @@ function chatList(sender, refresh = false) {
   if (!refresh && memoryChats && memoryChats.identityKey === sender.identityKey && now() - memoryChats.at < CHAT_CACHE_TTL_MS) return { chats: memoryChats.chats };
   if (!refresh) {
     const cached = host.fs.readJson(p.chatCache);
-    if (cached && cached.identityKey === sender.identityKey && Array.isArray(cached.chats) && now() - Number(cached.at) < CHAT_CACHE_TTL_MS) {
+    if (cached && cached.schema === CHAT_CACHE_SCHEMA && cached.identityKey === sender.identityKey && Array.isArray(cached.chats) && now() - Number(cached.at) < CHAT_CACHE_TTL_MS) {
       memoryChats = { identityKey: sender.identityKey, chats: cached.chats, at: Number(cached.at) };
       return { chats: cached.chats };
     }
@@ -687,7 +691,7 @@ function chatList(sender, refresh = false) {
   const chats = mapChats(source, sender.user);
   memoryChats = { identityKey: sender.identityKey, chats, at: now() };
   try {
-    host.fs.writeFile(p.chatCache, JSON.stringify({ identityKey: sender.identityKey, at: memoryChats.at, chats }));
+    host.fs.writeFile(p.chatCache, JSON.stringify({ schema: CHAT_CACHE_SCHEMA, identityKey: sender.identityKey, at: memoryChats.at, chats }));
   } catch {
   }
   return { chats };
