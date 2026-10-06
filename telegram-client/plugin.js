@@ -2733,7 +2733,8 @@ function removeFiles(p) {
       if (!host.fs.removeFile(entry.path) && host.fs.fileExists(entry.path)) return false;
     }
   }
-  if (host.secretGet("config_initialized") === "true" && !host.fs.removeFile(p.config)) return false;
+  const initialized = host.secretGet("config_initialized") === "true";
+  if (!host.fs.removeFile(p.config) && initialized) return false;
   return true;
 }
 function clearSecret(name) {

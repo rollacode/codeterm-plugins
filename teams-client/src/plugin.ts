@@ -24,6 +24,9 @@ type RunResult = { ok: true; stdout: string; stderr: string } | { ok: false; err
 type Target = { platform: string; arch: string; node: string; npm: string; m365: string; integrity: string };
 type StateResult = { state: string; message: string; accountId?: string | null; upn?: string | null; tenantId?: string | null; expiresOn?: string | null; accounts?: any[] };
 type LoginAuthType = "browser" | "deviceCode";
+// The pinned Teams client id is refused device-code grants (invalid_grant), so agents use the browser sign-in.
+const AGENT_LOGIN_AUTH: LoginAuthType = "browser";
+const BROWSER_SIGN_IN_MESSAGE = "A Microsoft sign-in page opened in the default browser. Sign in there with the work or school account, then poll login-status.";
 type LoginJob = { stage: "pack" | "install" | "browser"; paths: Paths; target: Target; packagePath?: string; launchComplete?: boolean; authType: LoginAuthType; logFile?: string };
 
 const loginJobs: Record<string, LoginJob> = {};
@@ -1091,7 +1094,7 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
   switch (ctx.verb) {
     case "login": {
       if (args.length) return { error: "Usage: login." };
-      const started = loginStart("deviceCode");
+      const started = loginStart(AGENT_LOGIN_AUTH);
       if (started.error) return { error: started.error };
       const current = loginPoll(started.jobId);
       if (current.error) return { error: current.error };
@@ -1100,9 +1103,10 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
       return { result: JSON.stringify({
         state: String(current.state || started.state || "login-in-progress"),
         jobId: current.jobId || started.jobId,
+        signIn: signInUrl && deviceCode ? "device-code" : AGENT_LOGIN_AUTH,
         signInUrl,
         deviceCode,
-        message: signInUrl && deviceCode ? `Open ${signInUrl} and enter code ${deviceCode}.` : "Microsoft sign-in started. Poll login-status for the sign-in URL and device code.",
+        message: signInUrl && deviceCode ? `Open ${signInUrl} and enter code ${deviceCode}.` : String(current.state || started.state) === "login-in-progress" ? BROWSER_SIGN_IN_MESSAGE : "Microsoft sign-in is being prepared. Poll login-status; the sign-in page opens in the default browser when the runtime is ready.",
       }) };
     }
     case "login-status": {
@@ -1113,6 +1117,7 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
         done: current.done === true,
         state: String(current.state || "login-in-progress"),
         jobId: current.jobId || activeLoginJobId,
+        signIn: current.signInUrl && current.deviceCode ? "device-code" : AGENT_LOGIN_AUTH,
         signInUrl: current.signInUrl,
         deviceCode: current.deviceCode,
         message: current.signInUrl && current.deviceCode ? `Open ${current.signInUrl} and enter code ${current.deviceCode}.` : current.message,

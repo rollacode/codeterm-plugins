@@ -776,6 +776,18 @@ test("agent login surfaces a rejected-credential exit and resets the config so n
   } finally { env.cleanup(); }
 });
 
+test("logout removes a config left behind after its init marker was cleared", () => {
+  const env = mockHost();
+  try {
+    const p = plugin.__test_paths();
+    writeFileSync(p.config, "app_id: 1\n", { mode: 0o600 });
+    host.fs.fileExists = (file) => file !== p.config && existsSync(file);
+    const result = plugin.onAgentCommand({ sessionId: "logout-stale", verb: "logout", args: [] });
+    assert.equal(result.error, undefined, result.error);
+    assert.equal(existsSync(p.config), false);
+  } finally { env.cleanup(); }
+});
+
 test("config stays in the private plugin root at mode 0600 and logout removes config and sessions", () => {
   const apiId = "778899";
   const apiHash = "abcdef0123456789abcdef0123456789";

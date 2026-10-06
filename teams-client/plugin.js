@@ -41,6 +41,8 @@ var INTEGRITY_BY_TARGET = {
   "win32/x64": SRI
 };
 var METADATA_READER = "const path=require('node:path');const {pathToFileURL}=require('node:url');const authFile=path.resolve(process.env.M365_RUNTIME,'node_modules/@pnp/cli-microsoft365/dist/Auth.js');import(pathToFileURL(authFile).href).then(async m=>{const a=m.default;await a.restoreAuth();const c=a.connection||{};const expiry=c.accessTokens&&c.accessTokens['https://graph.microsoft.com']&&c.accessTokens['https://graph.microsoft.com'].expiresOn;const all=await a.getAllConnections();const project=x=>({name:x.name||null,accountId:x.identityId||x.name||null,identityId:x.identityId||null,tenantId:x.identityTenantId||null,upn:x.identityName||null});process.stdout.write(JSON.stringify({active:c.active?project(c):null,expiresOn:expiry?String(expiry):null,connections:all.map(project)}));}).catch(()=>process.stdout.write(JSON.stringify({active:null,expiresOn:null,connections:[]})));";
+var AGENT_LOGIN_AUTH = "browser";
+var BROWSER_SIGN_IN_MESSAGE = "A Microsoft sign-in page opened in the default browser. Sign in there with the work or school account, then poll login-status.";
 var loginJobs = {};
 var activeLoginJobId = null;
 var runtimeInfoCache = {};
@@ -1112,7 +1114,7 @@ function onAgentCommand(ctx) {
   switch (ctx.verb) {
     case "login": {
       if (args.length) return { error: "Usage: login." };
-      const started = loginStart("deviceCode");
+      const started = loginStart(AGENT_LOGIN_AUTH);
       if (started.error) return { error: started.error };
       const current = loginPoll(started.jobId);
       if (current.error) return { error: current.error };
@@ -1121,9 +1123,10 @@ function onAgentCommand(ctx) {
       return { result: JSON.stringify({
         state: String(current.state || started.state || "login-in-progress"),
         jobId: current.jobId || started.jobId,
+        signIn: signInUrl && deviceCode ? "device-code" : AGENT_LOGIN_AUTH,
         signInUrl,
         deviceCode,
-        message: signInUrl && deviceCode ? `Open ${signInUrl} and enter code ${deviceCode}.` : "Microsoft sign-in started. Poll login-status for the sign-in URL and device code."
+        message: signInUrl && deviceCode ? `Open ${signInUrl} and enter code ${deviceCode}.` : String(current.state || started.state) === "login-in-progress" ? BROWSER_SIGN_IN_MESSAGE : "Microsoft sign-in is being prepared. Poll login-status; the sign-in page opens in the default browser when the runtime is ready."
       }) };
     }
     case "login-status": {
@@ -1134,6 +1137,7 @@ function onAgentCommand(ctx) {
         done: current.done === true,
         state: String(current.state || "login-in-progress"),
         jobId: current.jobId || activeLoginJobId,
+        signIn: current.signInUrl && current.deviceCode ? "device-code" : AGENT_LOGIN_AUTH,
         signInUrl: current.signInUrl,
         deviceCode: current.deviceCode,
         message: current.signInUrl && current.deviceCode ? `Open ${current.signInUrl} and enter code ${current.deviceCode}.` : current.message

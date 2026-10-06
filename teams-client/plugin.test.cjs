@@ -427,7 +427,7 @@ test("login-status keeps the detached browser job pending and completes after ac
     assert.equal(pending.done, false);
     assert.equal(pending.jobId, login.jobId);
     assert.equal(env.calls.filter((call) => call.args[0] === "login").length, 1, "status polling does not start a second login listener");
-    assert.deepEqual(env.calls.find((call) => call.args[0] === "login").args.slice(0, 7), ["login", "--authType", "deviceCode", "--appId", "1fec8e78-bce4-4aaf-ab1b-5451cc387264", "--output", "json"]);
+    assert.deepEqual(env.calls.find((call) => call.args[0] === "login").args.slice(0, 7), ["login", "--authType", "browser", "--appId", "1fec8e78-bce4-4aaf-ab1b-5451cc387264", "--output", "json"]);
     env.setCurrentName("account-a");
     const complete = JSON.parse(command("login-status").result);
     assert.equal(complete.done, true);
@@ -436,6 +436,19 @@ test("login-status keeps the detached browser job pending and completes after ac
     assert.equal(complete.deviceCode, "ABCD-EFGH");
     assert.equal(env.calls.filter((call) => call.args[0] === "login").length, 1);
     assert.equal(env.files.has(normalize(env.calls.find((call) => call.args[0] === "login").logFile)), false, "sign-in code log is removed after completion");
+  } finally { env.cleanup(); }
+});
+
+test("agent login without a device code reports a browser sign-in", () => {
+  const env = mockHost({ platform: "linux", status: "logged-out", loginOutput: "Launching the sign-in page." });
+  try {
+    const result = JSON.parse(command("login").result);
+    assert.equal(result.signIn, "browser");
+    assert.equal(result.signInUrl, undefined);
+    assert.equal(env.calls.find((call) => call.args[0] === "login").args[2], "browser");
+    assert.equal(JSON.parse(command("login-status").result).signIn, "browser");
+    env.setCurrentName("account-a");
+    assert.equal(JSON.parse(command("login-status").result).state, "logged-in");
   } finally { env.cleanup(); }
 });
 
@@ -1064,7 +1077,7 @@ test("manifest declares only denied cache files and the required view capabiliti
   assert.ok(manifest.permissions.subprocess.allow.includes("node"));
   assert.equal(manifest.permissions.subprocess.allow.some((bin) => ["open", "xdg-open", "powershell.exe"].includes(bin)), false);
   assert.match(manifest.configHelp, /accounts.*use.*chats.*history.*health.*logout/is);
-  assert.match(manifest.configHelp, /login-status.*`signInUrl`.*`deviceCode`/is);
+  assert.match(manifest.configHelp, /login-status.*`signIn`.*`signInUrl`.*`deviceCode`/is);
   assert.match(manifest.configHelp, /tenant administrator/i);
 });
 
