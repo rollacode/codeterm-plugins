@@ -2501,7 +2501,7 @@ function oaiDone(text) {
 }
 
 function shellOf(execCall) {
-  return execCall.args[execCall.args.length - 1];
+  return execCall.args[execCall.args.length - 1].replace(/^(export [A-Z_]+=[^;]*; )+/, "");
 }
 
 test("router_native_openai_tool_call_executes_and_loops_with_tool_history", () => {
@@ -2525,6 +2525,7 @@ test("router_native_openai_tool_call_executes_and_loops_with_tool_history", () =
   enqueueExec([{ done: true, code: 0, stdout: "e3ec9ee9 Fermi\n", stderr: "" }]);
   pumpUntilStreams("t-oai", 2);
   assert(execCalls.length === 1 && shellOf(execCalls[0]) === "codeterm tab list", "declared tool executed once, got " + JSON.stringify(execCalls));
+  assert(/^export CODETERM_TAB_ID='t-oai'; /.test(execCalls[0].args[1]), "tool shell carries this tab's identity");
   const rows = plugin.poll("t-oai", null).messages;
   const call = rows.find((m) => m.type === "tool_call");
   assert(call && call.toolName === "codeterm" && call.content === "codeterm tab list", "tool row shows the command");

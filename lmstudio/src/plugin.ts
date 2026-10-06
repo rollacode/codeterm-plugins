@@ -112,6 +112,7 @@ interface StreamState {
 }
 
 interface Session {
+  tabId: string;
   messages: NormalizedChatMessage[];
   seq: number;
   // Scopes message ids to this session object; a session revived after a plugin reload must not reuse ids the host already stored.
@@ -912,7 +913,7 @@ function advanceTools(s: Session): void {
         emitToolResult(s, call, { error: shell.error }, toolId, entry.callId);
         continue;
       }
-      const started = startExecJob(shell.shellCmd as string);
+      const started = startExecJob(shell.shellCmd as string, s.tabId);
       if (started.jobId) {
         s.pendingExec = { call, jobId: started.jobId, toolId, callId: entry.callId };
         return; // park until drainExec sees the job finish
@@ -1120,6 +1121,7 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
   }
   const effectiveSystemPrompt = mode === "watcher" ? "" : systemPrompt;
   return {
+    tabId: ctx.tabId,
     messages: [],
     seq: 0,
     epoch: sessionEpoch(),

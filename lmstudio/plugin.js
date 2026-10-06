@@ -693,9 +693,11 @@ function posixDir(dir) {
 function shellQuote(s2) {
   return `'${s2.replace(/'/g, `'\\''`)}'`;
 }
-function withInstanceCli(shellCmd, binDir) {
-  if (!binDir) return shellCmd;
-  return `export PATH=${shellQuote(posixDir(binDir))}:"$PATH"; ${shellCmd}`;
+function toolShell(shellCmd, binDir, tabId) {
+  const prefix = [];
+  if (binDir) prefix.push(`export PATH=${shellQuote(posixDir(binDir))}:"$PATH";`);
+  if (tabId) prefix.push(`export CODETERM_TAB_ID=${shellQuote(tabId)};`);
+  return prefix.length ? `${prefix.join(" ")} ${shellCmd}` : shellCmd;
 }
 function instanceBinDir() {
   try {
@@ -738,9 +740,9 @@ function createToolRuntime(host2, parseJson3) {
     if (!args) return { error: "codeterm requires args.args" };
     return { shellCmd: `codeterm ${args}` };
   }
-  function startExecJob2(shellCmd) {
+  function startExecJob2(shellCmd, tabId) {
     return parseJson3(
-      host2.execStart(JSON.stringify({ bin: "sh", args: ["-lc", withInstanceCli(shellCmd, instanceBinDir())], timeoutMs: 12e4 })),
+      host2.execStart(JSON.stringify({ bin: "sh", args: ["-lc", toolShell(shellCmd, instanceBinDir(), tabId)], timeoutMs: 12e4 })),
       { error: "host.exec.start returned non-JSON" }
     );
   }
@@ -3080,7 +3082,7 @@ function advanceTools(s2) {
         emitToolResult(s2, call, { error: shell.error }, toolId, entry.callId);
         continue;
       }
-      const started = startExecJob(shell.shellCmd);
+      const started = startExecJob(shell.shellCmd, s2.tabId);
       if (started.jobId) {
         s2.pendingExec = { call, jobId: started.jobId, toolId, callId: entry.callId };
         return;
@@ -3259,6 +3261,7 @@ function resolveSession(ctx) {
   }
   const effectiveSystemPrompt = mode === "watcher" ? "" : systemPrompt;
   return {
+    tabId: ctx.tabId,
     messages: [],
     seq: 0,
     epoch: sessionEpoch(),

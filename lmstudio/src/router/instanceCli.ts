@@ -10,9 +10,12 @@ function shellQuote(s: string): string {
 }
 
 // The daemon's PATH can resolve `codeterm` to another build (on dev, the app binary itself); the instance CLI lives in <data dir>/bin.
-export function withInstanceCli(shellCmd: string, binDir: string | null): string {
-  if (!binDir) return shellCmd;
-  return `export PATH=${shellQuote(posixDir(binDir))}:"$PATH"; ${shellCmd}`;
+// The tab id gives `codeterm send` and `tab current` this tab's identity instead of the focused tab's.
+export function toolShell(shellCmd: string, binDir: string | null, tabId?: string): string {
+  const prefix: string[] = [];
+  if (binDir) prefix.push(`export PATH=${shellQuote(posixDir(binDir))}:"$PATH";`);
+  if (tabId) prefix.push(`export CODETERM_TAB_ID=${shellQuote(tabId)};`);
+  return prefix.length ? `${prefix.join(" ")} ${shellCmd}` : shellCmd;
 }
 
 export function instanceBinDir(): string | null {
