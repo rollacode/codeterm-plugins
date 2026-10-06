@@ -42,6 +42,7 @@ import { finishToolCalls, mergeToolParts, pairToolCalls } from "./toolwire";
 import { transcriptTurns } from "./transcript";
 import { nativeStatsUsage } from "./lmstudioNative";
 import { activityLine, activityOf } from "./activity";
+import { posixDir, withInstanceCli } from "./instanceCli";
 
 const provider = (over: Partial<ProviderConfig>): ProviderConfig => ({
   id: "p",
@@ -448,4 +449,11 @@ test("reroute follows the live registry and keeps an auto-picked model only on t
   assert.deepEqual(reroute({ raw: "mimo::m1" }, { providerId: null, model: "" }, [lms, mimo], "lmstudio"), { provider: mimo, model: "m1" });
   assert.equal(reroute({ raw: "" }, { providerId: "lmstudio", model: "auto" }, [lms], "lmstudio").model, "auto");
   assert.equal(reroute({ raw: "", presetProvider: "mimo" }, { providerId: "lmstudio", model: "auto" }, [lms, mimo], "lmstudio").model, "");
+});
+
+test("tool shells put the instance CLI first on PATH in Git Bash form", () => {
+  assert.equal(posixDir("C:\\Users\\me\\.codeterm-dev\\bin"), "/c/Users/me/.codeterm-dev/bin");
+  assert.equal(posixDir("/Users/me/.codeterm/bin/"), "/Users/me/.codeterm/bin");
+  assert.equal(withInstanceCli("codeterm tab list", null), "codeterm tab list");
+  assert.equal(withInstanceCli("codeterm tab list", "C:\\Users\\me\\.codeterm-dev\\bin"), "export PATH='/c/Users/me/.codeterm-dev/bin':\"$PATH\"; codeterm tab list");
 });

@@ -1,3 +1,5 @@
+import { instanceBinDir, withInstanceCli } from "./router/instanceCli";
+
 export interface ToolCall {
   tool: string;
   args: Record<string, unknown>;
@@ -78,7 +80,7 @@ export function createToolRuntime(
 
   function startExecJob(shellCmd: string): ExecStartResult {
     return parseJson<ExecStartResult>(
-      host.execStart(JSON.stringify({ bin: "sh", args: ["-lc", shellCmd], timeoutMs: 120000 })),
+      host.execStart(JSON.stringify({ bin: "sh", args: ["-lc", withInstanceCli(shellCmd, instanceBinDir())], timeoutMs: 120000 })),
       { error: "host.exec.start returned non-JSON" },
     );
   }

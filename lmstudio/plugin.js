@@ -684,6 +684,31 @@ var decisionModel = {
 };
 var decision_default = decisionModel;
 
+// lmstudio/src/router/instanceCli.ts
+function posixDir(dir) {
+  const unified = dir.replace(/\\/g, "/").replace(/\/+$/, "");
+  const drive = /^([A-Za-z]):\/(.*)$/.exec(unified);
+  return drive ? `/${drive[1].toLowerCase()}/${drive[2]}` : unified;
+}
+function shellQuote(s2) {
+  return `'${s2.replace(/'/g, `'\\''`)}'`;
+}
+function withInstanceCli(shellCmd, binDir) {
+  if (!binDir) return shellCmd;
+  return `export PATH=${shellQuote(posixDir(binDir))}:"$PATH"; ${shellCmd}`;
+}
+function instanceBinDir() {
+  try {
+    const dir = host.fs && typeof host.fs.expandHome === "function" ? host.fs.expandHome("~/.codeterm/bin") : null;
+    if (!dir) return null;
+    const exe = String(host.platform ? host.platform() : "").toLowerCase().indexOf("win") === 0 ? "codeterm.exe" : "codeterm";
+    const sep = dir.indexOf("\\") >= 0 ? "\\" : "/";
+    return host.fileExists(`${dir.replace(/[\\/]+$/, "")}${sep}${exe}`) ? dir : null;
+  } catch {
+    return null;
+  }
+}
+
 // lmstudio/src/tools.ts
 var TOOL_SCHEMA_JSON = JSON.stringify({
   tools: [
@@ -699,7 +724,7 @@ var TOOL_SCHEMA_JSON = JSON.stringify({
 var FENCE_RE = /```[^\r\n`]*\r?\n[\s\S]*?```/g;
 var TOOL_WRAPPER_RE = /<\s*\|?\/?\s*(?:tool_call|tool▁call)\s*\|?\s*>/gi;
 function createToolRuntime(host2, parseJson3) {
-  function shellQuote(s2) {
+  function shellQuote2(s2) {
     return `'${String(s2).replace(/'/g, `'\\''`)}'`;
   }
   function execShellCmd2(call) {
@@ -707,7 +732,7 @@ function createToolRuntime(host2, parseJson3) {
       const cmd = typeof call.args.cmd === "string" ? call.args.cmd : "";
       const cwd = typeof call.args.cwd === "string" ? call.args.cwd : void 0;
       if (!cmd) return { error: "exec requires args.cmd" };
-      return { shellCmd: cwd && cwd.trim() ? `cd ${shellQuote(cwd)} && ${cmd}` : cmd };
+      return { shellCmd: cwd && cwd.trim() ? `cd ${shellQuote2(cwd)} && ${cmd}` : cmd };
     }
     const args = typeof call.args.args === "string" ? call.args.args : "";
     if (!args) return { error: "codeterm requires args.args" };
@@ -715,7 +740,7 @@ function createToolRuntime(host2, parseJson3) {
   }
   function startExecJob2(shellCmd) {
     return parseJson3(
-      host2.execStart(JSON.stringify({ bin: "sh", args: ["-lc", shellCmd], timeoutMs: 12e4 })),
+      host2.execStart(JSON.stringify({ bin: "sh", args: ["-lc", withInstanceCli(shellCmd, instanceBinDir())], timeoutMs: 12e4 })),
       { error: "host.exec.start returned non-JSON" }
     );
   }
