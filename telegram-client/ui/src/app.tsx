@@ -19,16 +19,20 @@ type Health = {
   setup?: SetupInfo;
   account?: AccountInfo | null;
   loginStep?: LoginStepInfo | null;
-  sendPolicy?: { configured: boolean; mode?: string | null; senderAccountId?: string; allowedDestinations?: Array<{ id: string; label: string }> };
+  sendScope?: SendScope;
   sendState?: { state: string; failure?: string | null; message?: string | null; retryAfter?: number | null; destination?: unknown } | null;
 };
 type Preview = {
   previewId: string;
   sender: { id: string; displayName: string; username?: string | null; telegramUserId: string };
-  destination: { id: string; label: string };
+  destination: { id: string; label: string; type?: string; username?: string | null; phone?: string | null };
   text: string;
-  policy: Health["sendPolicy"];
+  allowed?: boolean;
+  restriction?: string | null;
 };
+export type ChatRow = { id: string; title: string; type?: string; username?: string | null };
+export type SendScope = { mode: "all" } | { mode: "only"; chats: Array<{ id: string; title: string }> };
+type ChatSearch = { query?: string; match?: ChatRow | null; ambiguous?: boolean; candidates?: ChatRow[]; chats?: ChatRow[] };
 
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -47,6 +51,8 @@ export function App() {
   const [sendText, setSendText] = useState("");
   const [preview, setPreview] = useState<Preview | null>(null);
   const [sendReceipt, setSendReceipt] = useState("");
+  const [chatQuery, setChatQuery] = useState("");
+  const [chatResults, setChatResults] = useState<ChatRow[] | null>(null);
 
   async function refresh() {
     setBusy(true);
@@ -202,19 +208,35 @@ export function App() {
     }
   }
 
-  async function enableSavedMessagesPolicy() {
-    if (!preview || preview.destination.label !== "Saved Messages") return;
+  async function findChats() {
     setBusy(true);
     setMessage("");
     try {
-      const result = await window.ct!.invoke("setSendPolicy", { previewId: preview.previewId, approveSavedMessagesOnly: true }) as { result?: string; error?: string };
+      const result = await window.ct!.invoke("chats", { query: chatQuery }) as { result?: string; error?: string };
       if (result.error) throw new Error(result.error);
-      if (result.result) {
-        const policy = JSON.parse(result.result);
-        setPreview((current) => current ? { ...current, policy } : current);
-      }
+      const parsed = JSON.parse(result.result || "{}") as ChatSearch;
+      setChatResults(parsed.candidates || parsed.chats || []);
+      if (parsed.match) chooseChat(parsed.match);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function chooseChat(chat: ChatRow) {
+    setChatId(chat.id);
+    setPreview(null);
+    setSendReceipt("");
+  }
+
+  async function saveScope(scope: SendScope) {
+    setBusy(true);
+    setMessage("");
+    try {
+      const result = await window.ct!.invoke("setSendScope", scope) as { result?: string; error?: string };
+      if (result.error) throw new Error(result.error);
       await refresh();
-      setMessage("Saved-Messages-only send policy is enabled for the resolved sender.");
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -223,7 +245,7 @@ export function App() {
   }
 
   async function sendPreview() {
-    if (!preview || !health?.sendPolicy?.configured) return;
+    if (!preview) return;
     setBusy(true);
     setMessage("");
     try {
@@ -250,9 +272,6 @@ export function App() {
   const signedIn = isSignedIn(health?.state) && layout.primary === "account";
   const status = polledStep ? statusView(polledStep.kind === "password" ? "password-required" : "input-required") : statusView(health?.state);
   const showCredentialInputs = layout.credentialsNeeded || replaceCredentials;
-  const policyAllowsPreview = !!preview && !!health?.sendPolicy?.configured &&
-    health.sendPolicy.senderAccountId === preview.sender.id &&
-    health.sendPolicy.allowedDestinations?.some((item) => item.id === preview.destination.id);
   const previewMatchesInput = !!preview && preview.destination.id === chatId && preview.text === sendText;
 
   const loginForm = (
@@ -329,7 +348,14 @@ export function App() {
         </Section>
       )}
 
-      <Section title="Preview and send" hint={signedIn ? "Review the resolved sender and destination before anything is sent. Only Saved Messages can be approved." : "Sign in first. Sending stays locked until you review a resolved preview."}>
+      <Section title="Preview and send" hint={signedIn ? "Find a chat by name, review the resolved recipient and text, then send." : "Sign in first."}>
+        <Field label="Find chat">
+          <form style={{ display: "flex", gap: 8 }} onSubmit={(event) => { event.preventDefault(); void findChats(); }}>
+            <input style={{ ...inputStyle, flex: 1 }} value={chatQuery} autoComplete="off" placeholder="Name or @username" disabled={!signedIn} onChange={(event) => setChatQuery(event.target.value)} />
+            <Btn type="submit" disabled={busy || !signedIn}>Find</Btn>
+          </form>
+        </Field>
+        {chatResults && <ChatResults chats={chatResults} selectedId={chatId} scope={health?.sendScope} busy={busy} onChoose={chooseChat} onScope={(scope) => void saveScope(scope)} />}
         <Field label="Chat id">
           <input style={inputStyle} value={chatId} autoComplete="off" placeholder="id:12345" disabled={!signedIn} onChange={(event) => { setChatId(event.target.value); setPreview(null); setSendReceipt(""); }} />
         </Field>
@@ -343,17 +369,15 @@ export function App() {
         )}
         {preview && (
           <div aria-label="Resolved preview" role="group" style={{ marginTop: 12, padding: 12, borderRadius: 10, border: "1px solid var(--ct-border-default, rgba(255,255,255,.12))", fontSize: 12.5 }}>
-            <p style={{ margin: "0 0 6px" }}>From <strong>{preview.sender.displayName}</strong> to <strong>{preview.destination.label}</strong></p>
+            <p style={{ margin: "0 0 6px" }}>From <strong>{preview.sender.displayName}</strong> to <strong>{preview.destination.label}</strong>{preview.destination.username ? ` ${preview.destination.username}` : ""}{preview.destination.type ? ` (${preview.destination.type})` : ""}</p>
             <pre style={codeBlock}>{preview.text}</pre>
             <Disclosure summary="Identifiers">
               <p style={{ margin: 0 }}>Sender account <code>{preview.sender.id}</code>, Telegram user <code>{preview.sender.telegramUserId}</code></p>
               <p style={{ margin: "4px 0 0" }}>Destination <code>{preview.destination.id}</code></p>
-              <p style={{ margin: "4px 0 0" }}>Policy: {preview.policy?.configured ? "Saved Messages only" : "not set"}</p>
+              {preview.destination.phone && <p style={{ margin: "4px 0 0" }}>Phone <code>{preview.destination.phone}</code></p>}
             </Disclosure>
             <Actions>
-              {preview.destination.label === "Saved Messages" && !health?.sendPolicy?.configured
-                ? <Btn kind="primary" disabled={busy || !previewMatchesInput} onClick={() => void enableSavedMessagesPolicy()}>Allow sending to Saved Messages</Btn>
-                : <Btn kind="primary" disabled={busy || !previewMatchesInput || !policyAllowsPreview} onClick={() => void sendPreview()}>{busy ? "Working…" : "Send"}</Btn>}
+              <Btn kind="primary" disabled={busy || !previewMatchesInput} onClick={() => void sendPreview()}>{busy ? "Working…" : "Send"}</Btn>
               <Btn disabled={busy} onClick={() => { setPreview(null); setSendReceipt(""); }}>Edit</Btn>
             </Actions>
           </div>
@@ -362,10 +386,14 @@ export function App() {
         {health?.sendState && <p role="status" style={{ margin: "10px 0 0", fontSize: 12, color: "var(--ct-muted, #9aa)" }}>Last send: <strong>{sendStateLabel(health.sendState.state)}</strong>{health.sendState.message ? `, ${health.sendState.message}` : ""}</p>}
       </Section>
 
+      <Section title="Restrict agent sends" hint="Off by default: the agent can send to any chat this account can write to. Sends you make here are never restricted.">
+        <SendScopeEditor scope={health?.sendScope} busy={busy} onSave={(scope) => void saveScope(scope)} />
+      </Section>
+
       <Disclosure summary="Security details">
         {health?.storage && <p style={{ margin: "0 0 6px" }}>Session storage: {health.storage.name}. {health.storage.note}</p>}
         <p style={{ margin: "0 0 6px" }}>The pinned release identifies this device as Telegram Desktop (Windows) in Telegram’s Devices list. Your own API ID and hash replace the release binary’s shared application credentials for this account; the hash is kept in the host secret store, never in a file or a command line.</p>
-        <p style={{ margin: "0 0 6px" }}>Sending is locked until you review a resolved sender and immutable destination. The initial owner policy permits Saved Messages only.</p>
+        <p style={{ margin: "0 0 6px" }}>Every send is recorded in a local idempotency ledger, so a repeated key is never sent twice, and a send whose confirmation was lost is reported as unknown rather than delivered.</p>
         <p style={{ margin: "0 0 6px" }}>A two-step verification password typed here goes straight to the sign-in process and is never stored.</p>
         <p style={{ margin: 0 }}>Agent verbs: accounts, use, chats, history, health, login, login-status, login-password, logout, preview, send.</p>
       </Disclosure>
@@ -441,5 +469,66 @@ export function LoginStepForm({ step, busy, onSubmit }: { step: LoginStepInfo; b
         <Btn kind="primary" type="submit" disabled={busy || !value}>{busy ? "Working…" : "Continue"}</Btn>
       </Actions>
     </form>
+  );
+}
+
+export function scopeIncludes(scope: SendScope | undefined, id: string): boolean {
+  return !!scope && scope.mode === "only" && scope.chats.some((chat) => chat.id === id);
+}
+
+export function toggleScopeChat(scope: SendScope | undefined, chat: ChatRow): SendScope {
+  const chats = scope && scope.mode === "only" ? scope.chats : [];
+  return scopeIncludes(scope, chat.id)
+    ? { mode: "only", chats: chats.filter((item) => item.id !== chat.id) }
+    : { mode: "only", chats: chats.concat([{ id: chat.id, title: chat.title }]) };
+}
+
+export function ChatResults({ chats, selectedId, scope, busy, onChoose, onScope }: {
+  chats: ChatRow[]; selectedId: string; scope?: SendScope; busy: boolean; onChoose: (chat: ChatRow) => void; onScope: (scope: SendScope) => void;
+}) {
+  if (!chats.length) return <p style={{ margin: "0 0 10px", fontSize: 12.5, color: "var(--ct-muted, #9aa)" }}>No matching chats among the 100 most recent.</p>;
+  const restricted = scope?.mode === "only";
+  return (
+    <ul aria-label="Matching chats" style={{ listStyle: "none", margin: "0 0 10px", padding: 0, display: "grid", gap: 6 }}>
+      {chats.map((chat) => (
+        <li key={chat.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 10px", borderRadius: 8, border: "1px solid var(--ct-border-subtle, rgba(255,255,255,.08))", fontSize: 12.5 }}>
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <strong>{chat.title || chat.id}</strong>
+            <span style={{ color: "var(--ct-muted, #9aa)" }}>{chat.username ? ` ${chat.username}` : ""}{chat.type ? ` · ${chat.type}` : ""} · {chat.id}</span>
+          </span>
+          {restricted && <Btn disabled={busy} onClick={() => onScope(toggleScopeChat(scope, chat))}>{scopeIncludes(scope, chat.id) ? "Remove from agent list" : "Allow for agent"}</Btn>}
+          <Btn kind={chat.id === selectedId ? "primary" : "ghost"} disabled={busy} onClick={() => onChoose(chat)}>{chat.id === selectedId ? "Selected" : "Select"}</Btn>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export function SendScopeEditor({ scope, busy, onSave }: { scope?: SendScope; busy: boolean; onSave: (scope: SendScope) => void }) {
+  const mode = scope?.mode || "all";
+  const chats = scope && scope.mode === "only" ? scope.chats : [];
+  return (
+    <div role="radiogroup" aria-label="Agent send restriction" style={{ display: "grid", gap: 8, fontSize: 12.5 }}>
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input type="radio" name="send-scope" checked={mode === "all"} disabled={busy} onChange={() => onSave({ mode: "all" })} />
+        <span>All chats (default)</span>
+      </label>
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input type="radio" name="send-scope" checked={mode === "only"} disabled={busy} onChange={() => onSave({ mode: "only", chats })} />
+        <span>Only these chats</span>
+      </label>
+      {mode === "only" && (
+        chats.length ? (
+          <ul aria-label="Chats the agent may send to" style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}>
+            {chats.map((chat) => (
+              <li key={chat.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ flex: 1 }}><strong>{chat.title || chat.id}</strong> <span style={{ color: "var(--ct-muted, #9aa)" }}>{chat.id}</span></span>
+                <Btn disabled={busy} onClick={() => onSave({ mode: "only", chats: chats.filter((item) => item.id !== chat.id) })}>Remove</Btn>
+              </li>
+            ))}
+          </ul>
+        ) : <p style={{ margin: 0, color: "var(--ct-warn, #e0a030)" }}>No chats on the list yet, so the agent cannot send anywhere. Find a chat above and choose Allow for agent.</p>
+      )}
+    </div>
   );
 }

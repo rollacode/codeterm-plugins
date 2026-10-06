@@ -33,26 +33,28 @@ On macOS, `tg` stores the MTProto session in the login Keychain by default. Exis
 | `login-password` | Submit the two-step verification password from the one-shot `login_password` secret (stdin only), then continue the login. |
 | `accounts` | List account labels and session presence. |
 | `use <account-id>` | Select a configured account label as the sender. |
-| `chats` | List conversations using immutable numeric IDs such as `id:12345`; display labels are separate fields. |
+| `chats [query]` | List the 100 most recent conversations (users, groups, channels) with immutable ids such as `id:12345`, title, type, and @username. With a query (name or @username), return the single `match`, or `ambiguous: true` with `candidates` when several chats fit. |
 | `history <chat-id> [n]` | Read up to 50 recent messages for a selected immutable ID, bounded by a 32 KiB serialized response. The default count and byte cap are in Settings. |
 | `health` | Report install, account, and session-storage state, including whether the session is in Keychain or a file. |
 | `logout` | Log out configured accounts where possible, remove local session and peer-cache files, remove the YAML config, and clear API credentials from the host secret store. |
-| `preview <chat-id> <text>` | Resolve and return the sender account id and visible identity, destination id and label, exact text, and current policy state. It writes no attempt and issues no send. Display names are refused where an immutable id is required. |
-| `send <chat-id> [--key <idempotency-key>] <text>` | Send only when the owner has explicitly enabled the Saved-Messages-only policy in the view. A policy is absent by default. |
+| `preview <chat-id> <text>` | Optional dry run: resolve the sender, the recipient (title, type, @username), and the exact text, and say whether the owner's restriction would allow it. It writes no attempt and issues no send. |
+| `send <chat-id> [--key <idempotency-key>] <text>` | Send to any chat the signed-in account can write to and return the Telegram server `telegramMessageId`. The sender's own id sends to Saved Messages. |
 
 Message bodies are returned as untrusted text. They are not interpreted as instructions, sent elsewhere, or exported to `codeterm mem`.
 
-## Send gate and delivery records
+## Sending and delivery records
 
-The view starts with sending locked. The owner must preview a destination first. The view displays the exact resolved sender, immutable destination id, destination label, and message text. Only after that review can the owner explicitly enable the initial policy, which permits that sender's Telegram Saved Messages id only. The policy is persisted in `send-policy.json` inside this plugin's own runtime data directory. There is no implicit allow policy.
+Sending works like a normal Telegram client acting for the owner: the agent resolves a chat with `chats <name>`, then sends to its immutable id. No setup or approval is needed.
 
-Before `tg send` starts, the plugin writes a `pending` record to `outbox.json` in the same plugin-owned directory. The record contains an idempotency key, resolved sender and destination, SHA-256 payload hash, state, timestamps, and send count; it does not store message text. A caller may provide `--key`; otherwise the default key uses the nonce from a fresh view preview and is bound to the resolved sender in the record. Reusing a key already in `sent` returns the saved result without another `tg send` command.
+The view has an optional **Restrict agent sends** setting, off by default. With "Only these chats" selected, an agent `send` to any chat outside the list returns `chat-not-allowed` naming the setting; sends the owner makes from the view are never restricted. The setting lives in `send-scope.json` in the plugin data directory and can only be changed from the view. A missing file means all chats; a file that cannot be read restricts the agent to no chats until the owner saves the setting again.
 
-The ledger uses `pending`, `sent`, `rate_limited`, `failed`, and `unknown` states. A rate limit records the wait time Telegram returned and refuses an invocation made before its deadline. The owner or agent must invoke send again after the deadline; the plugin does not wait or retry on a timer. A definitive rejection is recorded as `failed` and can be retried only by a later explicit invocation. A lost response or interrupted pending attempt becomes `unknown` and that key is never retried automatically. Inspect Saved Messages before choosing whether to take any manual action.
+Before `tg send` starts, the plugin writes a `pending` record to `outbox.json` in the same plugin-owned directory. The record contains an idempotency key, resolved sender and destination, SHA-256 payload hash, state, timestamps, and send count; it does not store message text. A caller should provide `--key`; otherwise the key is the nonce of a matching earlier preview, or a fresh key that is returned in the result. Reusing a key already in `sent` returns the saved result without another `tg send` command.
 
-Delivery guarantee: the local ledger prevents this plugin from issuing another send for a key already recorded as `sent`, and refuses automatic retry for `unknown`. The pinned `tg send` command returns a server `message_id` after confirmation but does not expose a stable caller-supplied MTProto random id for retries, so this plugin cannot use one to resolve a lost response. Telegram's MTProto send flow does not give this plugin an exactly-once delivery guarantee. If Telegram accepts a message but the confirmation is lost before `sent` is persisted, the outcome remains `unknown` and requires manual inspection.
+The ledger uses `pending`, `sent`, `rate_limited`, `failed`, and `unknown` states. A rate limit records the wait time Telegram returned and refuses an invocation made before its deadline. The owner or agent must invoke send again after the deadline; the plugin does not wait or retry on a timer. A definitive rejection is recorded as `failed` and can be retried only by a later explicit invocation. A lost response or interrupted pending attempt becomes `unknown` and that key is never retried automatically. Inspect the chat before choosing whether to take any manual action.
 
-Failures use named actionable states: `not-logged-in`, `reauth-needed`, `policy-not-set`, `destination-not-permitted`, `rate-limited`, `upstream-rejected`, and `unknown`. The same latest state is shown in the view and glance status.
+Delivery guarantee: the local ledger prevents this plugin from issuing another send for a key already recorded as `sent`, and refuses automatic retry for `unknown`. The pinned `tg send` command returns a server `message_id` after confirmation but does not expose a stable caller-supplied MTProto random id for retries, so this plugin cannot use one to resolve a lost response. Telegram's MTProto send flow does not give this plugin an exactly-once delivery guarantee. If Telegram accepts a message but the confirmation is lost before `sent` is persisted, or `tg` reports success without a server message id, the outcome remains `unknown` and requires manual inspection.
+
+Failures use named actionable states: `invalid-request`, `not-logged-in`, `reauth-needed`, `chat-not-found`, `chat-not-allowed`, `rate-limited`, `upstream-rejected`, and `unknown`. The same latest state is shown in the view and glance status.
 
 Lifecycle states have direct next steps: `not-installed` runs the installer; `unsupported-platform` identifies the missing release; `checksum-mismatch` refuses the archive; `installed-but-not-configured` opens the sign-in form; `logged-out` asks for a new sign-in; `logged-in` shows the resolved account; `reauth-needed` asks the owner to sign in again; and `upgrade-available` points to the pinned installer.
 
@@ -79,4 +81,4 @@ codeterm plugin install --from-dir /Users/rollacode/Developer/codeterm-plugins/t
 codeterm plugin get telegram-client
 ```
 
-The Orchestrator runs the source-only gates above after merging. The Worker does not run a real send. The owner reviews the resolved preview, explicitly enables Saved-Messages-only policy, authorizes the specific test, and verifies the one live message and one `sent` ledger record from the owner's own account.
+The Orchestrator runs the source-only gates above after merging. The Worker does not run a real send. The owner authorizes the specific live test and verifies the one live message and one `sent` ledger record from the owner's own account.

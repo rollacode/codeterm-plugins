@@ -34,9 +34,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// node_modules/qrcode-generator/qrcode.js
+// ../codeterm-plugins-setupwt/node_modules/qrcode-generator/qrcode.js
 var require_qrcode = __commonJS({
-  "node_modules/qrcode-generator/qrcode.js"(exports, module2) {
+  "../codeterm-plugins-setupwt/node_modules/qrcode-generator/qrcode.js"(exports, module2) {
     var qrcode2 = (function() {
       var qrcode3 = function(typeNumber, errorCorrectionLevel) {
         var PAD0 = 236;
@@ -1810,13 +1810,73 @@ function maskPhone(phone) {
   return `+${digits.slice(0, 3)}${"\u2022".repeat(digits.length - 5)}${digits.slice(-2)}`;
 }
 
+// shared/src/send-scope.ts
+var ALL_CHATS = { mode: "all" };
+var MAX_SCOPE_CHATS = 200;
+function scopeChats(value, validId) {
+  if (!Array.isArray(value) || value.length > MAX_SCOPE_CHATS) return null;
+  const out = [];
+  for (const item of value) {
+    const id = item && typeof item.id === "string" ? item.id : "";
+    if (!validId(id)) return null;
+    if (out.some((chat) => chat.id === id)) continue;
+    out.push({ id, title: typeof item.title === "string" ? item.title.slice(0, 200) : "" });
+  }
+  return out;
+}
+function parseSendScope(raw, validId) {
+  if (raw === null || raw === void 0 || raw === "") return ALL_CHATS;
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return { mode: "only", chats: [] };
+  }
+  if (value && value.mode === "all") return ALL_CHATS;
+  const chats = value && value.mode === "only" ? scopeChats(value.chats, validId) : null;
+  return { mode: "only", chats: chats || [] };
+}
+function validateSendScope(value, validId) {
+  if (value && value.mode === "all") return ALL_CHATS;
+  if (!value || value.mode !== "only") return { error: "Choose a restriction mode: all or only." };
+  const chats = scopeChats(value.chats, validId);
+  if (!chats) return { error: `List up to ${MAX_SCOPE_CHATS} chats by their immutable ids.` };
+  return { mode: "only", chats };
+}
+function decideSend(scope, chatId2, origin) {
+  if (origin === "view" || scope.mode === "all") return { allow: true };
+  if (scope.chats.some((chat) => chat.id === chatId2)) return { allow: true };
+  const allowed = scope.chats.length ? scope.chats.map((chat) => chat.title || chat.id).join(", ") : "no chats";
+  return {
+    allow: false,
+    reason: "chat-not-allowed",
+    message: `chat-not-allowed: The owner's "Restrict agent sends" setting permits only these chats: ${allowed}. ${chatId2} is not one of them. Ask the owner to add it in the plugin view (Restrict agent sends) or to switch the setting back to all chats.`
+  };
+}
+function fold(value) {
+  return value.toLowerCase().replace(/^@/, "").replace(/\s+/g, " ").trim();
+}
+function matchChats(chats, query, limit = 20) {
+  const q = fold(query);
+  if (!q) return { match: null, ambiguous: false, candidates: [] };
+  const byId = chats.filter((chat) => chat.id.toLowerCase() === q);
+  if (byId.length === 1) return { match: byId[0], ambiguous: false, candidates: byId };
+  const tokens = q.split(" ");
+  const hits = chats.filter((chat) => {
+    const haystack = `${fold(chat.title)} ${fold(chat.username || "")}`;
+    return tokens.every((token) => haystack.includes(token));
+  });
+  const exact = hits.filter((chat) => fold(chat.title) === q || !!chat.username && fold(chat.username) === q);
+  const match = exact.length === 1 ? exact[0] : hits.length === 1 ? hits[0] : null;
+  return { match, ambiguous: !match && hits.length > 1, candidates: hits.slice(0, limit) };
+}
+
 // telegram-client/src/plugin.ts
 var VERSION = "0.11.0";
 var ROOT = "~/.codeterm/telegram-client";
 var BUNDLE = "~/.codeterm/plugins/telegram-client";
 var CONFIG_NAME = "gotd.cli.yaml";
 var SCAN_MESSAGE = "Render qrSvg in chat as a scannable QR and show tgLink as text. Scan it in Telegram Settings \u2192 Devices \u2192 Link Desktop Device, then poll login-status and follow its `next` field.";
-var INITIAL_SEND_POLICY_MODE = "saved-messages-only";
 var MAX_COUNT = 50;
 var MAX_BYTES = 32 * 1024;
 var loginJobs = {};
@@ -1858,7 +1918,7 @@ function paths() {
       install: childPath(root, "install.json"),
       failure: childPath(root, "install-status.json"),
       outbox: childPath(root, "outbox.json"),
-      policy: childPath(root, "send-policy.json")
+      scope: childPath(root, "send-scope.json")
     };
   } catch {
     return null;
@@ -2236,36 +2296,60 @@ function useAccount(label) {
   if (!run.ok) return { error: safeError(run) };
   return { result: JSON.stringify({ currentAccount: label }) };
 }
-function agentChats() {
+function chatList() {
   const response = jsonCommand(["chats", "list", "--limit", "100"]);
   if (response.error) return { error: response.error };
   const source = Array.isArray(response.data.chats) ? response.data.chats : [];
   const chats = source.flatMap((item) => {
-    const id = chatId(item && item.peer);
+    const peer = item && item.peer;
+    const id = chatId(peer);
     if (!id) return [];
-    return [{ id, title: String(item.peer && (item.peer.label || item.peer.title) || ""), unread: Number(item.unread) || 0 }];
+    const username = String(peer.username || "").replace(/^@/, "");
+    const chat = {
+      id,
+      title: String(peer.name || peer.label || peer.title || ""),
+      type: String(peer.type || "unknown"),
+      username: username ? `@${username}` : null,
+      unread: Number(item.unread) || 0
+    };
+    if (peer.phone) chat.phone = maskPhone(peer.phone);
+    return [chat];
   });
-  return { result: JSON.stringify({ chats }) };
+  return { chats };
 }
-function policySummary() {
+function agentChats(args = []) {
+  const listed = chatList();
+  if ("error" in listed) return { error: listed.error };
+  const query = args.join(" ").trim();
+  if (!query) return { result: JSON.stringify({ chats: listed.chats }) };
+  const found = matchChats(listed.chats, query);
+  const next = found.match ? `Send with: send ${found.match.id} --key <unique-key> <text>` : found.ambiguous ? "Several chats match. Show the candidates to the owner and ask which one, then use its id." : "No chat in the 100 most recent dialogs matches. Ask the owner for a more exact name or @username.";
+  return { result: JSON.stringify({ query, match: found.match, ambiguous: found.ambiguous, candidates: found.candidates, next }) };
+}
+function readSendScope() {
   const p = paths();
-  if (!p) return { configured: false, mode: null, allowedDestinations: [] };
-  let policy = null;
+  if (!p) return parseSendScope(null, validChatId);
+  let raw = null;
   try {
-    policy = host.fs.readJson(p.policy);
+    raw = host.fs.fileExists(p.scope) ? host.fs.readFile(p.scope) ?? "" : null;
   } catch {
-    policy = null;
+    raw = "";
   }
-  if (!policy || policy.approved !== true || policy.mode !== INITIAL_SEND_POLICY_MODE || !/^[A-Za-z0-9_-]{1,64}$/.test(String(policy.senderAccountId || "")) || !validChatId(String(policy.savedMessagesId || ""))) {
-    return { configured: false, mode: null, allowedDestinations: [] };
+  return parseSendScope(raw, validChatId);
+}
+function setSendScope(args) {
+  const scope = validateSendScope(args, validChatId);
+  if ("error" in scope) return { error: `${scope.error} The restriction was not changed.` };
+  const p = paths();
+  if (!p) return { error: "Could not resolve the Telegram Client data directory; the restriction was not changed." };
+  try {
+    if (!host.fs.makeDirs(p.root) || host.fs.writeFile(p.scope, JSON.stringify(scope)) !== true) {
+      return { error: "Could not save the restriction; the previous setting still applies." };
+    }
+  } catch {
+    return { error: "Could not save the restriction; the previous setting still applies." };
   }
-  return {
-    configured: true,
-    mode: "saved-messages-only",
-    senderAccountId: String(policy.senderAccountId || ""),
-    allowedDestinations: [{ id: String(policy.savedMessagesId), label: "Saved Messages" }],
-    approvedAt: Number(policy.approvedAt) || null
-  };
+  return { result: JSON.stringify(readSendScope()) };
 }
 function resolveSender() {
   const current = status();
@@ -2289,21 +2373,20 @@ function resolveSender() {
   } };
 }
 function resolveDestination(id, sender) {
-  if (!validChatId(id)) return { error: "Usage: preview <immutable-chat-id> <text>. Select an id such as id:12345 from chats; display names are not accepted." };
-  if (id === `id:${sender.telegramUserId}`) {
-    return { destination: { id, label: "Saved Messages" } };
-  }
-  const response = agentChats();
-  if ("error" in response) return { error: `Could not resolve destination ${id}: ${response.error}` };
-  const chats = parseJson(response.result).chats;
-  const match = chats.find((chat) => chat.id === id);
-  if (!match) return { error: `No Telegram chat has immutable id ${id}. Refresh chats and select an id from that list.` };
-  return { destination: { id: String(match.id), label: String(match.title || match.id) } };
+  if (!validChatId(id)) return { error: "invalid-request: Use an immutable chat id such as id:12345 from `chats <name>`; display names are not accepted here." };
+  if (id === `id:${sender.telegramUserId}`) return { destination: { id, label: "Saved Messages", type: "self", savedMessages: true } };
+  const listed = chatList();
+  if ("error" in listed) return { error: `upstream-rejected: Could not list chats to resolve ${id} (${listed.error}).` };
+  const match = listed.chats.find((chat) => chat.id === id);
+  if (!match) return { error: failureMessage("chat-not-found", id) };
+  const destination = { id: match.id, label: match.title || match.id, type: match.type, username: match.username };
+  if (match.phone) destination.phone = match.phone;
+  return { destination };
 }
 var previewSequence = 0;
 function previewCommand(args, origin = "agent") {
   if (args.length < 2) return { error: "Usage: preview <immutable-chat-id> <text>." };
-  if (!validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> <text>. Display names are not accepted; choose an id from chats." };
+  if (!validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> <text>. Display names are not accepted; find the id with `chats <name>`." };
   const text = args.slice(1).join(" ");
   if (!text.length) return { error: "Preview text must not be empty." };
   const resolved = resolveSender();
@@ -2312,61 +2395,37 @@ function previewCommand(args, origin = "agent") {
   if ("error" in destination) return { error: destination.error };
   const previewId = sha256Hex(`preview\0${now()}\0${++previewSequence}`);
   previewTokens[previewId] = { sender: resolved.sender, destination: destination.destination, text, origin, previewNonce: previewId };
+  const decision = decideSend(readSendScope(), destination.destination.id, origin);
   return { result: JSON.stringify({
     previewId,
     sender: resolved.sender,
     destination: destination.destination,
     text,
-    policy: policySummary()
+    allowed: decision.allow,
+    restriction: decision.allow ? null : decision.message
   }) };
 }
+var SEND_FAILURES = ["invalid-request", "not-logged-in", "reauth-needed", "chat-not-found", "chat-not-allowed", "rate-limited", "upstream-rejected", "unknown"];
 function failureMessage(kind, detail) {
   switch (kind) {
+    case "invalid-request":
+      return `invalid-request: ${String(detail || "Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>.")} Find the chat id with \`chats <name>\`, then send again.`;
     case "not-logged-in":
-      return "not-logged-in: Sign in to Telegram Client and confirm the sender account, then preview and send again.";
+      return "not-logged-in: Sign in to Telegram Client and confirm the sender account, then send again.";
     case "reauth-needed":
       return "reauth-needed: Telegram authorization expired or was revoked. Complete QR login in Telegram Client before sending again.";
-    case "policy-not-set":
-      return "policy-not-set: Review the resolved sender and Saved Messages destination in Telegram Client, then explicitly enable the Saved-Messages-only policy.";
-    case "destination-not-permitted":
-      return `destination-not-permitted: This destination is outside the Saved-Messages-only policy. Its permitted immutable id is ${String(detail || "unavailable")}. Select that exact id or have the owner review a different policy.`;
+    case "chat-not-found":
+      return `chat-not-found: No chat among this account's 100 most recent dialogs has id ${String(detail || "unavailable")}. Look it up with \`chats <name>\` and use an id from that result.`;
+    case "chat-not-allowed":
+      return String(detail || `chat-not-allowed: The owner's "Restrict agent sends" setting does not include this chat. Ask the owner to add it in the Telegram Client view.`);
     case "rate-limited":
       return `rate-limited: Telegram asked this account to wait until ${Number(detail) || 0}. Invoke send again after that deadline; the plugin will not wait or retry automatically.`;
     case "upstream-rejected":
       return `upstream-rejected: Telegram rejected the request or the local send prerequisite failed (${String(detail || "no further detail")}). Correct the reported issue, then invoke send again if you still want it delivered.`;
     case "unknown":
-      return "unknown: Telegram may have accepted this message but the confirmation was lost. Do not retry this idempotency key; inspect Saved Messages and decide manually.";
+      return "unknown: Telegram may have accepted this message but the confirmation was lost. Do not retry this idempotency key and do not report it as delivered; check the chat and decide manually.";
   }
   return "upstream-rejected: The send failure state was not recognized. Inspect Telegram Client status before trying again.";
-}
-function setSendPolicy(args) {
-  if (args.approveSavedMessagesOnly !== true) return { error: "No send policy was changed. Use the explicit Saved Messages only approval control after reviewing its preview." };
-  const preview = previewTokens[String(args.previewId || "")];
-  if (!preview || preview.origin !== "view") return { error: "Only a preview created in this view can enable a send policy. Review a fresh view preview first." };
-  const expected = `id:${preview.sender.telegramUserId}`;
-  if (preview.destination.id !== expected || preview.destination.label !== "Saved Messages") {
-    return { error: "The initial send policy can permit only this sender's Saved Messages destination. Preview Saved Messages before approving it." };
-  }
-  const currentSender = resolveSender();
-  if ("error" in currentSender || currentSender.sender.id !== preview.sender.id || currentSender.sender.telegramUserId !== preview.sender.telegramUserId) {
-    return { error: "The resolved sender changed or is unavailable. Review a fresh Saved Messages preview before enabling the policy." };
-  }
-  const p = paths();
-  if (!p) return { error: "Could not resolve the Telegram Client data directory; no send policy was written." };
-  try {
-    if (!host.fs.makeDirs(p.root)) return { error: "Could not create the Telegram Client data directory; no send policy was written." };
-    const saved = host.fs.writeFile(p.policy, JSON.stringify({
-      approved: true,
-      mode: INITIAL_SEND_POLICY_MODE,
-      savedMessagesId: preview.destination.id,
-      senderAccountId: preview.sender.id,
-      approvedAt: now()
-    }));
-    if (!saved) return { error: "Could not persist the send policy in Telegram Client data; no policy is enabled." };
-  } catch {
-    return { error: "Could not persist the send policy in Telegram Client data; no policy is enabled." };
-  }
-  return { result: JSON.stringify(policySummary()) };
 }
 function loadOutbox(p) {
   try {
@@ -2395,27 +2454,26 @@ function sendFailureResult(kind, detail) {
 }
 function rememberPrefixedFailure(message) {
   const state = message.slice(0, message.indexOf(":"));
-  const allowed = ["not-logged-in", "reauth-needed", "policy-not-set", "destination-not-permitted", "rate-limited", "upstream-rejected", "unknown"];
-  return allowed.indexOf(state) >= 0 ? rememberSendFailure(state, message) : rememberSendFailure("unknown", "The command result could not be classified safely. Inspect Telegram before retrying.");
+  return SEND_FAILURES.indexOf(state) >= 0 ? rememberSendFailure(state, message) : rememberSendFailure("unknown", "The command result could not be classified safely. Inspect Telegram before retrying.");
 }
 function parseSendArgs(args) {
-  if (args.length < 2 || !validChatId(args[0])) return { error: "destination-not-permitted: Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>. Choose an id from chats; display names are not accepted." };
+  if (args.length < 2 || !validChatId(args[0])) return { error: failureMessage("invalid-request", "Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>; display names are not accepted.") };
   let start = 1;
   let key;
   if (args[1] === "--key") {
-    if (args.length < 4 || !/^[A-Za-z0-9._:-]{1,160}$/.test(args[2])) return { error: "upstream-rejected: --key needs a 1\u2013160 character idempotency key, followed by message text." };
+    if (args.length < 4 || !/^[A-Za-z0-9._:-]{1,160}$/.test(args[2])) return { error: failureMessage("invalid-request", "--key needs a 1\u2013160 character idempotency key ([A-Za-z0-9._:-]), followed by message text.") };
     key = args[2];
     start = 3;
   }
   const text = args.slice(start).join(" ");
-  if (!text.length) return { error: "upstream-rejected: Message text must not be empty." };
+  if (!text.length) return { error: failureMessage("invalid-request", "Message text must not be empty.") };
   return { chatId: args[0], text, key };
 }
 function failureForUpstream(message) {
   if (authFailure(message)) return "reauth-needed";
   if (/not logged in|no active session|run tg login/i.test(message)) return "not-logged-in";
   if (waitSeconds(message) !== null) return "rate-limited";
-  if (/MESSAGE_TOO_LONG|PEER_ID_INVALID|CHAT_WRITE_FORBIDDEN|USER_BANNED_IN_CHANNEL|USER_PRIVACY_RESTRICTED|CHAT_ADMIN_REQUIRED|WRITE_FORBIDDEN/i.test(message)) return "upstream-rejected";
+  if (/MESSAGE_TOO_LONG|PEER_ID_INVALID|CHAT_WRITE_FORBIDDEN|USER_BANNED_IN_CHANNEL|USER_PRIVACY_RESTRICTED|CHAT_ADMIN_REQUIRED|WRITE_FORBIDDEN|USER_IS_BLOCKED|INPUT_USER_DEACTIVATED/i.test(message)) return "upstream-rejected";
   if (/exec denied|spawn .*?(?:ENOENT|EACCES)|binary .*?not found|not installed/i.test(message)) return "upstream-rejected";
   return "unknown";
 }
@@ -2464,7 +2522,7 @@ function recordedByCallerKey(key, chatId2, text) {
   const attempt = loaded.ledger.attempts.find((item) => item.idempotencyKey === key);
   if (!attempt) return null;
   if (attempt.payloadHash !== sha256Hex(text) || attempt.destination.id !== chatId2) {
-    return sendFailureResult("upstream-rejected", "this idempotency key is already bound to a different destination or payload; choose a new key");
+    return sendFailureResult("invalid-request", "This idempotency key is already bound to a different chat or text; choose a new key.");
   }
   if (attempt.state === "sent") return attemptResult(attempt);
   if (attempt.state === "unknown") return sendFailureResult("unknown");
@@ -2472,24 +2530,29 @@ function recordedByCallerKey(key, chatId2, text) {
   if (attempt.state === "rate_limited" && Number(attempt.retryAfter) > now()) return sendFailureResult("rate-limited", attempt.retryAfter);
   return null;
 }
-function sendCommand(sessionId, args) {
+function serverMessageId(data) {
+  const nested = data && typeof data.message === "object" ? data.message : null;
+  for (const value of [data && data.message_id, nested && nested.id, nested && nested.message_id, data && data.id]) {
+    if (typeof value === "number" && Number.isSafeInteger(value) && value > 0 || typeof value === "string" && /^[0-9]{1,20}$/.test(value)) return String(value);
+  }
+  return null;
+}
+function sendCommand(origin, args) {
   const parsed = parseSendArgs(args);
   if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
-  const matchingPreview = Object.values(previewTokens).reverse().find((token) => token.sender.id === policySummary().senderAccountId && token.destination.id === parsed.chatId && token.text === parsed.text);
-  const key = parsed.key || matchingPreview?.previewNonce;
+  const matchingPreview = Object.values(previewTokens).reverse().find((token) => token.destination.id === parsed.chatId && token.text === parsed.text);
+  let key = parsed.key || matchingPreview?.previewNonce;
   if (key) {
     const recorded = recordedByCallerKey(key, parsed.chatId, parsed.text);
     if (recorded) return recorded;
   }
-  const policy = policySummary();
-  if (!policy.configured) return sendFailureResult("policy-not-set");
   const resolved = resolveSender();
   if ("error" in resolved) return rememberPrefixedFailure(resolved.error);
   const found = resolveDestination(parsed.chatId, resolved.sender);
-  if ("error" in found) return sendFailureResult("destination-not-permitted", policy.allowedDestinations[0] && policy.allowedDestinations[0].id);
-  const permitted = policy.senderAccountId === resolved.sender.id && policy.allowedDestinations.some((entry) => entry.id === found.destination.id && found.destination.label === "Saved Messages");
-  if (!permitted || found.destination.id !== `id:${resolved.sender.telegramUserId}`) return sendFailureResult("destination-not-permitted", policy.allowedDestinations[0] && policy.allowedDestinations[0].id);
-  if (!key) return sendFailureResult("upstream-rejected", "create a fresh preview before sending without an explicit idempotency key");
+  if ("error" in found) return rememberPrefixedFailure(found.error);
+  const decision = decideSend(readSendScope(), found.destination.id, origin);
+  if (!decision.allow) return sendFailureResult("chat-not-allowed", decision.message);
+  if (!key) key = sha256Hex(`send\0${now()}\0${++previewSequence}\0${parsed.chatId}`).slice(0, 32);
   const payloadHash = sha256Hex(parsed.text);
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
@@ -2498,7 +2561,7 @@ function sendCommand(sessionId, args) {
   const ledger = loaded.ledger;
   let attempt = ledger.attempts.find((item) => item.idempotencyKey === key);
   if (attempt && (attempt.payloadHash !== payloadHash || attempt.sender.id !== resolved.sender.id || attempt.destination.id !== found.destination.id)) {
-    return sendFailureResult("upstream-rejected", "this idempotency key is already bound to a different sender, destination, or payload; choose a new key");
+    return sendFailureResult("invalid-request", "This idempotency key is already bound to a different sender, chat, or text; choose a new key.");
   }
   if (attempt && attempt.state === "sent") return attemptResult(attempt);
   if (attempt && attempt.state === "unknown") return sendFailureResult("unknown");
@@ -2528,7 +2591,8 @@ function sendCommand(sessionId, args) {
   delete attempt.failureMessage;
   delete attempt.retryAfter;
   if (!persistOutbox(p, ledger)) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; Telegram was not contacted");
-  const opts = options(["--account", resolved.sender.id, "--output", "json", "send", "--", parsed.text], void 0, { timeoutMs: 5e3 });
+  const peer = found.destination.savedMessages ? [] : ["--peer", found.destination.id];
+  const opts = options(["--account", resolved.sender.id, "--output", "json", "send", ...peer, "--", parsed.text], void 0, { timeoutMs: 5e3 });
   if (!opts) return failAttempt(p, ledger, attempt, "upstream-rejected", "tg binary is unavailable before send");
   return host.exec.async(opts, (result) => {
     const output = redact(result.stdout || "");
@@ -2536,9 +2600,9 @@ function sendCommand(sessionId, args) {
     if (result.error || typeof result.code !== "number" || result.code !== 0) return failAttempt(p, ledger, attempt, failureForUpstream(detail), detail);
     const response = parseJson(output.trim());
     if (!response || response.schema !== 1 || response.data === void 0) return failAttempt(p, ledger, attempt, "unknown");
-    const message = response.data.message || response.data;
-    const upstreamId = message && (message.id !== void 0 ? message.id : message.message_id);
-    attempt.telegramMessageId = upstreamId === void 0 || upstreamId === null ? void 0 : String(upstreamId);
+    const upstreamId = serverMessageId(response.data);
+    if (upstreamId === null) return failAttempt(p, ledger, attempt, "unknown");
+    attempt.telegramMessageId = upstreamId;
     attempt.state = "sent";
     attempt.updatedAt = now();
     delete attempt.failure;
@@ -2934,7 +2998,7 @@ function onAgentCommand(ctx) {
     case "use":
       return args.length === 1 ? useAccount(args[0]) : { error: "Usage: use <configured-account-id>." };
     case "chats":
-      return agentChats();
+      return agentChats(args);
     case "history":
       return agentHistory(args);
     case "health": {
@@ -2943,14 +3007,14 @@ function onAgentCommand(ctx) {
       current.account = accountSummary(current);
       delete current.resolvedAccount;
       current.runtimeDir = paths()?.root || null;
-      current.sendPolicy = policySummary();
+      current.sendScope = readSendScope();
       current.sendState = latestSendState();
       return { result: JSON.stringify(current) };
     }
     case "logout":
       return logout();
     case "send":
-      return sendCommand(ctx.sessionId, args);
+      return sendCommand("agent", args);
     case "preview":
       return previewCommand(args, "agent");
     default:
@@ -3035,8 +3099,8 @@ function renderGlance() {
     nodes.push({ kind: "badge", label: "Configured", tone: "ok" });
     nodes.push({ kind: "text", text: storageBackend().name, style: { tone: "muted" } });
   }
-  const policy = policySummary();
-  nodes.push({ kind: "badge", label: policy.configured ? "Saved Messages send policy enabled" : "Sending locked: owner policy required", tone: policy.configured ? "ok" : "warn" });
+  const scope = readSendScope();
+  nodes.push({ kind: "badge", label: scope.mode === "all" ? "Agent sends: any chat" : `Agent sends: ${scope.chats.length} allowed chat${scope.chats.length === 1 ? "" : "s"}`, tone: scope.mode === "all" ? "ok" : "warn" });
   const latest = latestSendState();
   if (latest) {
     nodes.push({ kind: "badge", label: `Last send: ${latest.state}`, tone: latest.state === "sent" ? "ok" : "warn" });
@@ -3052,22 +3116,21 @@ function viewCall(method, args) {
     current.account = accountSummary(current);
     delete current.resolvedAccount;
     current.loginJobId = activeLoginJobId;
-    current.sendPolicy = policySummary();
+    current.sendScope = readSendScope();
     current.sendState = latestSendState();
     return current;
   }
   if (method === "preview") return previewCommand([String(args.chatId || ""), String(args.text || "")], "view");
-  if (method === "setSendPolicy") return setSendPolicy(args);
+  if (method === "chats") return agentChats(String(args.query || "").trim() ? [String(args.query)] : []);
+  if (method === "setSendScope") return setSendScope(args);
   if (method === "send") {
-    const request = [String(args.chatId || "")];
-    if (args.idempotencyKey) request.push("--key", String(args.idempotencyKey));
-    request.push(String(args.text || ""));
+    const chat = String(args.chatId || "");
+    const text = String(args.text || "");
     const token = previewTokens[String(args.previewId || "")];
-    if (!token || token.destination.id !== request[0] || token.text !== String(args.text || "")) {
-      return rememberSendFailure("destination-not-permitted", "destination-not-permitted: This view has no matching resolved preview. Review the sender, immutable destination, and exact text again before sending.");
+    if (!token || token.destination.id !== chat || token.text !== text) {
+      return rememberSendFailure("invalid-request", "invalid-request: This view has no matching preview for that chat and text. Preview again before sending.");
     }
-    request.push("--key", token.previewNonce);
-    return sendCommand("plugin-view", request);
+    return sendCommand("view", [chat, "--key", String(args.idempotencyKey || token.previewNonce), text]);
   }
   if (method === "loginStart") return loginStart(args);
   if (method === "loginPoll") return loginPoll(String(args.jobId || ""));
@@ -3107,7 +3170,8 @@ var plugin = {
     injectedClock = clock;
   },
   __test_sha256Hex: sha256Hex,
-  __test_policySummary: policySummary,
+  __test_readSendScope: readSendScope,
+  __test_serverMessageId: serverMessageId,
   __test_latestSendState: latestSendState,
   __test_failureMessage: failureMessage,
   __test_failureForUpstream: failureForUpstream

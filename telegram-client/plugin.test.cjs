@@ -52,8 +52,8 @@ function mockHost(options = {}) {
   const config = join(root, "gotd.cli.yaml");
   const accounts = options.accounts || [{ label: "default", has_session: true, default: true }];
   const chats = options.chats || [
-    { peer: { id: 4242, label: "Alice" }, unread: 2 },
-    { peer: { id: "Group title", label: "Group title" }, unread: 0 },
+    { peer: { id: 4242, type: "user", name: "Alice", username: "alice" }, unread: 2 },
+    { peer: { id: "Group title", type: "chat", name: "Group title" }, unread: 0 },
   ];
   const secrets = { ...(options.secrets || {}) };
   const calls = [];
@@ -92,7 +92,7 @@ function mockHost(options = {}) {
       case "history": return words.length >= 2 && words.includes("--limit");
       case "whoami": return words.length === 1;
       case "logout": return words.length === 1;
-      case "send": return words[1] === "--" && typeof words[2] === "string";
+      case "send": return (words[1] === "--" && words.length === 3) || (words[1] === "--peer" && /^id:-?[0-9]+$/.test(words[2]) && words[3] === "--" && words.length === 5);
       case "login": return words.includes("--output") && words.includes("json");
       default: return false;
     }
@@ -130,6 +130,7 @@ function mockHost(options = {}) {
       if (sendMode === "timeout") return { code: 0, stdout: "", stderr: "", simulatedTimeout: true };
       if (sendMode === "rate-limited") return { code: 1, stdout: "", stderr: "FLOOD_WAIT_30" };
       if (sendMode === "rejected") return { code: 1, stdout: "", stderr: "MESSAGE_TOO_LONG" };
+      if (sendMode === "no-id") return { code: 0, stdout: envelope({ ok: true }), stderr: "" };
       return { code: 0, stdout: envelope({ message: { id: 9001 } }), stderr: "" };
     }
     if (words[0] === "login" && options.loginLog !== undefined) return { code: 0, stdout: "", stderr: options.loginLog };
@@ -221,16 +222,6 @@ function configureLoggedInFixture(env) {
   env.secrets.config_initialized = "true";
 }
 
-function approveSavedMessages(env) {
-  configureLoggedInFixture(env);
-  const previewResult = plugin.viewCall("preview", { chatId: "id:777", text: "fixture message" });
-  assert.equal(previewResult.error, undefined, previewResult.error);
-  const preview = JSON.parse(previewResult.result);
-  const approved = plugin.viewCall("setSendPolicy", { previewId: preview.previewId, approveSavedMessagesOnly: true });
-  assert.equal(approved.error, undefined, approved.error);
-  return preview;
-}
-
 test("faithful await mock returns a marker and resumes through the one-shot continuation", () => {
   const env = mockHost();
   try {
@@ -243,15 +234,20 @@ test("faithful await mock returns a marker and resumes through the one-shot cont
   } finally { env.cleanup(); }
 });
 
-test("agent preview cannot approve Saved Messages; a view preview can", () => {
+test("no agent verb changes the send restriction; only the view can", () => {
   const env = mockHost();
   try {
     configureLoggedInFixture(env);
-    const agentPreview = plugin.onAgentCommand({ sessionId: "policy-test", verb: "preview", args: ["id:777", "fixture message"] });
-    const denied = plugin.viewCall("setSendPolicy", { previewId: JSON.parse(agentPreview.result).previewId, approveSavedMessagesOnly: true });
-    assert.match(denied.error, /only a preview created in this view/i);
-    const preview = approveSavedMessages(env);
-    assert.ok(preview.previewId);
+    for (const verb of ["setSendScope", "restrict", "allow", "scope"]) {
+      const result = plugin.onAgentCommand({ sessionId: "scope-test", verb, args: ["only", "id:4242"] });
+      assert.match(result.error, /unknown Telegram verb/i);
+    }
+    assert.equal(existsSync(plugin.__test_paths().scope), false);
+    const saved = plugin.viewCall("setSendScope", { mode: "only", chats: [{ id: "id:4242", title: "Alice" }] });
+    assert.equal(saved.error, undefined, saved.error);
+    assert.deepEqual(plugin.__test_readSendScope(), { mode: "only", chats: [{ id: "id:4242", title: "Alice" }] });
+    assert.match(plugin.viewCall("setSendScope", { mode: "only", chats: [{ id: "Alice" }] }).error, /not changed/i);
+    assert.deepEqual(plugin.__test_readSendScope(), { mode: "only", chats: [{ id: "id:4242", title: "Alice" }] });
   } finally { env.cleanup(); }
 });
 
@@ -300,7 +296,7 @@ test("plugin data paths stay rooted across macOS, Linux, and Windows host mappin
     try {
       const p = plugin.__test_paths();
       assert.equal(path.relative(p.root, p.outbox), "outbox.json");
-      assert.equal(path.relative(p.root, p.policy), "send-policy.json");
+      assert.equal(path.relative(p.root, p.scope), "send-scope.json");
       assert.equal(host.path.equal(p.root, p.outbox), false);
       assert.equal(path.basename(p.binary), platform === "win32" ? "tg.exe" : "tg");
     } finally { env.cleanup(); }
@@ -377,7 +373,7 @@ test("each lifecycle state has its own actionable report", () => {
   } finally { env.cleanup(); }
 });
 
-test("read and lifecycle verbs dispatch; send stays closed until an explicit policy is set", () => {
+test("read and lifecycle verbs dispatch", () => {
   const env = mockHost({ accounts: [
     { label: "default", has_session: true, default: true },
     { label: "work", has_session: true, default: false },
@@ -390,7 +386,6 @@ test("read and lifecycle verbs dispatch; send stays closed until an explicit pol
     assert.deepEqual(JSON.parse(command("chats").result).chats.map((chat) => chat.id), ["id:4242"]);
     assert.ok(JSON.parse(command("history", ["id:4242"]).result).messages.length > 0);
     assert.equal(JSON.parse(command("health").result).state, "logged-in");
-    assert.match(command("send", ["id:4242", "hello"]).error, /policy-not-set/i);
     assert.equal(JSON.parse(command("preview", ["id:4242", "hello"]).result).destination.id, "id:4242");
     assert.match(command("explode").error, /unknown Telegram verb/i);
     const used = env.calls.find((call) => call.words[0] === "accounts" && call.words[1] === "default");
@@ -415,7 +410,9 @@ test("preview exposes the resolved sender and immutable destination without a se
     assert.equal(preview.destination.id, "id:4242");
     assert.equal(preview.destination.label, "Alice");
     assert.equal(preview.text, "exact payload");
-    assert.equal(preview.policy.configured, false);
+    assert.equal(preview.destination.type, "user");
+    assert.equal(preview.destination.username, "@alice");
+    assert.equal(preview.allowed, true);
     assert.equal(env.calls.some((call) => call.words[0] === "send"), false);
     assert.equal(existsSync(plugin.__test_paths().outbox), false);
   } finally { env.cleanup(); }
@@ -423,8 +420,8 @@ test("preview exposes the resolved sender and immutable destination without a se
 
 test("preview resolves duplicate display names by immutable id and rejects a display name as an id", () => {
   const env = mockHost({ chats: [
-    { peer: { id: 4242, label: "Alex" }, unread: 0 },
-    { peer: { id: 4243, label: "Alex" }, unread: 0 },
+    { peer: { id: 4242, type: "user", name: "Alex" }, unread: 0 },
+    { peer: { id: 4243, type: "user", name: "Alex" }, unread: 0 },
   ] });
   try {
     configureLoggedInFixture(env);
@@ -438,38 +435,218 @@ test("preview resolves duplicate display names by immutable id and rejects a dis
   } finally { env.cleanup(); }
 });
 
-test("no policy means policy-not-set with no attempt record and no send exec", () => {
-  const env = mockHost();
+const sendFixtureChats = [
+  { peer: { id: 4242, type: "user", name: "Anna Ivanova", username: "anya" }, unread: 0 },
+  { peer: { id: 4343, type: "user", name: "Anna Petrova" }, unread: 0 },
+  { peer: { id: 5005, type: "chat", name: "Binaura Team" }, unread: 3 },
+  { peer: { id: 6006, type: "channel", name: "Release Notes", username: "binaura_news" }, unread: 0 },
+];
+
+function sendCalls(env) { return env.calls.filter((call) => call.words[0] === "send"); }
+
+test("with no setup, an agent send to a resolved user chat goes out with --peer and returns the server message id", () => {
+  const env = mockHost({ chats: sendFixtureChats });
   try {
     configureLoggedInFixture(env);
-    const result = plugin.onAgentCommand({ sessionId: "send-test", verb: "send", args: ["id:777", "hello"] });
-    assert.match(result.error, /policy-not-set/i);
-    assert.equal(existsSync(plugin.__test_paths().outbox), false);
-    assert.equal(env.calls.length, 0, "policy refusal happens before any tg exec");
-    assert.equal(env.calls.some((call) => call.words[0] === "send"), false);
-    assert.equal(plugin.viewCall("status", {}).sendState.state, "policy-not-set");
-    assert.match(JSON.stringify(plugin.renderGlance()), /Last send: policy-not-set/);
+    const found = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "chats", args: ["Anna", "Ivanova"] }).result);
+    assert.equal(found.ambiguous, false);
+    assert.equal(found.match.id, "id:4242");
+    assert.equal(found.match.title, "Anna Ivanova");
+    const result = plugin.onAgentCommand({ sessionId: "s", verb: "send", args: [found.match.id, "--key", "anna-1", "test"] });
+    assert.equal(result.error, undefined, result.error);
+    const sent = JSON.parse(result.result);
+    assert.equal(sent.status, "sent");
+    assert.equal(sent.telegramMessageId, "9001");
+    assert.equal(sent.destination.id, "id:4242");
+    assert.equal(sent.destination.label, "Anna Ivanova");
+    assert.deepEqual(sendCalls(env).map((call) => call.words), [["send", "--peer", "id:4242", "--", "test"]]);
+    assert.equal(existsSync(plugin.__test_paths().scope), false, "the default path needs no restriction file");
+    assert.equal(plugin.viewCall("status", {}).sendState.state, "sent");
   } finally { env.cleanup(); }
 });
 
-test("Saved-Messages-only policy refuses other destination ids before exec", () => {
-  const env = mockHost();
+test("a send to a group chat and to Saved Messages both succeed without any approval step", () => {
+  const env = mockHost({ chats: sendFixtureChats });
   try {
-    approveSavedMessages(env);
-    const policy = JSON.parse(readFileSync(plugin.__test_paths().policy, "utf8"));
-    assert.equal(policy.mode, "saved-messages-only");
-    assert.equal(policy.savedMessagesId, "id:777");
-    const result = plugin.onAgentCommand({ sessionId: "send-test", verb: "send", args: ["id:4242", "hello"] });
-    assert.match(result.error, /destination-not-permitted/i);
-    assert.equal(env.calls.some((call) => call.words[0] === "send"), false);
+    configureLoggedInFixture(env);
+    const group = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "chats", args: ["binaura team"] }).result).match;
+    assert.equal(group.type, "chat");
+    const toGroup = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "send", args: [group.id, "--key", "group-1", "hi all"] }).result);
+    assert.equal(toGroup.status, "sent");
+    const toSelf = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["id:777", "--key", "self-1", "note"] }).result);
+    assert.equal(toSelf.destination.label, "Saved Messages");
+    assert.deepEqual(sendCalls(env).map((call) => call.words), [["send", "--peer", "id:5005", "--", "hi all"], ["send", "--", "note"]]);
+  } finally { env.cleanup(); }
+});
+
+test("an ambiguous chat name returns candidates and no match, and nothing is sent", () => {
+  const env = mockHost({ chats: sendFixtureChats });
+  try {
+    configureLoggedInFixture(env);
+    const found = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "chats", args: ["anna"] }).result);
+    assert.equal(found.match, null);
+    assert.equal(found.ambiguous, true);
+    assert.deepEqual(found.candidates.map((chat) => chat.id), ["id:4242", "id:4343"]);
+    assert.match(found.next, /ask which one/i);
+    const byUsername = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "chats", args: ["@binaura_news"] }).result);
+    assert.equal(byUsername.match.id, "id:6006");
+    const none = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "chats", args: ["Nobody"] }).result);
+    assert.equal(none.match, null);
+    assert.equal(none.ambiguous, false);
+    assert.deepEqual(none.candidates, []);
+    assert.equal(sendCalls(env).length, 0);
+  } finally { env.cleanup(); }
+});
+
+test("an idempotent retry with the same key returns the recorded message id without resending", () => {
+  const env = mockHost({ chats: sendFixtureChats });
+  try {
+    configureLoggedInFixture(env);
+    const args = ["id:4242", "--key", "retry-1", "test"];
+    const first = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "send", args }).result);
+    const second = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "send", args }).result);
+    assert.deepEqual(second, first);
+    assert.equal(sendCalls(env).length, 1);
+    const rebound = plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["id:5005", "--key", "retry-1", "test"] });
+    assert.match(rebound.error, /^invalid-request:.*different chat or text/i);
+    assert.equal(sendCalls(env).length, 1);
+  } finally { env.cleanup(); }
+});
+
+test("a send without --key gets a fresh key that is returned for retries", () => {
+  const env = mockHost({ chats: sendFixtureChats });
+  try {
+    configureLoggedInFixture(env);
+    const first = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["id:4242", "keyless fresh text"] }).result);
+    assert.match(first.idempotencyKey, /^[0-9a-f]{32}$/);
+    const retry = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["id:4242", "--key", first.idempotencyKey, "keyless fresh text"] }).result);
+    assert.deepEqual(retry, first);
+    assert.equal(sendCalls(env).length, 1);
+  } finally { env.cleanup(); }
+});
+
+test("tg success without a server message id is recorded as unknown, never as sent", () => {
+  const env = mockHost({ chats: sendFixtureChats, sendMode: "no-id" });
+  try {
+    configureLoggedInFixture(env);
+    const result = plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["id:4242", "--key", "no-id", "hello"] });
+    assert.match(result.error, /^unknown:.*not report it as delivered/i);
+    const ledger = JSON.parse(readFileSync(plugin.__test_paths().outbox, "utf8"));
+    assert.equal(ledger.attempts[0].state, "unknown");
+    assert.equal(plugin.__test_serverMessageId({ message_id: 12 }), "12");
+    assert.equal(plugin.__test_serverMessageId({ message: { id: 13 } }), "13");
+    assert.equal(plugin.__test_serverMessageId({ message: "text", ok: true }), null);
+  } finally { env.cleanup(); }
+});
+
+test("a chat id outside the recent dialogs is chat-not-found before any send", () => {
+  const env = mockHost({ chats: sendFixtureChats });
+  try {
+    configureLoggedInFixture(env);
+    const result = plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["id:999999", "--key", "missing", "hello"] });
+    assert.match(result.error, /^chat-not-found:.*chats <name>/i);
+    assert.equal(sendCalls(env).length, 0);
     assert.equal(existsSync(plugin.__test_paths().outbox), false);
   } finally { env.cleanup(); }
+});
+
+test("an owner restriction refuses agent sends to other chats with chat-not-allowed; view sends stay unrestricted", () => {
+  const env = mockHost({ chats: sendFixtureChats });
+  try {
+    configureLoggedInFixture(env);
+    assert.equal(plugin.viewCall("setSendScope", { mode: "only", chats: [{ id: "id:5005", title: "Binaura Team" }] }).error, undefined);
+    const refused = plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["id:4242", "--key", "blocked", "hello"] });
+    assert.match(refused.error, /^chat-not-allowed:.*Restrict agent sends.*Binaura Team/);
+    assert.equal(sendCalls(env).length, 0);
+    assert.equal(existsSync(plugin.__test_paths().outbox), false);
+    const preview = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "preview", args: ["id:4242", "hello"] }).result);
+    assert.equal(preview.allowed, false);
+    assert.match(preview.restriction, /Restrict agent sends/);
+    const allowed = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["id:5005", "--key", "ok", "hello"] }).result);
+    assert.equal(allowed.status, "sent");
+    const viewPreview = JSON.parse(plugin.viewCall("preview", { chatId: "id:4242", text: "from owner" }).result);
+    const viewSend = JSON.parse(plugin.viewCall("send", { chatId: "id:4242", text: "from owner", previewId: viewPreview.previewId }).result);
+    assert.equal(viewSend.status, "sent");
+    assert.deepEqual(sendCalls(env).map((call) => call.words), [["send", "--peer", "id:5005", "--", "hello"], ["send", "--peer", "id:4242", "--", "from owner"]]);
+    assert.equal(plugin.viewCall("setSendScope", { mode: "all" }).error, undefined);
+    assert.equal(JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["id:4242", "--key", "blocked", "hello"] }).result).status, "sent");
+  } finally { env.cleanup(); }
+});
+
+test("send-scope decision: default allows every chat; an enabled restriction denies others; unreadable settings fail closed", () => {
+  const scope = require("../shared/src/send-scope.ts");
+  const valid = (id) => /^id:-?[0-9]{1,20}$/.test(id);
+  assert.deepEqual(scope.parseSendScope(null, valid), { mode: "all" });
+  assert.deepEqual(scope.decideSend(scope.parseSendScope(null, valid), "id:1", "agent"), { allow: true });
+  const only = scope.parseSendScope(JSON.stringify({ mode: "only", chats: [{ id: "id:1", title: "One" }] }), valid);
+  assert.deepEqual(scope.decideSend(only, "id:1", "agent"), { allow: true });
+  const denied = scope.decideSend(only, "id:2", "agent");
+  assert.equal(denied.allow, false);
+  assert.equal(denied.reason, "chat-not-allowed");
+  assert.match(denied.message, /^chat-not-allowed: The owner's "Restrict agent sends" setting permits only these chats: One\. id:2/);
+  assert.deepEqual(scope.decideSend(only, "id:2", "view"), { allow: true });
+  assert.deepEqual(scope.parseSendScope("{not json", valid), { mode: "only", chats: [] });
+  assert.deepEqual(scope.parseSendScope(JSON.stringify({ mode: "only", chats: [{ id: "Alice" }] }), valid), { mode: "only", chats: [] });
+  assert.equal(scope.decideSend(scope.parseSendScope("{not json", valid), "id:1", "agent").allow, false);
+  assert.deepEqual(scope.parseSendScope(JSON.stringify({ mode: "all", chats: [{ id: "id:1" }] }), valid), { mode: "all" });
+  assert.match(scope.validateSendScope({ mode: "maybe" }, valid).error, /all or only/);
+  assert.deepEqual(scope.validateSendScope({ mode: "only", chats: [{ id: "id:1", title: "A" }, { id: "id:1", title: "A" }] }, valid), { mode: "only", chats: [{ id: "id:1", title: "A" }] });
+});
+
+test("chat matching prefers one exact title, matches all words in any order, and reports ambiguity", () => {
+  const { matchChats } = require("../shared/src/send-scope.ts");
+  const chats = [
+    { id: "id:1", title: "Anna", username: null },
+    { id: "id:2", title: "Anna Ivanova", username: "@anya" },
+    { id: "id:3", title: "Ivan Annenkov", username: null },
+  ];
+  assert.equal(matchChats(chats, "ivanova anna").match.id, "id:2");
+  assert.equal(matchChats(chats, "Anna").match.id, "id:1", "a single exact title wins over partial hits");
+  assert.equal(matchChats(chats, "anya").match.id, "id:2");
+  assert.equal(matchChats(chats, "id:3").match.id, "id:3");
+  const ambiguous = matchChats(chats, "ann");
+  assert.equal(ambiguous.match, null);
+  assert.equal(ambiguous.ambiguous, true);
+  assert.equal(ambiguous.candidates.length, 3);
+  assert.deepEqual(matchChats(chats, "   "), { match: null, ambiguous: false, candidates: [] });
+});
+
+test("view: Restrict agent sends defaults to all chats and toggles chats in and out of the list", () => {
+  const React = require("react");
+  const { renderToStaticMarkup } = require("react-dom/server");
+  const { SendScopeEditor, ChatResults, toggleScopeChat } = require("./ui/src/app.tsx");
+  const noop = () => {};
+  const defaultMarkup = renderToStaticMarkup(React.createElement(SendScopeEditor, { scope: undefined, busy: false, onSave: noop }));
+  assert.match(defaultMarkup, /checked=""[^>]*\/?>\s*<span>All chats \(default\)/);
+  const emptyOnly = renderToStaticMarkup(React.createElement(SendScopeEditor, { scope: { mode: "only", chats: [] }, busy: false, onSave: noop }));
+  assert.match(emptyOnly, /agent cannot send anywhere/);
+  const anna = { id: "id:4242", title: "Anna Ivanova" };
+  const approved = toggleScopeChat({ mode: "all" }, anna);
+  assert.deepEqual(approved, { mode: "only", chats: [anna] });
+  assert.deepEqual(toggleScopeChat(approved, anna), { mode: "only", chats: [] });
+  const listed = renderToStaticMarkup(React.createElement(SendScopeEditor, { scope: approved, busy: false, onSave: noop }));
+  assert.match(listed, /Anna Ivanova/);
+  assert.match(listed, />Remove</);
+  const unrestricted = renderToStaticMarkup(React.createElement(ChatResults, { chats: [anna], selectedId: "", scope: { mode: "all" }, busy: false, onChoose: noop, onScope: noop }));
+  assert.doesNotMatch(unrestricted, /Allow for agent/, "no per-chat approval is offered when sends are unrestricted");
+  const restricted = renderToStaticMarkup(React.createElement(ChatResults, { chats: [anna], selectedId: "", scope: { mode: "only", chats: [] }, busy: false, onChoose: noop, onScope: noop }));
+  assert.match(restricted, /Allow for agent/);
+  const saved = [];
+  const editor = SendScopeEditor({ scope: approved, busy: false, onSave: (value) => saved.push(value) });
+  const radios = [];
+  (function walk(node) {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) return node.forEach(walk);
+    if (node.props && node.props.type === "radio") radios.push(node);
+    if (node.props) walk(node.props.children);
+  })(editor);
+  radios[0].props.onChange();
+  assert.deepEqual(saved, [{ mode: "all" }]);
 });
 
 test("login and authorization failures return their named states before creating an attempt", () => {
   const loggedOut = mockHost({ accounts: [{ label: "default", has_session: false, default: true }] });
   try {
-    writeJson(plugin.__test_paths().policy, { approved: true, mode: "saved-messages-only", savedMessagesId: "id:777", senderAccountId: "default", approvedAt: 0 });
     const missing = plugin.onAgentCommand({ sessionId: "send-test", verb: "send", args: ["id:777", "--key", "logged-out-case", "hello"] });
     assert.match(missing.error, /^not-logged-in:/i);
     assert.equal(existsSync(plugin.__test_paths().outbox), false);
@@ -479,7 +656,6 @@ test("login and authorization failures return their named states before creating
   const reauth = mockHost({ whoamiError: "not authorized: session revoked" });
   try {
     configureLoggedInFixture(reauth);
-    writeJson(plugin.__test_paths().policy, { approved: true, mode: "saved-messages-only", savedMessagesId: "id:777", senderAccountId: "default", approvedAt: 0 });
     const previewResult = plugin.onAgentCommand({ sessionId: "send-test", verb: "preview", args: ["id:777", "hello"] });
     assert.match(previewResult.error, /^reauth-needed:/i);
     const result = plugin.onAgentCommand({ sessionId: "send-test", verb: "send", args: ["id:777", "--key", "reauth-case", "hello"] });
@@ -492,7 +668,7 @@ test("login and authorization failures return their named states before creating
 test("definitive Telegram rejection is recorded as failed with upstream-rejected action", () => {
   const env = mockHost({ sendMode: "rejected" });
   try {
-    approveSavedMessages(env);
+    configureLoggedInFixture(env);
     const result = plugin.onAgentCommand({ sessionId: "send-test", verb: "send", args: ["id:777", "--key", "rejected-case", "hello"] });
     assert.match(result.error, /^upstream-rejected:/i);
     const ledger = JSON.parse(readFileSync(plugin.__test_paths().outbox, "utf8"));
@@ -512,7 +688,7 @@ test("unknown send outcome is recorded and never automatically retried", () => {
     },
   });
   try {
-    approveSavedMessages(env);
+    configureLoggedInFixture(env);
     const args = ["id:777", "--key", "unknown-case", "hello"];
     const first = plugin.onAgentCommand({ sessionId: "send-test", verb: "send", args });
     assert.equal(stateBeforeExec, "pending", "the pending ledger record exists before exec.start issues send");
@@ -534,7 +710,7 @@ test("unknown send outcome is recorded and never automatically retried", () => {
 test("same idempotency key keeps one sent record and returns its recorded result", () => {
   const env = mockHost({ secrets: { api_id: "11223344", api_hash: "0123456789abcdef0123456789abcdef" } });
   try {
-    approveSavedMessages(env);
+    configureLoggedInFixture(env);
     const args = ["id:777", "--key", "sent-case", "hello saved messages"];
     const first = plugin.onAgentCommand({ sessionId: "send-test", verb: "send", args });
     const callsAfterFirst = env.calls.length;
@@ -564,7 +740,7 @@ test("same idempotency key keeps one sent record and returns its recorded result
 test("default idempotency key uses a fresh preview nonce, then reuses that nonce for a repeat", () => {
   const env = mockHost();
   try {
-    approveSavedMessages(env);
+    configureLoggedInFixture(env);
     const args = ["id:777", "same derived request"];
     const preview = JSON.parse(plugin.viewCall("preview", { chatId: "id:777", text: args[1] }).result);
     const first = plugin.onAgentCommand({ sessionId: "derived-key-test", verb: "send", args });
@@ -589,7 +765,7 @@ test("rate limiting persists an upstream-derived deadline and retries only on a 
   plugin.__test_setClock(() => clock);
   const env = mockHost({ sendMode: "rate-limited" });
   try {
-    approveSavedMessages(env);
+    configureLoggedInFixture(env);
     const args = ["id:777", "--key", "rate-case", "hello"];
     const first = plugin.onAgentCommand({ sessionId: "send-test", verb: "send", args });
     assert.match(first.error, /^rate-limited:/i);
@@ -615,9 +791,9 @@ test("rate limiting persists an upstream-derived deadline and retries only on a 
 });
 
 test("all send failures have distinct actionable taxonomy and no generic failure text", () => {
-  const states = ["not-logged-in", "reauth-needed", "policy-not-set", "destination-not-permitted", "rate-limited", "upstream-rejected", "unknown"];
+  const states = ["invalid-request", "not-logged-in", "reauth-needed", "chat-not-found", "rate-limited", "upstream-rejected", "unknown"];
   const messages = states.map((state) => plugin.__test_failureMessage(state, state === "rate-limited" ? 123 : "fixture detail"));
-  const actions = [/sign in/i, /complete QR login/i, /review.*enable/i, /select.*exact id/i, /invoke send again/i, /correct.*invoke send again/i, /inspect Saved Messages/i];
+  const actions = [/send again/i, /sign in/i, /complete QR login/i, /chats <name>/i, /invoke send again/i, /correct.*invoke send again/i, /never|not report it as delivered/i];
   assert.equal(new Set(messages).size, states.length);
   states.forEach((state, index) => {
     assert.ok(messages[index].startsWith(`${state}:`));
@@ -635,7 +811,7 @@ test("domios tags and ESC bracketed-paste payloads pass through as history data 
     const result = plugin.onAgentCommand({ sessionId: "untrusted-test", verb: "history", args: ["id:4242"] });
     assert.equal(JSON.parse(result.result).messages[0].text, fixture);
     assert.equal(env.calls.filter((call) => call.words[0] === "send").length, 0);
-    assert.equal(existsSync(plugin.__test_paths().policy), false);
+    assert.equal(existsSync(plugin.__test_paths().scope), false);
     const source = readFileSync(join(__dirname, "src", "plugin.ts"), "utf8");
     assert.equal(/codeterm\s+mem|mem\s+save/i.test(source), false, "no source path exports chat content to codeterm mem");
   } finally { env.cleanup(); }
