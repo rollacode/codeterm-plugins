@@ -157,8 +157,8 @@ function mockHost(options = {}) {
   exec.start = (opts) => {
     const id = `job-${++nextJob}`;
     const result = resultFor(opts);
-    if (opts.logFile) files.set(normalize(opts.logFile), options.loginOutput || "To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABCD-EFGH to authenticate.");
-    jobs.set(id, { ...result, done: true });
+    if (opts.logFile) files.set(normalize(opts.logFile), options.loginOutput || (result.code !== 0 ? `${result.stdout || ""}${result.stderr || ""}` : "To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABCD-EFGH to authenticate."));
+    jobs.set(id, opts.detach ? { done: true, code: 0, stdout: "", stderr: "" } : { ...result, done: true });
     return { jobId: id };
   };
   exec.poll = (id) => jobs.get(id) || { done: true, code: 1, error: "missing job" };
@@ -351,7 +351,7 @@ test("Teams outbox and policy stay inside the Teams plugin data root", () => {
   }
 });
 
-test("detached install verifies npm pack locally before ignore-scripts installation", () => {
+test("install verifies npm pack locally before ignore-scripts installation", () => {
   for (const [platform, arch] of [["darwin", "arm64"], ["linux", "x64"], ["win32", "arm64"]]) {
     const env = mockHost({ platform, arch, isWindows: platform === "win32", noInstalledBinary: true });
     try {
@@ -372,6 +372,7 @@ test("detached install verifies npm pack locally before ignore-scripts installat
       assert.equal(browser.state, "login-in-progress");
       assert.ok(env.calls.some((call) => call.args[0] === "--version" && (call.bin === "m365" || call.bin === "m365.cmd")), "installed binary version is checked");
       assert.ok(env.calls.some((call) => call.args[0] === "login" && call.detach), "browser login is detached and polled");
+      assert.ok(env.calls.filter((call) => ["pack", "install"].includes(call.args[0])).every((call) => !call.detach), "npm stages run attached so their result is observable");
       const complete = plugin.__test_loginPoll(browser.jobId);
       assert.equal(complete.state, "logged-in");
       assert.deepEqual(env.closedJobs, [started.jobId, packed.jobId, browser.jobId], "each completed detached job is released before the next stage");

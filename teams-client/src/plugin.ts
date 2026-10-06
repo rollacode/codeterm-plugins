@@ -207,7 +207,9 @@ function startLoginProcess(p: Paths, target: Target, stage: LoginJob["stage"], a
   const bin = stage === "pack" || stage === "install" ? target.npm : nativePath(p.binary);
   const logFile = stage === "browser" ? joinPath(p.root, `login-${authType}.log`) : undefined;
   if (logFile) try { host.fs.removeFile(logFile); } catch { }
-  try { started = host.exec.start({ bin, args, env: envFor(p), timeoutMs: 120000, detach: true, ...(logFile ? { logFile } : {}) }); }
+  // A detached job discards stdout, so only the long-lived browser sign-in detaches; npm stages must report their result.
+  const detach = stage === "browser";
+  try { started = host.exec.start({ bin, args, env: envFor(p), timeoutMs: 120000, detach, ...(logFile ? { logFile } : {}) }); }
   catch { return { error: `Could not start the m365 ${stage} step.` }; }
   if (!started.jobId) return { error: started.error || `The m365 ${stage} step did not start.` };
   loginJobs[started.jobId] = { stage, paths: p, target, packagePath, authType, logFile };
@@ -267,6 +269,11 @@ function finishLoginJob(jobId: string, state: string, error?: string): any {
 function startBrowserLogin(p: Paths, target: Target, authType: LoginAuthType = "browser"): { jobId?: string; error?: string } {
   const args = ["login", "--authType", authType, "--appId", CLIENT_ID, "--output", "json"];
   return startLoginProcess(p, target, "browser", args, undefined, authType);
+}
+
+function browserLogFailure(login: LoginJob): { state: string; message: string } | null {
+  if (!login.logFile) return null;
+  return authState(String(host.fs.readFileTail(login.logFile, 8192) || ""));
 }
 
 function deviceSignInArtifacts(login: LoginJob): { signInUrl?: string; deviceCode?: string } {
@@ -1123,6 +1130,8 @@ function loginPoll(jobId: string): any {
   if (!login) return { error: "Unknown Microsoft sign-in job." };
   let poll: { done: boolean; code?: number; stdout?: string; stderr?: string; error?: string };
   if (login.stage === "browser" && login.launchComplete) {
+    const failed = browserLogFailure(login);
+    if (failed) return finishLoginJob(jobId, failed.state, failed.message);
     const current = statusView();
     const artifacts = deviceSignInArtifacts(login);
     if (current.state === "logged-in") {
@@ -1172,6 +1181,8 @@ function loginPoll(jobId: string): any {
     return { done: false, jobId: browser.jobId, state: "login-in-progress", message: "The verified runtime is ready. Complete Microsoft work or school sign-in in the browser." };
   }
   login.launchComplete = true;
+  const failed = browserLogFailure(login);
+  if (failed) return finishLoginJob(jobId, failed.state, failed.message);
   const current = statusView();
   if (current.state !== "logged-in") return { done: false, jobId, state: "login-in-progress", message: "Finish sign-in in the browser or device flow, then check status again.", ...artifacts };
   const secured = protectCacheFiles(login.paths, true);

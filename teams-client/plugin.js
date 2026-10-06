@@ -221,8 +221,9 @@ function startLoginProcess(p, target, stage, args, packagePath, authType = "brow
     host.fs.removeFile(logFile);
   } catch {
   }
+  const detach = stage === "browser";
   try {
-    started = host.exec.start({ bin, args, env: envFor(p), timeoutMs: 12e4, detach: true, ...logFile ? { logFile } : {} });
+    started = host.exec.start({ bin, args, env: envFor(p), timeoutMs: 12e4, detach, ...logFile ? { logFile } : {} });
   } catch {
     return { error: `Could not start the m365 ${stage} step.` };
   }
@@ -289,6 +290,10 @@ function finishLoginJob(jobId, state, error) {
 function startBrowserLogin(p, target, authType = "browser") {
   const args = ["login", "--authType", authType, "--appId", CLIENT_ID, "--output", "json"];
   return startLoginProcess(p, target, "browser", args, void 0, authType);
+}
+function browserLogFailure(login) {
+  if (!login.logFile) return null;
+  return authState(String(host.fs.readFileTail(login.logFile, 8192) || ""));
 }
 function deviceSignInArtifacts(login) {
   if (!login.logFile) return {};
@@ -1158,6 +1163,8 @@ function loginPoll(jobId) {
   if (!login) return { error: "Unknown Microsoft sign-in job." };
   let poll;
   if (login.stage === "browser" && login.launchComplete) {
+    const failed2 = browserLogFailure(login);
+    if (failed2) return finishLoginJob(jobId, failed2.state, failed2.message);
     const current2 = statusView();
     const artifacts2 = deviceSignInArtifacts(login);
     if (current2.state === "logged-in") {
@@ -1227,6 +1234,8 @@ ${poll.stdout || ""}`;
     return { done: false, jobId: browser.jobId, state: "login-in-progress", message: "The verified runtime is ready. Complete Microsoft work or school sign-in in the browser." };
   }
   login.launchComplete = true;
+  const failed = browserLogFailure(login);
+  if (failed) return finishLoginJob(jobId, failed.state, failed.message);
   const current = statusView();
   if (current.state !== "logged-in") return { done: false, jobId, state: "login-in-progress", message: "Finish sign-in in the browser or device flow, then check status again.", ...artifacts };
   const secured = protectCacheFiles(login.paths, true);
