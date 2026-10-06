@@ -5,6 +5,9 @@ const SESSIONS_FILE = "sessions.json";
 export interface SavedSession {
   model: string;
   preset?: string;
+  /** OpenCode session this tab re-attaches to, and the directory it is confined to. */
+  engineSession?: string;
+  root?: string;
 }
 
 function readAll(): Record<string, SavedSession> {
@@ -23,7 +26,7 @@ export function savedSession(sid: string): SavedSession | null {
 
 export function saveSession(sid: string, entry: SavedSession): void {
   const all = readAll();
-  all[sid] = entry;
+  all[sid] = { ...(all[sid] || {}), ...entry };
   writeDataFile(SESSIONS_FILE, JSON.stringify(all));
 }
 

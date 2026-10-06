@@ -45,7 +45,7 @@ function assembleChat(history, window) {
   const tail = nonSystem.slice(-maxMessages);
   return leadingSystem ? [leadingSystem, ...tail] : tail;
 }
-function assembleMachine(charter, state, input) {
+function assembleMachine(charter, state2, input) {
   return [
     {
       role: "system",
@@ -55,7 +55,7 @@ ${VERDICT_CONTRACT}`
     },
     {
       role: "user",
-      content: JSON.stringify({ state, input })
+      content: JSON.stringify({ state: state2, input })
     }
   ];
 }
@@ -725,8 +725,8 @@ var TOOL_SCHEMA_JSON = JSON.stringify({
 });
 var FENCE_RE = /```[^\r\n`]*\r?\n[\s\S]*?```/g;
 var TOOL_WRAPPER_RE = /<\s*\|?\/?\s*(?:tool_call|tool▁call)\s*\|?\s*>/gi;
-function createToolRuntime(host2, parseJson3) {
-  function shellQuote2(s2) {
+function createToolRuntime(host2, parseJson4) {
+  function shellQuote3(s2) {
     return `'${String(s2).replace(/'/g, `'\\''`)}'`;
   }
   function execShellCmd2(call) {
@@ -734,20 +734,20 @@ function createToolRuntime(host2, parseJson3) {
       const cmd = typeof call.args.cmd === "string" ? call.args.cmd : "";
       const cwd = typeof call.args.cwd === "string" ? call.args.cwd : void 0;
       if (!cmd) return { error: "exec requires args.cmd" };
-      return { shellCmd: cwd && cwd.trim() ? `cd ${shellQuote2(cwd)} && ${cmd}` : cmd };
+      return { shellCmd: cwd && cwd.trim() ? `cd ${shellQuote3(cwd)} && ${cmd}` : cmd };
     }
     const args = typeof call.args.args === "string" ? call.args.args : "";
     if (!args) return { error: "codeterm requires args.args" };
     return { shellCmd: `codeterm ${args}` };
   }
   function startExecJob2(shellCmd, tabId) {
-    return parseJson3(
+    return parseJson4(
       host2.execStart(JSON.stringify({ bin: "sh", args: ["-lc", toolShell(shellCmd, instanceBinDir(), tabId)], timeoutMs: 12e4 })),
       { error: "host.exec.start returned non-JSON" }
     );
   }
   function pollExecJob2(jobId) {
-    return parseJson3(host2.execPoll(jobId), { done: true, error: "host.exec.poll returned non-JSON" });
+    return parseJson4(host2.execPoll(jobId), { done: true, error: "host.exec.poll returned non-JSON" });
   }
   function execResultFromPoll2(poll) {
     const result = {};
@@ -809,7 +809,7 @@ function createToolRuntime(host2, parseJson3) {
       host2.log("warn", `host.toolcall.parse failed: ${String(e)}`);
       return { entries: [], cleaned: text, status: "none" };
     }
-    const parsed = parseJson3(raw, null);
+    const parsed = parseJson4(raw, null);
     if (!parsed || typeof parsed !== "object") return { entries: [], cleaned: text, status: "none" };
     if (parsed.status === "malformed") {
       const reason = typeof parsed.reason === "string" && parsed.reason ? parsed.reason : "unparseable tool call";
@@ -850,7 +850,7 @@ function createToolRuntime(host2, parseJson3) {
         if (!query) return { error: "mem_search requires args.query" };
         const maybeHost = host2;
         if (typeof maybeHost.mem === "function") {
-          return parseJson3(maybeHost.mem(JSON.stringify({ query })), { error: "host.mem returned non-JSON" });
+          return parseJson4(maybeHost.mem(JSON.stringify({ query })), { error: "host.mem returned non-JSON" });
         }
         return maybeHost.mem && maybeHost.mem.search ? maybeHost.mem.search({ query, k: 5 }) : { error: "host.mem.search unavailable" };
       }
@@ -885,7 +885,7 @@ function createToolRuntime(host2, parseJson3) {
 }
 
 // lmstudio/prompts/watcher-orchestration.md
-var watcher_orchestration_default = '# Orchestration health watcher\n\nYou observe a **read-only snapshot** of an orchestration group (orchestrator + its managers and workers). Decide whether work is **progressing** or **stalled**. When stalled, you may request a **nudge** to the stuck pane.\n\nYou may investigate with tools when observations are insufficient, then you must finish with **ONLY the verdict JSON** as the final assistant message (no markdown fences, no prose before or after, and no tool block in the final message).\n\n## Tools\n\n**Tool discipline:** call at most ONE tool per tick, only when the snapshot is\ninsufficient. After a `tool_result` arrives, your NEXT message MUST be the\nverdict JSON \u2014 never another tool call for the same question.\n\n\nWhen the snapshot is ambiguous or missing key evidence, use at most the tools needed to clarify it. Available curated tools:\n\n- `exec`: run a shell command.\n- `read_file`: read a file.\n- `write_file`: write a file.\n- `codeterm`: run a CodeTerm command, such as `codeterm plan get` or `codeterm tab status --tab <id>`.\n- `mem_search`: search memory.\n- `spawn_agent`: start an agent only if explicitly needed for investigation.\n\nTool calls use fenced `codeterm-tool` JSON blocks. After each tool result, continue reasoning internally and either call another needed tool or finish with the verdict JSON. Use tools for facts you cannot infer reliably from `observations`, for example checking a pane\'s status or the current plan. Do not include a tool block in the final verdict message.\n\n## Input you receive each tick\n\nThe user message is JSON: `{ "state": <your prior state>, "input": { "tick", "nowMs", "state", "observations" } }`.\n\n`observations` is the host-assembled snapshot. Typical shape:\n\n```json\n{\n  "orchestrator_id": "abc123",\n  "panes": [\n    {\n      "pane_id": "abc123",\n      "title": "Orchestrator",\n      "role": "Orchestrator",\n      "status": "Working",\n      "last_activity_ms": 1700000000000\n    },\n    {\n      "pane_id": "def456",\n      "title": "Worker Alpha",\n      "role": "Worker",\n      "role_profile": null,\n      "status": "Working",\n      "last_activity_ms": 1700000005000,\n      "chatTail": [\n        { "id": "m1", "kind": "user", "content": "finish the task" },\n        { "id": "m2", "kind": "assistant", "content": "working on it\u2026" }\n      ]\n    }\n  ],\n  "reports": [\n    {\n      "id": "r1",\n      "from_pane_id": "def456",\n      "from_title": "Worker Alpha",\n      "message": "Completed step 1",\n      "timestamp": 1700000006000,\n      "status": "Done"\n    }\n  ]\n}\n```\n\nFields you care about on each pane:\n\n| Field | Meaning |\n|---|---|\n| `pane_id` | Target for nudge actions |\n| `title` | Human label |\n| `role` | `Orchestrator`, `Manager`, or `Worker` (may be absent) |\n| `role_profile` | Manager specialization (`planner`, `watcher`, \u2026) or null |\n| `status` | `Working`, `Waiting`, `Idle`, `Dead`, or `Unknown` |\n| `last_activity_ms` | Host clock when the pane last did something meaningful |\n| `chatTail` | Optional: last N parsed chat messages as `{id, kind, content}` objects |\n\nTop-level `orchestrator_id` identifies the orchestrator; the orchestrator also appears as a row in `panes[]`. `reports` is optional (when observation config enables it).\n\n## Progressing vs stalled\n\n**Progressing (`status: "ok"`)** \u2014 recent activity and forward motion:\n\n- `last_activity_ms` on key panes is within ~3 minutes of `nowMs`, **or**\n- worker/manager `status` values are advancing (e.g. `Waiting` \u2192 `Working`, `Working` with fresh `chatTail`), **or**\n- new agent reports arrive at the orchestrator with concrete progress.\n\n**Attention (`status: "attention"`)** \u2014 ambiguous or early warning:\n\n- activity is slowing but not clearly stuck yet, **or**\n- you lack enough data to judge (empty snapshot, missing tails).\n\n**Stalled (`status: "stalled"`)** \u2014 the group needs a kick:\n\n- no meaningful activity on workers for ~5+ minutes while tasks should be active, **or**\n- a worker sits on the same status with no `chatTail` movement, **or**\n- the orchestrator is `Idle` while workers are `Waiting`/`Idle` with no progress, **or**\n- unread reports pile up at the orchestrator with no follow-up.\n\nWhen stalled, emit **at most one nudge** to the most stuck pane. Nudges must be:\n\n- **Short** (1\u20132 sentences)\n- **Evidence-based** (cite what you saw: idle time, status, last `chatTail` line)\n- **Addressed to that pane** (use its `pane_id` in the action)\n\nDo not nudge watchers or the orchestrator unless the orchestrator itself is clearly idle with pending work.\n\n## State\n\nUse `state` to remember lightweight notes across ticks (e.g. `{ "last_nudged": { "def456": 1700000000000 } }`). Keep it small.\n\n## Worked example 1 \u2014 progressing (ok)\n\nObservation (abbreviated):\n\n```json\n{\n  "tick": 2,\n  "nowMs": 1700000120000,\n  "observations": {\n    "orchestrator_id": "o1",\n    "panes": [\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000110000 },\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "role_profile": null, "status": "Working", "last_activity_ms": 1700000118000 }\n    ],\n    "reports": [\n      { "id": "r1", "from_pane_id": "w1", "from_title": "Worker", "message": "Implemented tests", "timestamp": 1700000119000, "status": "Partial" }\n    ]\n  }\n}\n```\n\nYour verdict:\n\n```json\n{"status":"ok","summary":"Worker active in last minute with a progress report.","state":{"seen_ticks":2},"actions":[]}\n```\n\n## Worked example 2 \u2014 stalled worker (one nudge)\n\nObservation (abbreviated):\n\n```json\n{\n  "tick": 5,\n  "nowMs": 1700000420000,\n  "observations": {\n    "orchestrator_id": "o1",\n    "panes": [\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Idle", "last_activity_ms": 1700000200000 },\n      {\n        "pane_id": "w1",\n        "title": "Worker",\n        "role": "Worker",\n        "role_profile": null,\n        "status": "Waiting",\n        "last_activity_ms": 1700000000000,\n        "chatTail": [\n          { "id": "m1", "kind": "user", "content": "run the tests" },\n          { "id": "m2", "kind": "assistant", "content": "I\'ll get to it\u2026" }\n        ]\n      }\n    ]\n  }\n}\n```\n\nWorker `w1` has been silent ~7 minutes (`nowMs - last_activity_ms` = 420000 ms) with `status: Waiting` and no new `chatTail`.\n\nYour verdict:\n\n```json\n{"status":"stalled","summary":"Worker w1 Waiting with no activity for 7+ minutes.","state":{"seen_ticks":5,"last_nudged":{"w1":1700000420000}},"actions":[{"kind":"nudge","pane":"w1","message":"Stalled ~7m on \'run the tests\' \u2014 status Waiting, no new chat since \'I\'ll get to it\u2026\'. Please run tests and report STATUS."}]}\n```\n\n## Worked example 3 \u2014 investigate with a codeterm tool, then verdict\n\nObservation (abbreviated):\n\n```json\n{\n  "tick": 8,\n  "nowMs": 1700000600000,\n  "observations": {\n    "orchestrator_id": "o1",\n    "panes": [\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000580000 },\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "status": "Unknown", "last_activity_ms": 1700000200000 }\n    ]\n  }\n}\n```\n\nThe worker looks stale, but `status: Unknown` and missing `chatTail` are insufficient evidence. First check the pane:\n\n```codeterm-tool\n{"tool":"codeterm","args":{"args":"tab status --tab w1"}}\n```\n\nTool result (abbreviated): `{"status":"Working","last_activity_ms":1700000590000,"prompt":"running focused tests"}`\n\nYour final message:\n\n```json\n{"status":"ok","summary":"Worker w1 is active after status check and is running focused tests.","state":{"seen_ticks":8},"actions":[]}\n```\n';
+var watcher_orchestration_default = '# Orchestration health watcher\r\n\r\nYou observe a **read-only snapshot** of an orchestration group (orchestrator + its managers and workers). Decide whether work is **progressing** or **stalled**. When stalled, you may request a **nudge** to the stuck pane.\r\n\r\nYou may investigate with tools when observations are insufficient, then you must finish with **ONLY the verdict JSON** as the final assistant message (no markdown fences, no prose before or after, and no tool block in the final message).\r\n\r\n## Tools\r\n\r\n**Tool discipline:** call at most ONE tool per tick, only when the snapshot is\r\ninsufficient. After a `tool_result` arrives, your NEXT message MUST be the\r\nverdict JSON \u2014 never another tool call for the same question.\r\n\r\n\r\nWhen the snapshot is ambiguous or missing key evidence, use at most the tools needed to clarify it. Available curated tools:\r\n\r\n- `exec`: run a shell command.\r\n- `read_file`: read a file.\r\n- `write_file`: write a file.\r\n- `codeterm`: run a CodeTerm command, such as `codeterm plan get` or `codeterm tab status --tab <id>`.\r\n- `mem_search`: search memory.\r\n- `spawn_agent`: start an agent only if explicitly needed for investigation.\r\n\r\nTool calls use fenced `codeterm-tool` JSON blocks. After each tool result, continue reasoning internally and either call another needed tool or finish with the verdict JSON. Use tools for facts you cannot infer reliably from `observations`, for example checking a pane\'s status or the current plan. Do not include a tool block in the final verdict message.\r\n\r\n## Input you receive each tick\r\n\r\nThe user message is JSON: `{ "state": <your prior state>, "input": { "tick", "nowMs", "state", "observations" } }`.\r\n\r\n`observations` is the host-assembled snapshot. Typical shape:\r\n\r\n```json\r\n{\r\n  "orchestrator_id": "abc123",\r\n  "panes": [\r\n    {\r\n      "pane_id": "abc123",\r\n      "title": "Orchestrator",\r\n      "role": "Orchestrator",\r\n      "status": "Working",\r\n      "last_activity_ms": 1700000000000\r\n    },\r\n    {\r\n      "pane_id": "def456",\r\n      "title": "Worker Alpha",\r\n      "role": "Worker",\r\n      "role_profile": null,\r\n      "status": "Working",\r\n      "last_activity_ms": 1700000005000,\r\n      "chatTail": [\r\n        { "id": "m1", "kind": "user", "content": "finish the task" },\r\n        { "id": "m2", "kind": "assistant", "content": "working on it\u2026" }\r\n      ]\r\n    }\r\n  ],\r\n  "reports": [\r\n    {\r\n      "id": "r1",\r\n      "from_pane_id": "def456",\r\n      "from_title": "Worker Alpha",\r\n      "message": "Completed step 1",\r\n      "timestamp": 1700000006000,\r\n      "status": "Done"\r\n    }\r\n  ]\r\n}\r\n```\r\n\r\nFields you care about on each pane:\r\n\r\n| Field | Meaning |\r\n|---|---|\r\n| `pane_id` | Target for nudge actions |\r\n| `title` | Human label |\r\n| `role` | `Orchestrator`, `Manager`, or `Worker` (may be absent) |\r\n| `role_profile` | Manager specialization (`planner`, `watcher`, \u2026) or null |\r\n| `status` | `Working`, `Waiting`, `Idle`, `Dead`, or `Unknown` |\r\n| `last_activity_ms` | Host clock when the pane last did something meaningful |\r\n| `chatTail` | Optional: last N parsed chat messages as `{id, kind, content}` objects |\r\n\r\nTop-level `orchestrator_id` identifies the orchestrator; the orchestrator also appears as a row in `panes[]`. `reports` is optional (when observation config enables it).\r\n\r\n## Progressing vs stalled\r\n\r\n**Progressing (`status: "ok"`)** \u2014 recent activity and forward motion:\r\n\r\n- `last_activity_ms` on key panes is within ~3 minutes of `nowMs`, **or**\r\n- worker/manager `status` values are advancing (e.g. `Waiting` \u2192 `Working`, `Working` with fresh `chatTail`), **or**\r\n- new agent reports arrive at the orchestrator with concrete progress.\r\n\r\n**Attention (`status: "attention"`)** \u2014 ambiguous or early warning:\r\n\r\n- activity is slowing but not clearly stuck yet, **or**\r\n- you lack enough data to judge (empty snapshot, missing tails).\r\n\r\n**Stalled (`status: "stalled"`)** \u2014 the group needs a kick:\r\n\r\n- no meaningful activity on workers for ~5+ minutes while tasks should be active, **or**\r\n- a worker sits on the same status with no `chatTail` movement, **or**\r\n- the orchestrator is `Idle` while workers are `Waiting`/`Idle` with no progress, **or**\r\n- unread reports pile up at the orchestrator with no follow-up.\r\n\r\nWhen stalled, emit **at most one nudge** to the most stuck pane. Nudges must be:\r\n\r\n- **Short** (1\u20132 sentences)\r\n- **Evidence-based** (cite what you saw: idle time, status, last `chatTail` line)\r\n- **Addressed to that pane** (use its `pane_id` in the action)\r\n\r\nDo not nudge watchers or the orchestrator unless the orchestrator itself is clearly idle with pending work.\r\n\r\n## State\r\n\r\nUse `state` to remember lightweight notes across ticks (e.g. `{ "last_nudged": { "def456": 1700000000000 } }`). Keep it small.\r\n\r\n## Worked example 1 \u2014 progressing (ok)\r\n\r\nObservation (abbreviated):\r\n\r\n```json\r\n{\r\n  "tick": 2,\r\n  "nowMs": 1700000120000,\r\n  "observations": {\r\n    "orchestrator_id": "o1",\r\n    "panes": [\r\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000110000 },\r\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "role_profile": null, "status": "Working", "last_activity_ms": 1700000118000 }\r\n    ],\r\n    "reports": [\r\n      { "id": "r1", "from_pane_id": "w1", "from_title": "Worker", "message": "Implemented tests", "timestamp": 1700000119000, "status": "Partial" }\r\n    ]\r\n  }\r\n}\r\n```\r\n\r\nYour verdict:\r\n\r\n```json\r\n{"status":"ok","summary":"Worker active in last minute with a progress report.","state":{"seen_ticks":2},"actions":[]}\r\n```\r\n\r\n## Worked example 2 \u2014 stalled worker (one nudge)\r\n\r\nObservation (abbreviated):\r\n\r\n```json\r\n{\r\n  "tick": 5,\r\n  "nowMs": 1700000420000,\r\n  "observations": {\r\n    "orchestrator_id": "o1",\r\n    "panes": [\r\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Idle", "last_activity_ms": 1700000200000 },\r\n      {\r\n        "pane_id": "w1",\r\n        "title": "Worker",\r\n        "role": "Worker",\r\n        "role_profile": null,\r\n        "status": "Waiting",\r\n        "last_activity_ms": 1700000000000,\r\n        "chatTail": [\r\n          { "id": "m1", "kind": "user", "content": "run the tests" },\r\n          { "id": "m2", "kind": "assistant", "content": "I\'ll get to it\u2026" }\r\n        ]\r\n      }\r\n    ]\r\n  }\r\n}\r\n```\r\n\r\nWorker `w1` has been silent ~7 minutes (`nowMs - last_activity_ms` = 420000 ms) with `status: Waiting` and no new `chatTail`.\r\n\r\nYour verdict:\r\n\r\n```json\r\n{"status":"stalled","summary":"Worker w1 Waiting with no activity for 7+ minutes.","state":{"seen_ticks":5,"last_nudged":{"w1":1700000420000}},"actions":[{"kind":"nudge","pane":"w1","message":"Stalled ~7m on \'run the tests\' \u2014 status Waiting, no new chat since \'I\'ll get to it\u2026\'. Please run tests and report STATUS."}]}\r\n```\r\n\r\n## Worked example 3 \u2014 investigate with a codeterm tool, then verdict\r\n\r\nObservation (abbreviated):\r\n\r\n```json\r\n{\r\n  "tick": 8,\r\n  "nowMs": 1700000600000,\r\n  "observations": {\r\n    "orchestrator_id": "o1",\r\n    "panes": [\r\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000580000 },\r\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "status": "Unknown", "last_activity_ms": 1700000200000 }\r\n    ]\r\n  }\r\n}\r\n```\r\n\r\nThe worker looks stale, but `status: Unknown` and missing `chatTail` are insufficient evidence. First check the pane:\r\n\r\n```codeterm-tool\r\n{"tool":"codeterm","args":{"args":"tab status --tab w1"}}\r\n```\r\n\r\nTool result (abbreviated): `{"status":"Working","last_activity_ms":1700000590000,"prompt":"running focused tests"}`\r\n\r\nYour final message:\r\n\r\n```json\r\n{"status":"ok","summary":"Worker w1 is active after status check and is running focused tests.","state":{"seen_ticks":8},"actions":[]}\r\n```\r\n';
 
 // lmstudio/src/router/config.ts
 var LMSTUDIO_PROVIDER_ID = "lmstudio";
@@ -929,15 +929,15 @@ var PROVIDER_TEMPLATES = [
 var ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 var SECRET_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 function coerceState(raw) {
-  const obj = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const obj2 = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
   const list = (v) => Array.isArray(v) ? v.filter((x) => x && typeof x === "object") : [];
-  const state = {
-    providers: list(obj.providers),
-    presets: list(obj.presets),
-    disabled: Array.isArray(obj.disabled) ? obj.disabled.filter((x) => typeof x === "string") : []
+  const state2 = {
+    providers: list(obj2.providers),
+    presets: list(obj2.presets),
+    disabled: Array.isArray(obj2.disabled) ? obj2.disabled.filter((x) => typeof x === "string") : []
   };
-  if (typeof obj.defaultProvider === "string" && obj.defaultProvider) state.defaultProvider = obj.defaultProvider;
-  return state;
+  if (typeof obj2.defaultProvider === "string" && obj2.defaultProvider) state2.defaultProvider = obj2.defaultProvider;
+  return state2;
 }
 function normalizeKind(value) {
   if (typeof value !== "string") return null;
@@ -975,6 +975,13 @@ function apiRoot(provider) {
   if (provider.kind === "lmstudio") return origin + parsed.path.replace(/\/(api\/)?v\d+$/, "");
   if (provider.kind === "anthropic") return /\/v1$/.test(parsed.path) ? origin + parsed.path : `${origin}${parsed.path}/v1`;
   return parsed.path ? origin + parsed.path : `${origin}/v1`;
+}
+function shellFlag(v) {
+  if (typeof v === "boolean") return v;
+  const t = typeof v === "string" ? v.trim().toLowerCase() : "";
+  if (t === "on" || t === "true" || t === "yes") return true;
+  if (t === "off" || t === "false" || t === "no") return false;
+  return void 0;
 }
 function str(v) {
   return typeof v === "string" ? v.trim() : "";
@@ -1048,6 +1055,10 @@ function validatePreset(input, takenIds, source = "user") {
   if (maxTokens2 !== void 0) preset.maxTokens = maxTokens2;
   if (typeof input.systemPrompt === "string") preset.systemPrompt = input.systemPrompt;
   if (input.params && typeof input.params === "object") preset.params = { ...input.params };
+  const root = str(input.root);
+  if (root) preset.root = root;
+  const shell = shellFlag(input.shell);
+  if (shell !== void 0) preset.shell = shell;
   return { ok: true, value: preset };
 }
 function builtinLmStudio(settings2) {
@@ -1062,7 +1073,7 @@ function builtinLmStudio(settings2) {
     source: "builtin"
   };
 }
-function resolveProviders(settings2, state) {
+function resolveProviders(settings2, state2) {
   const issues = [];
   const providers = [];
   const declared = Array.isArray(settings2.providers) ? settings2.providers : [];
@@ -1074,11 +1085,11 @@ function resolveProviders(settings2, state) {
     else issues.push(`provider ${str(input && input.id) || "?"}: ${result.errors.map((e) => e.message).join(" ")}`);
   };
   for (const input of declared) add(input, "config");
-  for (const input of state.providers) add(input, "user");
-  for (const p2 of providers) if (state.disabled.includes(p2.id)) p2.enabled = false;
+  for (const input of state2.providers) add(input, "user");
+  for (const p2 of providers) if (state2.disabled.includes(p2.id)) p2.enabled = false;
   return { providers, issues };
 }
-function resolvePresets(settings2, state) {
+function resolvePresets(settings2, state2) {
   const presets2 = [];
   const add = (input, source) => {
     const result = validatePreset(input, presets2.map((p2) => p2.id), source);
@@ -1087,12 +1098,12 @@ function resolvePresets(settings2, state) {
   if (Array.isArray(settings2.presets)) {
     for (const p2 of settings2.presets) if (p2) add(p2, "config");
   }
-  for (const p2 of state.presets) add(p2, "user");
+  for (const p2 of state2.presets) add(p2, "user");
   return presets2;
 }
-function defaultProviderId(settings2, state, providers) {
-  const wanted = [state.defaultProvider, str(settings2.defaultProvider), LMSTUDIO_PROVIDER_ID];
-  for (const id of wanted) {
+function defaultProviderId(settings2, state2, providers) {
+  const wanted2 = [state2.defaultProvider, str(settings2.defaultProvider), LMSTUDIO_PROVIDER_ID];
+  for (const id of wanted2) {
     if (id && providers.some((p2) => p2.id === id && p2.enabled)) return id;
   }
   const first = providers.find((p2) => p2.enabled);
@@ -1530,9 +1541,9 @@ function redact(text, key) {
 function rows(body) {
   if (Array.isArray(body)) return body.filter((r) => !!r && typeof r === "object");
   if (!body || typeof body !== "object") return [];
-  const obj = body;
+  const obj2 = body;
   for (const key of ["data", "models"]) {
-    const list = obj[key];
+    const list = obj2[key];
     if (Array.isArray(list)) return list.filter((r) => !!r && typeof r === "object");
   }
   return [];
@@ -1611,11 +1622,11 @@ function matchScore(model, providerName, query) {
   return score2;
 }
 function groupAndSearch(providers, models, query) {
-  const q = query.trim();
+  const q2 = query.trim();
   return providers.map((provider) => {
     const own = models.filter((m) => m.providerId === provider.id);
-    if (!q) return { provider, models: own, total: own.length };
-    const ranked = own.map((m, i) => ({ m, i, s: matchScore(m, provider.name, q) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.m);
+    if (!q2) return { provider, models: own, total: own.length };
+    const ranked = own.map((m, i) => ({ m, i, s: matchScore(m, provider.name, q2) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.m);
     return { provider, models: ranked, total: own.length };
   });
 }
@@ -1748,19 +1759,19 @@ function readSettings() {
 function readState() {
   return coerceState(readJsonFile(STATE_FILE));
 }
-function writeState(state) {
-  return writeJsonFile(STATE_FILE, state);
+function writeState(state2) {
+  return writeJsonFile(STATE_FILE, state2);
 }
 function snapshot() {
   const settings2 = readSettings();
-  const state = readState();
-  const { providers, issues } = resolveProviders(settings2, state);
+  const state2 = readState();
+  const { providers, issues } = resolveProviders(settings2, state2);
   return {
     settings: settings2,
-    state,
+    state: state2,
     providers,
-    presets: resolvePresets(settings2, state),
-    defaultProvider: defaultProviderId(settings2, state, providers),
+    presets: resolvePresets(settings2, state2),
+    defaultProvider: defaultProviderId(settings2, state2, providers),
     issues
   };
 }
@@ -1852,10 +1863,10 @@ function discoverModels(provider, opts) {
     entry = { at: now(), baseUrl: provider.baseUrl, models: [], error: { kind: "unreachable", message: "no model endpoint answered" } };
     for (const req of modelsRequests(provider, key)) {
       const res = fetchSync(req);
-      const failure = classifyFetch(req.url, res);
-      if (failure) {
-        entry.error = failure;
-        if (failure.kind === "not_found") continue;
+      const failure2 = classifyFetch(req.url, res);
+      if (failure2) {
+        entry.error = failure2;
+        if (failure2.kind === "not_found") continue;
         break;
       }
       const body = parseJson(res.body, void 0);
@@ -1889,8 +1900,8 @@ function statusFromEntry(provider, entry) {
     return { state: "connected", message, modelCount: count, checkedAt: entry.at };
   }
   const kind = entry.error.kind;
-  const state = kind === "key_missing" ? "key_missing" : kind === "auth" ? "auth" : kind === "denied" ? "denied" : kind === "unreachable" || kind === "timeout" ? "unreachable" : "error";
-  return { state, message: entry.error.message, modelCount: count, checkedAt: entry.at };
+  const state2 = kind === "key_missing" ? "key_missing" : kind === "auth" ? "auth" : kind === "denied" ? "denied" : kind === "unreachable" || kind === "timeout" ? "unreachable" : "error";
+  return { state: state2, message: entry.error.message, modelCount: count, checkedAt: entry.at };
 }
 
 // lmstudio/src/router/manage.ts
@@ -2256,8 +2267,8 @@ function viewCall(method, raw) {
 function n2(v) {
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
 }
-function nested(obj, key) {
-  const v = obj[key];
+function nested(obj2, key) {
+  const v = obj2[key];
   return v && typeof v === "object" ? v : {};
 }
 function nativeStatsUsage(raw) {
@@ -2304,7 +2315,7 @@ function savedSession(sid) {
 }
 function saveSession(sid, entry) {
   const all = readAll();
-  all[sid] = entry;
+  all[sid] = { ...all[sid] || {}, ...entry };
   writeDataFile(SESSIONS_FILE, JSON.stringify(all));
 }
 function forgetSession(sid) {
@@ -2448,6 +2459,21 @@ function withDomiosContext(prompt) {
 
 ${prompt}` : DOMIOS_CONTEXT;
 }
+function engineContext(shell) {
+  const lines = [
+    "You run inside Domios, a terminal multiplexer where AI agents work, as the Domios Router coding agent.",
+    "Prefer edit over write for existing files, read a file before editing it, and use grep/glob instead of shell commands to search."
+  ];
+  if (shell) {
+    lines.push(
+      "The Domios CLI is `codeterm`; run it with the bash tool (`codeterm --help`, `codeterm docs`).",
+      'Messages from other tabs arrive as <domios from="tab" tab="ID" ...>BODY</domios>; answer with `codeterm send "reply" --tab ID`.'
+    );
+  } else {
+    lines.push("Shell commands are disabled in this session; work with the file tools only.");
+  }
+  return lines.join("\n");
+}
 
 // lmstudio/src/router/activity.ts
 function activityOf(i) {
@@ -2458,6 +2484,808 @@ function activityOf(i) {
 function activityLine(model, activity) {
   if (activity === "idle") return "";
   return ["Domios Router", model, activity === "thinking" ? "Thinking" : "Working"].filter(Boolean).join(" \xB7 ");
+}
+
+// lmstudio/src/engine/config.ts
+var OPENCODE_VERSION = "1.18.34";
+var OC_PROVIDER_PREFIX = "router-";
+var DEFAULT_CONTEXT = 128e3;
+var DEFAULT_OUTPUT = 8192;
+var COMPACTION_DEFAULTS = { thresholdPct: 70, model: null, keepTurns: 6 };
+function intIn(v, min, max) {
+  const n3 = typeof v === "string" && v.trim() ? Number(v) : v;
+  return typeof n3 === "number" && Number.isFinite(n3) ? Math.min(max, Math.max(min, Math.round(n3))) : void 0;
+}
+function compactionSettings(raw) {
+  const src = raw || {};
+  const model = typeof src.compactModel === "string" && src.compactModel.trim() ? src.compactModel.trim() : null;
+  return {
+    thresholdPct: intIn(src.compactThreshold, 10, 95) ?? COMPACTION_DEFAULTS.thresholdPct,
+    model,
+    keepTurns: intIn(src.compactKeepTurns, 0, 50) ?? COMPACTION_DEFAULTS.keepTurns
+  };
+}
+function ocProviderId(routerProviderId) {
+  return OC_PROVIDER_PREFIX + routerProviderId;
+}
+function ocModelRef(providerId, model) {
+  return { providerID: ocProviderId(providerId), modelID: model };
+}
+function ocModelString(qualified, defaultProvider) {
+  const split = splitModelId(qualified);
+  const provider = split.providerId || defaultProvider;
+  if (!provider || !split.model) return null;
+  return `${ocProviderId(provider)}/${split.model}`;
+}
+function keyEnvName(routerProviderId) {
+  return `ROUTER_KEY_${routerProviderId.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+}
+function npmFor(kind) {
+  return kind === "anthropic" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible";
+}
+function baseUrlFor(provider) {
+  const root = apiRoot(provider);
+  return provider.kind === "lmstudio" ? `${root}/v1` : root;
+}
+function modelEntry(model, id, thresholdPct) {
+  const context = model && model.capabilities.contextLength ? model.capabilities.contextLength : DEFAULT_CONTEXT;
+  const output = Math.min(DEFAULT_OUTPUT, Math.max(1024, Math.floor(context / 4)));
+  const entry = {
+    name: model ? model.displayName : id,
+    tool_call: true,
+    // OpenCode compacts once a turn's tokens reach `limit.input - compaction.reserved`; reserved is 0, so input is the threshold.
+    limit: { context, input: Math.floor(context * thresholdPct / 100), output }
+  };
+  if (model && model.capabilities.reasoning) entry.reasoning = true;
+  if (model && model.capabilities.vision) entry.attachment = true;
+  return entry;
+}
+function providerEntry(ep, thresholdPct) {
+  const models = {};
+  for (const m of ep.models) models[m.id] = modelEntry(m, m.id, thresholdPct);
+  for (const id of ep.extraModels) if (!models[id]) models[id] = modelEntry(null, id, thresholdPct);
+  const options = { baseURL: baseUrlFor(ep.provider) };
+  if (ep.hasKey) options.apiKey = `{env:${keyEnvName(ep.provider.id)}}`;
+  return { npm: npmFor(ep.provider.kind), name: ep.provider.name, options, models };
+}
+function basePermission() {
+  return {
+    "*": "allow",
+    external_directory: "deny",
+    doom_loop: "deny",
+    question: "deny",
+    read: { "*": "allow", "*.env": "deny", "*.env.*": "deny", "*.env.example": "allow" }
+  };
+}
+function sessionPermission(shell) {
+  const rules = [
+    { permission: "external_directory", pattern: "*", action: "deny" },
+    { permission: "doom_loop", pattern: "*", action: "deny" },
+    { permission: "question", pattern: "*", action: "deny" },
+    { permission: "read", pattern: "*.env", action: "deny" },
+    { permission: "read", pattern: "*.env.*", action: "deny" },
+    { permission: "read", pattern: "*.env.example", action: "allow" }
+  ];
+  if (!shell) rules.push({ permission: "bash", pattern: "*", action: "deny" });
+  return rules;
+}
+function buildEngineConfig(input) {
+  const provider = {};
+  const enabled = [];
+  for (const ep of input.providers) {
+    const id = ocProviderId(ep.provider.id);
+    provider[id] = providerEntry(ep, input.compaction.thresholdPct);
+    enabled.push(id);
+  }
+  const config = {
+    $schema: "https://opencode.ai/config.json",
+    autoupdate: false,
+    share: "disabled",
+    snapshot: false,
+    enabled_providers: enabled,
+    provider,
+    permission: basePermission(),
+    compaction: { auto: true, reserved: 0, tail_turns: input.compaction.keepTurns }
+  };
+  const summarizer = input.compaction.model ? ocModelString(input.compaction.model, input.defaultProvider) : null;
+  if (summarizer && enabled.indexOf(summarizer.split("/")[0]) >= 0) config.agent = { compaction: { model: summarizer } };
+  return config;
+}
+function engineKeyEnv(providers) {
+  const env = {};
+  for (const p2 of providers) if (p2.key) env[keyEnvName(p2.provider.id)] = p2.key;
+  return env;
+}
+function configFingerprint(configJson, keys, md5) {
+  const names = Object.keys(keys).sort();
+  return md5(`${configJson}
+${names.map((n3) => `${n3}=${md5(keys[n3])}`).join("\n")}`);
+}
+
+// lmstudio/src/engine/parts.ts
+function partToChatMsg(part, role, id, tsMs) {
+  const timestamp = String(tsMs);
+  const type = part && part.type;
+  if (type === "text") {
+    const txt = part.text || "";
+    if (!txt.trim()) return null;
+    return { id, type: role === "user" ? "user" : "assistant", content: txt, timestamp };
+  }
+  if (type === "reasoning") {
+    const rtxt = part.text || "";
+    if (!rtxt.trim()) return null;
+    return { id, type: "thinking", content: rtxt, timestamp };
+  }
+  if (type === "tool") {
+    const tool = part.tool || "tool";
+    const state2 = part.state || {};
+    const canonical = canonicalToolFields(tool, state2.input);
+    const out = {
+      id,
+      type: "tool_call",
+      content: "",
+      timestamp,
+      toolName: tool,
+      toolKind: canonical.kind,
+      toolSummary: canonical.summary,
+      toolDetail: canonical.detail,
+      toolEdits: canonical.edits
+    };
+    if (state2.input !== void 0) out.toolInput = state2.input;
+    if (typeof state2.output === "string") out.toolResult = state2.output;
+    if (state2.status === "error") {
+      out.toolResult = typeof state2.error === "string" ? state2.error : "tool failed";
+      out.toolError = true;
+    }
+    return out;
+  }
+  return null;
+}
+function canonicalToolFields(name, input) {
+  const tool = String(name || "").trim();
+  const value = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const text = (key) => typeof value[key] === "string" ? value[key] : "";
+  const command = text("command") || text("cmd");
+  const path = text("file_path") || text("filePath") || text("path");
+  const pattern = text("pattern");
+  const edits = extractCanonicalEdits(value);
+  const lower = tool.toLowerCase();
+  if (lower === "bash" || lower === "shell" || lower === "exec" || lower === "run") {
+    return { kind: "command", summary: cleanToolText(command, "Command"), detail: command, edits: [] };
+  }
+  if (lower === "edit" || lower === "multiedit" || lower === "write") {
+    const written = lower === "write" && !edits.length && typeof value.content === "string" ? [{ path, old: "", new: value.content }] : edits;
+    return { kind: "edit", summary: path || "File edit", detail: path, edits: written };
+  }
+  if (lower === "read") {
+    return { kind: "read", summary: path || "Read file", detail: path, edits: [] };
+  }
+  if (lower === "glob" || lower === "grep" || lower === "search") {
+    return { kind: "search", summary: cleanToolText(pattern || path, "Search"), detail: pattern || path, edits: [] };
+  }
+  return { kind: "generic", summary: cleanToolText(tool, "Tool"), detail: tool, edits };
+}
+function extractCanonicalEdits(input) {
+  const parentPath = typeof input.file_path === "string" ? input.file_path : typeof input.filePath === "string" ? input.filePath : typeof input.path === "string" ? input.path : "";
+  const pair = (value, fallbackPath) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const item = value;
+    const oldValue = typeof item.old_string === "string" ? item.old_string : item.oldString;
+    const newValue = typeof item.new_string === "string" ? item.new_string : item.newString;
+    if (typeof oldValue !== "string" && typeof newValue !== "string") return null;
+    const path = typeof item.file_path === "string" ? item.file_path : typeof item.filePath === "string" ? item.filePath : typeof item.path === "string" ? item.path : fallbackPath;
+    return { path, old: typeof oldValue === "string" ? oldValue : "", new: typeof newValue === "string" ? newValue : "" };
+  };
+  if (Array.isArray(input.edits)) {
+    return input.edits.map((edit) => pair(edit, parentPath)).filter((e) => e !== null);
+  }
+  const single = pair(input, parentPath);
+  return single ? [single] : [];
+}
+function cleanToolText(value, fallback) {
+  const text = String(value || "").replace(/[\r\n\t]+/g, " ").trim();
+  if (!text) return fallback;
+  return text.length > 120 ? text.slice(0, 117) + "..." : text;
+}
+
+// lmstudio/src/engine/events.ts
+function newEngineView(sessionID) {
+  return { sessionID, roles: {}, summaries: {}, parts: {}, pendingDeltas: {}, usageDone: {}, lastError: "" };
+}
+function rowId(partId) {
+  return `oc-${partId}`;
+}
+function obj(v) {
+  return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+}
+function num2(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+function errorText(raw) {
+  const e = obj(raw);
+  const data = obj(e.data);
+  const name = typeof e.name === "string" ? e.name : "Error";
+  const message = typeof data.message === "string" ? data.message : typeof e.message === "string" ? e.message : "";
+  return message ? `${name}: ${message}` : name;
+}
+function isAborted(raw) {
+  return obj(raw).name === "MessageAbortedError";
+}
+function partRow(view, part, tsMs) {
+  const id = typeof part.id === "string" ? part.id : "";
+  const messageID = typeof part.messageID === "string" ? part.messageID : "";
+  if (!id) return null;
+  if (part.type === "compaction") {
+    return { id: rowId(id), type: "system", content: "Context compacted", timelineMarker: { kind: "context_compaction" }, auto: part.auto === true };
+  }
+  const role = view.roles[messageID] || "assistant";
+  if (role === "user") return null;
+  const row = partToChatMsg(part, role, rowId(id), tsMs);
+  if (row && view.summaries[messageID] && part.type === "text") {
+    return { id: row.id, type: "system", content: row.content, systemSubtype: "compact_summary" };
+  }
+  return row;
+}
+function usageOf(info) {
+  const tokens = obj(info.tokens);
+  const cache2 = obj(tokens.cache);
+  const input = num2(tokens.input);
+  const output = num2(tokens.output);
+  if (!input && !output) return null;
+  const read = num2(cache2.read);
+  const write = num2(cache2.write);
+  return { messageID: String(info.id), input: input + read + write, cachedInput: read, cacheWrite: write, output };
+}
+function onMessageUpdated(view, info, out) {
+  const id = typeof info.id === "string" ? info.id : "";
+  if (!id) return;
+  const role = typeof info.role === "string" ? info.role : "assistant";
+  view.roles[id] = role;
+  if (role !== "assistant") return;
+  if (info.summary === true || info.mode === "compaction" || info.agent === "compaction") view.summaries[id] = true;
+  const time = obj(info.time);
+  if (time.completed && !view.usageDone[id] && !view.summaries[id]) {
+    const usage = usageOf(info);
+    if (usage) {
+      view.usageDone[id] = true;
+      out.push({ kind: "usage", usage });
+    }
+  }
+}
+function onError(view, raw, out) {
+  if (isAborted(raw)) return;
+  const text = errorText(raw);
+  if (text === view.lastError) return;
+  view.lastError = text;
+  out.push({ kind: "error", message: text });
+}
+function applyEngineEvent(view, ev, nowMs) {
+  const out = [];
+  const type = typeof ev.type === "string" ? ev.type : "";
+  const p2 = obj(ev.properties);
+  if (p2.sessionID !== void 0 && p2.sessionID !== view.sessionID) return out;
+  switch (type) {
+    case "message.updated":
+      onMessageUpdated(view, obj(p2.info), out);
+      break;
+    case "message.part.updated": {
+      const part = obj(p2.part);
+      if (typeof part.id !== "string") break;
+      const pending = view.pendingDeltas[part.id];
+      if (pending !== void 0) {
+        delete view.pendingDeltas[part.id];
+        if ((part.text || "").length < pending.length) part.text = pending;
+      }
+      view.parts[part.id] = part;
+      const row = partRow(view, part, num2(p2.time) || nowMs);
+      if (row) out.push({ kind: "row", row });
+      break;
+    }
+    case "message.part.delta": {
+      const partID = typeof p2.partID === "string" ? p2.partID : "";
+      const delta = typeof p2.delta === "string" ? p2.delta : "";
+      if (!partID || p2.field !== "text" || !delta) break;
+      const known = view.parts[partID];
+      if (!known) {
+        view.pendingDeltas[partID] = (view.pendingDeltas[partID] || "") + delta;
+        break;
+      }
+      known.text = (known.text || "") + delta;
+      const row = partRow(view, known, nowMs);
+      if (row) out.push({ kind: "row", row });
+      break;
+    }
+    case "session.status": {
+      const status = obj(p2.status).type;
+      if (status === "busy" || status === "retry") out.push({ kind: "busy" });
+      else if (status === "idle") out.push({ kind: "idle" });
+      break;
+    }
+    case "session.idle":
+      out.push({ kind: "idle" });
+      break;
+    case "session.error":
+      onError(view, p2.error, out);
+      break;
+    case "permission.asked":
+    case "permission.v2.asked":
+      if (typeof p2.id === "string") out.push({ kind: "reject", route: "permission", id: p2.id });
+      break;
+    case "question.asked":
+    case "question.v2.asked":
+      if (typeof p2.id === "string") out.push({ kind: "reject", route: "question", id: p2.id });
+      break;
+    default:
+      break;
+  }
+  return out;
+}
+function messagesToRows(view, entries, sinceMs) {
+  const rows2 = [];
+  for (const raw of entries) {
+    const entry = obj(raw);
+    const info = obj(entry.info);
+    const created = num2(obj(info.time).created);
+    const sink = [];
+    onMessageUpdated(view, info, sink);
+    if (created < sinceMs) continue;
+    const parts = Array.isArray(entry.parts) ? entry.parts : [];
+    for (const part of parts) {
+      const typed = obj(part);
+      if (typeof typed.id !== "string") continue;
+      view.parts[typed.id] = typed;
+      const row = partRow(view, typed, created);
+      if (row) rows2.push(row);
+    }
+  }
+  return rows2;
+}
+
+// lmstudio/src/engine/server.ts
+var ENGINE_IDLE_SECS = 1800;
+var START_TIMEOUT_MS = 45e3;
+var HEARTBEAT_EVERY_MS = 3e4;
+var HEALTH_TIMEOUT_MS = 2e3;
+var PASSWORD_SECRET = "engine_server_password";
+var RECORD_FILE = "engine/engine.json";
+var LAUNCH_SCRIPT = [
+  "oc=$(command -v opencode 2>/dev/null)",
+  'if [ -z "$oc" ]; then echo "router-engine: opencode not found on PATH"; exit 127; fi',
+  'echo "router-engine: launching $("$oc" --version 2>/dev/null)"',
+  '"$oc" serve --hostname 127.0.0.1 --port 0 --log-level WARN --pure &',
+  "pid=$!",
+  'while kill -0 "$pid" 2>/dev/null; do',
+  "  sleep 3",
+  '  if [ "$(cat "$RE_STOP" 2>/dev/null)" = "$RE_TOKEN" ]; then echo "router-engine: stop requested"; break; fi',
+  '  hb=$(cat "$RE_HEARTBEAT" 2>/dev/null); case "$hb" in ""|*[!0-9]*) hb=0;; esac',
+  '  if [ $(( $(date +%s) - hb )) -gt "$RE_IDLE" ]; then echo "router-engine: idle, stopping"; break; fi',
+  "done",
+  'kill "$pid" 2>/dev/null',
+  'wait "$pid" 2>/dev/null',
+  'echo "router-engine: stopped"'
+].join("\n");
+var state = { phase: "down", record: null, password: null, error: null, startedAt: 0, lastHeartbeat: 0, restartWanted: false };
+var wanted = null;
+function resetEngineForTests() {
+  state.phase = "down";
+  state.record = null;
+  state.password = null;
+  state.error = null;
+  state.startedAt = 0;
+  state.lastHeartbeat = 0;
+  state.restartWanted = false;
+  wanted = null;
+}
+function parseJson2(raw, fallback) {
+  try {
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+function slashes(p2) {
+  return p2.replace(/\\/g, "/");
+}
+function enginePath(name) {
+  const p2 = dataFilePath(`engine/${name}`);
+  return p2 ? slashes(p2) : null;
+}
+function writeText(path, text) {
+  try {
+    const slash = path.lastIndexOf("/");
+    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
+    return host.writeFile(path, text);
+  } catch {
+    return false;
+  }
+}
+function readText2(path) {
+  if (!path) return "";
+  try {
+    return host.readFile(path) || "";
+  } catch {
+    return "";
+  }
+}
+function randomToken(len) {
+  const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let out = "";
+  for (let i = 0; i < len; i += 1) out += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+  return out;
+}
+var B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+function base64Ascii(text) {
+  let out = "";
+  for (let i = 0; i < text.length; i += 3) {
+    const a = text.charCodeAt(i) & 255;
+    const b = i + 1 < text.length ? text.charCodeAt(i + 1) & 255 : -1;
+    const c = i + 2 < text.length ? text.charCodeAt(i + 2) & 255 : -1;
+    out += B64.charAt(a >> 2);
+    out += B64.charAt((a & 3) << 4 | (b < 0 ? 0 : b >> 4));
+    out += b < 0 ? "=" : B64.charAt((b & 15) << 2 | (c < 0 ? 0 : c >> 6));
+    out += c < 0 ? "=" : B64.charAt(c & 63);
+  }
+  return out;
+}
+function password() {
+  if (state.password) return state.password;
+  let stored = null;
+  try {
+    stored = host.secretGet(PASSWORD_SECRET);
+  } catch {
+    stored = null;
+  }
+  if (stored && stored.length >= 24) {
+    state.password = stored;
+    return stored;
+  }
+  const fresh = randomToken(40);
+  try {
+    host.secretSet(PASSWORD_SECRET, fresh);
+  } catch {
+  }
+  state.password = fresh;
+  return fresh;
+}
+function authHeader() {
+  return `Basic ${base64Ascii(`opencode:${password()}`)}`;
+}
+function engineBase() {
+  return state.phase === "up" && state.record ? `http://127.0.0.1:${state.record.port}` : null;
+}
+function engineRequest(method, path, body, timeoutMs2 = 15e3) {
+  const base = state.record ? `http://127.0.0.1:${state.record.port}` : "";
+  if (!base) return { status: 0, body: "", error: "engine is not running" };
+  const headers = { authorization: authHeader() };
+  if (body !== void 0) headers["content-type"] = "application/json";
+  const raw = host.fetch(JSON.stringify({ url: base + path, method, headers, body: body === void 0 ? void 0 : JSON.stringify(body), timeoutMs: timeoutMs2 }));
+  const res = parseJson2(raw, { error: "fetch returned non-JSON" });
+  return { status: typeof res.status === "number" ? res.status : 0, body: typeof res.body === "string" ? res.body : "", error: res.error };
+}
+function readRecord() {
+  const rec = parseJson2(readText2(enginePath("engine.json")), null);
+  return rec && typeof rec.port === "number" && typeof rec.token === "string" ? rec : null;
+}
+function writeRecord(rec) {
+  const path = dataFilePath(RECORD_FILE);
+  if (path) writeText(slashes(path), JSON.stringify(rec));
+}
+function heartbeat(force = false) {
+  const now2 = Date.now();
+  if (!force && now2 - state.lastHeartbeat < HEARTBEAT_EVERY_MS) return;
+  state.lastHeartbeat = now2;
+  const path = enginePath("heartbeat");
+  if (path) writeText(path, String(Math.floor(now2 / 1e3)));
+}
+function requestStop(rec) {
+  const path = enginePath("stop");
+  if (rec && path) writeText(path, rec.token);
+}
+function healthy(port) {
+  const raw = host.fetch(
+    JSON.stringify({ url: `http://127.0.0.1:${port}/global/health`, method: "GET", headers: { authorization: authHeader() }, timeoutMs: HEALTH_TIMEOUT_MS })
+  );
+  const res = parseJson2(raw, {});
+  if (res.status !== 200) return { ok: false };
+  const body = parseJson2(res.body, {});
+  return body.healthy === true ? { ok: true, version: body.version } : { ok: false };
+}
+function scanLaunchLog(log) {
+  const listening = /listening on https?:\/\/127\.0\.0\.1:(\d+)/.exec(log);
+  if (listening) return { port: Number(listening[1]) };
+  const fail2 = /router-engine: (opencode not found on PATH|stopped|idle, stopping)/.exec(log);
+  return fail2 ? { failure: fail2[1] } : {};
+}
+function launch(w) {
+  const token = randomToken(16);
+  const logFile = enginePath(`engine-${token}.log`);
+  const stopFile = enginePath("stop");
+  const hbFile = enginePath("heartbeat");
+  const xdg = enginePath("xdg");
+  if (!logFile || !stopFile || !hbFile || !xdg) {
+    state.phase = "failed";
+    state.error = "no plugin data directory for the engine";
+    return;
+  }
+  writeText(logFile, "");
+  heartbeat(true);
+  const env = {
+    ...w.keyEnv,
+    OPENCODE_CONFIG_CONTENT: w.configJson,
+    OPENCODE_SERVER_PASSWORD: password(),
+    OPENCODE_DISABLE_AUTOUPDATE: "1",
+    XDG_DATA_HOME: `${xdg}/data`,
+    XDG_CONFIG_HOME: `${xdg}/config`,
+    XDG_STATE_HOME: `${xdg}/state`,
+    XDG_CACHE_HOME: `${xdg}/cache`,
+    RE_TOKEN: token,
+    RE_STOP: stopFile,
+    RE_HEARTBEAT: hbFile,
+    RE_IDLE: String(ENGINE_IDLE_SECS)
+  };
+  const raw = host.exec(JSON.stringify({ bin: "sh", args: ["-lc", LAUNCH_SCRIPT], env, detach: true, logFile }));
+  const res = parseJson2(raw, { error: "host.exec returned non-JSON" });
+  if (res.error) {
+    state.phase = "failed";
+    state.error = `could not start opencode: ${res.error}`;
+    return;
+  }
+  state.record = { port: 0, token, fingerprint: w.fingerprint, logFile, startedAtMs: Date.now() };
+  state.phase = "starting";
+  state.startedAt = Date.now();
+  state.error = null;
+}
+function setWanted(w) {
+  wanted = w;
+  if (state.record && state.record.fingerprint !== w.fingerprint) state.restartWanted = true;
+}
+function engineError() {
+  return state.error;
+}
+function engineVersionNote() {
+  const v = state.record && state.record.version;
+  return v && v !== OPENCODE_VERSION ? `OpenCode ${v} is running; the Router engine was verified against ${OPENCODE_VERSION}.` : null;
+}
+function ensureEngine(anyTurnRunning) {
+  if (!wanted) return state.phase;
+  heartbeat();
+  if (state.phase === "up" && state.restartWanted && !anyTurnRunning) {
+    requestStop(state.record);
+    state.record = null;
+    state.phase = "down";
+    state.restartWanted = false;
+  }
+  if (state.phase === "down") {
+    const prior = readRecord();
+    if (prior && prior.port && prior.fingerprint === wanted.fingerprint) {
+      const h = healthy(prior.port);
+      if (h.ok) {
+        state.record = { ...prior, version: h.version };
+        state.phase = "up";
+        return state.phase;
+      }
+    }
+    if (prior) requestStop(prior);
+    launch(wanted);
+    return state.phase;
+  }
+  if (state.phase === "starting" && state.record) {
+    const scan = scanLaunchLog(readText2(state.record.logFile));
+    if (scan.failure) {
+      state.phase = "failed";
+      state.error = scan.failure === "opencode not found on PATH" ? `opencode not found on PATH; install it with \`npm i -g opencode-ai@${OPENCODE_VERSION}\`` : `opencode exited during startup (${scan.failure})`;
+      return state.phase;
+    }
+    if (scan.port) {
+      state.record.port = scan.port;
+      const h = healthy(scan.port);
+      if (h.ok) {
+        state.record.version = h.version;
+        state.phase = "up";
+        writeRecord(state.record);
+        return state.phase;
+      }
+    }
+    if (Date.now() - state.startedAt > START_TIMEOUT_MS) {
+      requestStop(state.record);
+      state.phase = "failed";
+      state.error = `opencode did not become ready within ${START_TIMEOUT_MS / 1e3}s`;
+    }
+  }
+  return state.phase;
+}
+function retryEngine() {
+  if (state.phase === "failed") {
+    state.phase = "down";
+    state.error = null;
+    state.record = null;
+  }
+}
+function engineLost() {
+  if (state.phase === "up") {
+    state.phase = "down";
+    state.record = null;
+  }
+}
+
+// lmstudio/src/engine/driver.ts
+var STREAM_TIMEOUT_MS = 6 * 60 * 60 * 1e3;
+var BUSY_GRACE_MS = 2e4;
+function newEngineSession(root, shell, ocSessionId) {
+  return {
+    root,
+    shell,
+    ocSessionId,
+    attached: false,
+    view: ocSessionId ? newEngineView(ocSessionId) : null,
+    stream: null,
+    queue: [],
+    inFlight: false,
+    sawBusy: false,
+    postedAt: 0,
+    turnStartMs: 0,
+    resync: false
+  };
+}
+function engineBusy(es) {
+  return es.inFlight || es.queue.length > 0;
+}
+function q(root) {
+  return `directory=${encodeURIComponent(root)}`;
+}
+function parse(raw, fallback) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+function failure(label, res) {
+  if (res.error) return `${label}: ${res.error}`;
+  const body = parse(res.body, {});
+  const data = body.data && typeof body.data === "object" ? body.data : {};
+  const detail = typeof data.message === "string" ? data.message : typeof body.message === "string" ? body.message : "";
+  return `${label}: HTTP ${res.status}${detail ? ` ${detail}` : ""}`;
+}
+function attach(es, tab) {
+  const root = es.root;
+  const permission = sessionPermission(es.shell);
+  if (es.ocSessionId) {
+    const res2 = engineRequest("PATCH", `/session/${es.ocSessionId}?${q(root)}`, { permission });
+    if (res2.status === 200) {
+      es.attached = true;
+      return null;
+    }
+    if (res2.status !== 404 && res2.status !== 400) return failure("re-attach failed", res2);
+    tab.note("The stored OpenCode session is gone; starting a new one.");
+    es.ocSessionId = null;
+  }
+  const res = engineRequest("POST", `/session?${q(root)}`, { title: `Domios Router ${tab.tabId}`, permission });
+  const created = parse(res.body, {});
+  if (res.status !== 200 || typeof created.id !== "string") return failure("could not create an OpenCode session", res);
+  es.ocSessionId = created.id;
+  es.view = newEngineView(created.id);
+  es.attached = true;
+  tab.persist(created.id, root);
+  return null;
+}
+function openStream(es) {
+  const base = engineBase();
+  if (!base || !es.root) return "engine is not running";
+  const raw = host.fetchStream(
+    JSON.stringify({ url: `${base}/event?${q(es.root)}`, method: "GET", headers: { authorization: authHeader(), accept: "text/event-stream" }, timeoutMs: STREAM_TIMEOUT_MS })
+  );
+  const started = parse(raw, { error: "fetchStream returned non-JSON" });
+  if (!started.jobId) return started.error || "event stream did not start";
+  es.stream = { jobId: started.jobId, buffer: "", connected: false };
+  return null;
+}
+function closeStream(es) {
+  if (es.stream) {
+    try {
+      host.fetchStreamClose(es.stream.jobId);
+    } catch {
+    }
+  }
+  es.stream = null;
+}
+function finishTurn(es) {
+  es.inFlight = false;
+  es.sawBusy = false;
+  if (!es.queue.length) closeStream(es);
+}
+function reject(es, route, id) {
+  if (!es.root) return;
+  if (route === "permission") engineRequest("POST", `/permission/${id}/reply?${q(es.root)}`, { reply: "reject" });
+  else engineRequest("POST", `/question/${id}/reject?${q(es.root)}`);
+}
+function resync(es, tab) {
+  es.resync = false;
+  if (!es.ocSessionId || !es.root || !es.view) return;
+  const res = engineRequest("GET", `/session/${es.ocSessionId}/message?${q(es.root)}&limit=40`);
+  if (res.status !== 200) return;
+  for (const row of messagesToRows(es.view, parse(res.body, []), es.turnStartMs - 1e3)) tab.emit(row);
+  const status = engineRequest("GET", `/session/status?${q(es.root)}`);
+  const all = parse(status.body, {});
+  const mine = all[es.ocSessionId];
+  if (es.inFlight && (!mine || mine.type === "idle")) finishTurn(es);
+  else if (es.inFlight) es.sawBusy = true;
+}
+function drainStream(es, tab) {
+  const stream = es.stream;
+  if (!stream || !es.view) return;
+  const poll = parse(host.fetchStreamPoll(stream.jobId), { done: true, error: "poll returned non-JSON" });
+  if (Array.isArray(poll.chunks) && poll.chunks.length) stream.buffer += poll.chunks.join("");
+  const { events, rest } = splitSse(stream.buffer, !!poll.done);
+  stream.buffer = rest;
+  for (const sse of events) {
+    const ev = parse(sse.data, null);
+    if (!ev) continue;
+    if (ev.type === "server.connected") {
+      stream.connected = true;
+      continue;
+    }
+    for (const effect of applyEngineEvent(es.view, ev, Date.now())) {
+      if (effect.kind === "row") tab.emit(effect.row);
+      else if (effect.kind === "usage") tab.usage(effect.usage);
+      else if (effect.kind === "error") tab.note(effect.message);
+      else if (effect.kind === "reject") reject(es, effect.route, effect.id);
+      else if (effect.kind === "busy") es.sawBusy = true;
+      else if (effect.kind === "idle" && es.inFlight && es.sawBusy) finishTurn(es);
+    }
+  }
+  if (poll.done || poll.error || poll.status && poll.status >= 400) {
+    closeStream(es);
+    if (poll.status === 401) tab.note("The engine refused the Router's credentials; it will be restarted.");
+    if (!poll.status || poll.status >= 500 || poll.error) engineLost();
+    if (es.inFlight) es.resync = true;
+  }
+}
+function postPrompt(es, tab) {
+  const model = tab.model();
+  const text = es.queue.shift();
+  if (!model) {
+    tab.note("Router error: no model is selected for this tab.");
+    return;
+  }
+  const body = { model, parts: [{ type: "text", text }] };
+  const system = tab.system();
+  if (system) body.system = system;
+  es.turnStartMs = Date.now();
+  const res = engineRequest("POST", `/session/${es.ocSessionId}/prompt_async?${q(es.root)}`, body);
+  if (res.status !== 204 && res.status !== 200) {
+    tab.note(failure("OpenCode refused the message", res));
+    if (!res.status) engineLost();
+    return;
+  }
+  es.inFlight = true;
+  es.sawBusy = false;
+  es.postedAt = Date.now();
+}
+function engineStep(es, tab) {
+  if (!es.root) return "no root directory for this tab";
+  if (!es.attached) {
+    const err2 = attach(es, tab);
+    if (err2) return err2;
+  }
+  if (!es.view && es.ocSessionId) es.view = newEngineView(es.ocSessionId);
+  if (!es.stream && (es.inFlight || es.queue.length)) {
+    const err2 = openStream(es);
+    if (err2) return `event stream: ${err2}`;
+  }
+  if (es.resync && es.stream && es.stream.connected) resync(es, tab);
+  drainStream(es, tab);
+  if (es.stream && es.stream.connected && !es.inFlight && es.queue.length) postPrompt(es, tab);
+  if (es.inFlight && !es.sawBusy && Date.now() - es.postedAt > BUSY_GRACE_MS) es.resync = true;
+  return null;
+}
+function engineAbort(es) {
+  if (es.ocSessionId && es.root && (es.inFlight || es.stream)) engineRequest("POST", `/session/${es.ocSessionId}/abort?${q(es.root)}`, void 0, 5e3);
+  es.queue = [];
+  es.inFlight = false;
+  es.sawBusy = false;
+  es.resync = false;
+  closeStream(es);
 }
 
 // lmstudio/src/plugin.ts
@@ -2499,7 +3327,7 @@ var {
   parseToolEntries,
   toolContent,
   executeTool
-} = createToolRuntime(host, parseJson2);
+} = createToolRuntime(host, parseJson3);
 function readSettings2() {
   try {
     const raw = JSON.parse(host.settingsJson() || "{}");
@@ -2512,15 +3340,15 @@ function cleanModel(model) {
   return typeof model === "string" ? model.trim() : "";
 }
 function readLastModel() {
-  const state = parseJson2(readDataFile(LAST_MODEL_FILE) || "", null);
-  return cleanModel(state && state.lastModel);
+  const state2 = parseJson3(readDataFile(LAST_MODEL_FILE) || "", null);
+  return cleanModel(state2 && state2.lastModel);
 }
 function rememberLastModel(model) {
   const lastModel = cleanModel(model);
   if (lastModel) writeDataFile(LAST_MODEL_FILE, JSON.stringify({ lastModel }));
 }
 function readAuthoredPrompts() {
-  const data = parseJson2(readDataFile(AUTHORED_PROMPTS_FILE) || "", null);
+  const data = parseJson3(readDataFile(AUTHORED_PROMPTS_FILE) || "", null);
   return data && typeof data === "object" && !Array.isArray(data) ? data : {};
 }
 function writeAuthoredPrompt(model, draft) {
@@ -2568,6 +3396,8 @@ function presets() {
     const preset = { id: p2.id, name: p2.name, model: presetModelId(p2), params: presetParams(p2) };
     if (p2.description) preset.description = p2.description;
     if (p2.systemPrompt !== void 0) preset.systemPrompt = p2.systemPrompt;
+    if (p2.root) preset.root = p2.root;
+    if (p2.shell !== void 0) preset.shell = p2.shell;
     return preset;
   });
 }
@@ -2613,7 +3443,7 @@ function append(s2, type, content, id, extras) {
   s2.messages.push(msg);
   return msg;
 }
-function parseJson2(raw, fallback) {
+function parseJson3(raw, fallback) {
   try {
     return JSON.parse(raw);
   } catch {
@@ -2630,7 +3460,7 @@ function fetchJson(opts) {
       timeoutMs: 12e4
     })
   );
-  return parseJson2(raw, { error: "fetch returned non-JSON" });
+  return parseJson3(raw, { error: "fetch returned non-JSON" });
 }
 function lmStudioHeaders(provider) {
   return provider ? authHeaders(provider, getKey(provider)) : { "content-type": "application/json" };
@@ -2646,7 +3476,7 @@ function resolveModelId(provider) {
   if (provider && provider.kind !== "lmstudio") return resolveRemoteModelId(provider);
   const res = fetchJson({ url: `${lmStudioRoot(provider)}/api/v1/models`, method: "GET", headers: lmStudioHeaders(provider) });
   if (res.error || res.status && res.status >= 400) return "";
-  const data = parseJson2(res.body || "{}", {});
+  const data = parseJson3(res.body || "{}", {});
   const rows2 = Array.isArray(data.models) ? data.models : [];
   const loaded = rows2.find(
     (r) => r && typeof r.key === "string" && Array.isArray(r.loaded_instances) && r.loaded_instances.length > 0
@@ -2656,7 +3486,7 @@ function resolveModelId(provider) {
   return first && typeof first.key === "string" ? first.key : "";
 }
 function startFetchStream(opts) {
-  return parseJson2(
+  return parseJson3(
     host.fetchStream(
       JSON.stringify({
         url: opts.url,
@@ -2671,18 +3501,18 @@ function startFetchStream(opts) {
 }
 function errorTextFromBody(raw) {
   if (!raw) return "";
-  const parsed = parseJson2(raw, null);
+  const parsed = parseJson3(raw, null);
   if (parsed && typeof parsed === "object") {
-    const obj = parsed;
-    const error = obj.error;
+    const obj2 = parsed;
+    const error = obj2.error;
     if (typeof error === "string") return error;
     if (error && typeof error === "object") {
       const nested2 = error;
       if (typeof nested2.message === "string") return nested2.message;
       if (typeof nested2.error === "string") return nested2.error;
     }
-    if (typeof obj.message === "string") return obj.message;
-    if (typeof obj.detail === "string") return obj.detail;
+    if (typeof obj2.message === "string") return obj2.message;
+    if (typeof obj2.detail === "string") return obj2.detail;
   }
   return raw;
 }
@@ -2693,7 +3523,7 @@ function vramLoadFailureMessage(model) {
   return `couldn't load ${model}: not enough VRAM \u2014 unload a model in LM Studio or pick a smaller one`;
 }
 function pollFetchStream(jobId) {
-  return parseJson2(host.fetchStreamPoll(jobId), {
+  return parseJson3(host.fetchStreamPoll(jobId), {
     chunks: [],
     done: true,
     error: "fetchStreamPoll returned non-JSON"
@@ -2727,10 +3557,11 @@ function sessionFor(sid) {
   if (live) return live;
   const saved = savedSession(sid);
   if (!saved) return void 0;
-  const s2 = resolveSession({ tabId: sid, model: saved.model, preset: saved.preset });
+  const s2 = resolveSession({ tabId: sid, model: saved.model, preset: saved.preset }, saved);
   if (s2.charterError) return void 0;
   s2.cursorReset = true;
-  append(s2, "system", "Router reloaded: earlier turns of this tab are no longer in the model's context.");
+  if (s2.es && s2.es.ocSessionId) append(s2, "system", "Router reloaded: this tab's OpenCode session keeps the conversation.");
+  else append(s2, "system", "Router reloaded: earlier turns of this tab are no longer in the model's context.");
   sessions.set(sid, s2);
   return s2;
 }
@@ -2940,7 +3771,7 @@ function startLmStudioCall(s2, input, opts) {
 function startNextIfIdle(s2) {
   if (!s2.stream && !s2.pendingExec && !s2.pendingTools && s2.pendingInputs.length) {
     const next = s2.pendingInputs.shift() || "";
-    const queued = parseJson2(next, null);
+    const queued = parseJson3(next, null);
     if (queued && Array.isArray(queued.watcherMessages)) {
       startLmStudioCall(s2, "", { messages: queued.watcherMessages, watcher: true });
     } else if (queued && Array.isArray(queued.machineMessages)) {
@@ -3227,7 +4058,10 @@ function publishStream(s2, stream, done) {
     finishAssistantMessage(s2, stream.content, stream.kind === "lmstudio" ? stream.responseId : null, stream.messageId, finishToolCalls(stream.toolParts));
   }
 }
-function resolveSession(ctx) {
+function cfgString(v) {
+  return typeof v === "string" ? v.trim() : "";
+}
+function resolveSession(ctx, saved) {
   const s2 = readSettings2();
   const allPresets = presets();
   const explicitModel = cleanModel(ctx.model);
@@ -3260,6 +4094,10 @@ function resolveSession(ctx) {
     if (!charter) charterError = "no charter provided and no shipped default";
   }
   const effectiveSystemPrompt = mode === "watcher" ? "" : systemPrompt;
+  const cfg = ctx.config && typeof ctx.config === "object" && !Array.isArray(ctx.config) ? ctx.config : {};
+  const useEngine = mode !== "watcher" && !(engine && engine.kind === "machine") && cfgString(s2.engine) !== "relay";
+  const shell = shellFlag(cfg.shell) ?? (preset && preset.shell) ?? shellFlag(s2.shell) ?? true;
+  const rootSetting = saved && saved.root || cfgString(cfg.root) || preset && preset.root || cfgString(s2.root);
   return {
     tabId: ctx.tabId,
     messages: [],
@@ -3291,13 +4129,147 @@ function resolveSession(ctx) {
     pendingExec: null,
     roundResults: [],
     pendingAuthor: null,
-    charterError
+    charterError,
+    presetId: ctx.preset,
+    es: useEngine ? newEngineSession(null, shell, saved && saved.engineSession || null) : null,
+    rootSetting,
+    engineNoted: false
   };
+}
+function shellQuote2(s2) {
+  return `'${s2.replace(/'/g, `'\\''`)}'`;
+}
+function isAbsolute(p2) {
+  return /^([A-Za-z]:[\\/]|\/)/.test(p2);
+}
+function tabCwd(tabId) {
+  const cmd = toolShell(`codeterm tab inspect ${shellQuote2(tabId)} --json`, instanceBinDir());
+  const res = parseJson3(host.exec(JSON.stringify({ bin: "sh", args: ["-lc", cmd], timeoutMs: 1e4 })), {});
+  const rows2 = parseJson3(res.stdout || "", null);
+  const row = Array.isArray(rows2) ? rows2[0] : rows2;
+  const cwd = row && typeof row === "object" ? row.cwd : void 0;
+  return typeof cwd === "string" ? cwd.trim() : "";
+}
+function resolveRoot(s2) {
+  const configured = s2.rootSetting;
+  const root = configured || tabCwd(s2.tabId);
+  if (!root) return { error: "Router error: this tab has no working directory; set `root` for the session or preset." };
+  if (!isAbsolute(root)) return { error: `Router error: root must be an absolute path, got ${root}.` };
+  if (!host.fileExists(root)) return { error: `Router error: root ${root} does not exist.` };
+  return { root };
+}
+function engineSessions() {
+  const out = [];
+  sessions.forEach((x) => {
+    if (x.es) out.push(x);
+  });
+  return out;
+}
+function wantEngine() {
+  const router = snapshot();
+  const settings2 = readSettings2();
+  const compaction = compactionSettings(settings2);
+  const used = {};
+  const add = (providerId, model) => {
+    if (!providerId || !model) return;
+    used[providerId] = used[providerId] || [];
+    if (used[providerId].indexOf(model) < 0) used[providerId].push(model);
+  };
+  for (const x of engineSessions()) if (x.provider && x.model) add(x.provider.id, x.model);
+  if (compaction.model) {
+    const split = splitModelId(compaction.model);
+    add(split.providerId || router.defaultProvider, split.model);
+  }
+  const providers = [];
+  const keyed = [];
+  for (const provider of router.providers) {
+    if (!provider.enabled || !used[provider.id]) continue;
+    const key = getKey(provider);
+    const cached = cachedModels(provider);
+    const models = (cached ? cached.models : []).filter((m) => used[provider.id].indexOf(m.id) >= 0);
+    providers.push({ provider, models, extraModels: used[provider.id], hasKey: !!key });
+    keyed.push({ provider, key });
+  }
+  const configJson = JSON.stringify(buildEngineConfig({ providers, compaction, defaultProvider: router.defaultProvider }));
+  const keyEnv = engineKeyEnv(keyed);
+  const md5 = typeof host.md5 === "function" ? (t) => host.md5(t) : fnv;
+  setWanted({ configJson, keyEnv, fingerprint: configFingerprint(configJson, keyEnv, md5) });
+}
+function fnv(text) {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h.toString(16);
+}
+function engineTab(s2) {
+  return {
+    tabId: s2.tabId,
+    model: () => s2.provider && s2.model ? ocModelRef(s2.provider.id, s2.model) : null,
+    system: () => {
+      const own = s2.systemPrompt.trim();
+      const ctx = engineContext(!!s2.es && s2.es.shell);
+      return own ? `${ctx}
+
+${own}` : ctx;
+    },
+    emit: (row) => {
+      const { id, type, content, ...extras } = row;
+      append(s2, type, content, id, { ...extras, provider: "lmstudio" });
+    },
+    note: (text) => append(s2, "system", text),
+    usage: (u) => {
+      if (readSettings2().showUsage === false) return;
+      append(s2, "system", `${sessionModelId(s2)} \xB7 ${formatUsage(u)}`, `oc-usage-${u.messageID}`, { usage: u, collapsed: true });
+    },
+    persist: (ocSessionId, root) => saveSession(s2.tabId, { model: reportedModel(s2), preset: s2.presetId, engineSession: ocSessionId, root })
+  };
+}
+function dropEngineTurn(s2, message) {
+  if (s2.es) engineAbort(s2.es);
+  append(s2, "system", message);
+  s2.done = true;
+}
+function engineAdvance(s2) {
+  const es = s2.es;
+  if (!engineBusy(es)) {
+    s2.done = true;
+    return;
+  }
+  if (!es.root) {
+    refreshRoute(s2);
+    if (s2.routeError) return dropEngineTurn(s2, `Router error: ${s2.routeError}`);
+    if (!s2.model && s2.provider) {
+      s2.model = resolveModelId(s2.provider);
+      if (!s2.model) return dropEngineTurn(s2, `${providerLabel(s2)} error: no model configured and none could be auto-resolved.`);
+      rememberLastModel(sessionModelId(s2));
+    }
+    const r = resolveRoot(s2);
+    if (r.error) return dropEngineTurn(s2, r.error);
+    es.root = r.root;
+  }
+  const anyRunning = engineSessions().some((x) => !!x.es && x.es.inFlight);
+  const phase = ensureEngine(anyRunning);
+  if (phase === "failed") return dropEngineTurn(s2, `Router engine error: ${engineError() || "OpenCode is unavailable"}`);
+  if (phase !== "up") {
+    s2.done = false;
+    return;
+  }
+  if (!s2.engineNoted) {
+    s2.engineNoted = true;
+    const note = engineVersionNote();
+    if (note) append(s2, "system", note);
+  }
+  const err2 = engineStep(es, engineTab(s2));
+  if (err2) return dropEngineTurn(s2, `Router engine error: ${err2}`);
+  s2.done = !engineBusy(es);
 }
 var plugin = {
   openSession(ctx) {
     const sid = ctx.tabId;
-    const s2 = resolveSession(ctx);
+    const prior = savedSession(sid);
+    const s2 = resolveSession(ctx, prior && prior.engineSession ? prior : null);
     if (s2.charterError) {
       host.log("error", `openSession failed for ${sid}: ${s2.charterError}`);
       return { error: s2.charterError };
@@ -3309,7 +4281,7 @@ var plugin = {
     }
     sessions.set(sid, s2);
     rememberLastModel(sessionModelId(s2));
-    if (s2.mode !== "watcher") saveSession(sid, { model: reportedModel(s2), preset: ctx.preset });
+    if (s2.mode !== "watcher") saveSession(sid, { model: reportedModel(s2), preset: ctx.preset, root: s2.rootSetting || void 0 });
     return { sessionId: sid };
   },
   sendMessage(sid, text) {
@@ -3320,6 +4292,15 @@ var plugin = {
       return;
     }
     append(s2, "user", text);
+    if (s2.es) {
+      refreshRoute(s2);
+      s2.es.queue.push(text);
+      s2.done = false;
+      retryEngine();
+      wantEngine();
+      engineAdvance(s2);
+      return;
+    }
     s2.toolRounds = 0;
     s2.capReached = false;
     s2.malformedRetries = 0;
@@ -3358,6 +4339,10 @@ var plugin = {
   pump(sid) {
     const s2 = sessions.get(sid);
     if (!s2) return;
+    if (s2.es) {
+      engineAdvance(s2);
+      return;
+    }
     pollStream(s2);
     drainExec(s2);
     drainAuthor(s2);
@@ -3379,9 +4364,9 @@ var plugin = {
     }
     const nextCursor = liveFrom >= 0 ? liveFrom : s2.messages.length;
     const done = s2.done && !s2.stream && !s2.pendingExec && !s2.pendingAuthor && s2.pendingInputs.length === 0;
-    const state = activityOf({
+    const state2 = activityOf({
       streaming: !!s2.stream,
-      answering: !!s2.stream && !!s2.stream.content,
+      answering: !!s2.stream && !!s2.stream.content || !!s2.es && s2.es.inFlight,
       toolsRunning: !!s2.pendingExec || !!s2.pendingTools,
       queued: !done
     });
@@ -3389,13 +4374,20 @@ var plugin = {
       messages: s2.messages.slice(from),
       cursor: String(nextCursor),
       done,
-      activity: { state, statusLine: activityLine(sessionModelId(s2), state) }
+      activity: { state: state2, statusLine: activityLine(sessionModelId(s2), state2) }
     };
     return result;
   },
   cancel(sid) {
     const s2 = sessions.get(sid);
     if (!s2) return;
+    if (s2.es) {
+      const running = engineBusy(s2.es);
+      engineAbort(s2.es);
+      if (running) append(s2, "system", "Stopped.");
+      s2.done = true;
+      return;
+    }
     const busy = !!s2.stream || !!s2.pendingExec || !!s2.pendingTools || s2.pendingInputs.length > 0;
     if (s2.stream) {
       host.fetchStreamClose(s2.stream.jobId);
@@ -3419,6 +4411,7 @@ var plugin = {
     const s2 = sessions.get(sid);
     if (s2 && s2.stream) host.fetchStreamClose(s2.stream.jobId);
     if (s2 && s2.pendingExec) host.execClose(s2.pendingExec.jobId);
+    if (s2 && s2.es) closeStream(s2.es);
     sessions.delete(sid);
   },
   listModels() {
@@ -3527,6 +4520,9 @@ var plugin_default = {
   ...decision_default,
   viewCall,
   onAgentCommand,
-  __test_resetRouter: resetModelCache,
+  __test_resetRouter: () => {
+    resetModelCache();
+    resetEngineForTests();
+  },
   __test_domiosContext: DOMIOS_CONTEXT
 };

@@ -38,7 +38,7 @@ import { runAgentVerb } from "./router/verbs";
 import { viewCall } from "./router/view";
 import { applyNativeEvent } from "./router/lmstudioNative";
 import { readDataFile, writeDataFile } from "./router/datafiles";
-import { forgetSession, savedSession, saveSession } from "./router/sessionstore";
+import { forgetSession, savedSession, saveSession, type SavedSession } from "./router/sessionstore";
 import { parseTextToolCalls } from "./router/textcalls";
 import { checkToolArgs } from "./router/toolspec";
 import { finishToolCalls, mergeToolParts } from "./router/toolwire";
@@ -46,6 +46,14 @@ import { transcriptTurns } from "./router/transcript";
 import { DOMIOS_CONTEXT, withDomiosContext } from "./router/context";
 import { activityLine, activityOf } from "./router/activity";
 import type { ChatTurn, NativeToolCall, ProviderConfig, StreamDelta, ToolPart, Usage } from "./router/types";
+import { engineContext } from "./router/context";
+import { shellFlag } from "./router/config";
+import { cachedModels } from "./router/store";
+import { instanceBinDir, toolShell } from "./router/instanceCli";
+import { buildEngineConfig, compactionSettings, configFingerprint, engineKeyEnv, ocModelRef, type EngineProvider } from "./engine/config";
+import { closeStream, engineAbort, engineBusy, engineStep, newEngineSession, type EngineSession, type EngineTab } from "./engine/driver";
+import { engineError, engineVersionNote, ensureEngine, resetEngineForTests, retryEngine, setWanted } from "./engine/server";
+import { splitModelId } from "./router/routing";
 
 interface Preset {
   id: string;
@@ -54,9 +62,17 @@ interface Preset {
   systemPrompt?: string;
   model?: string;
   params?: Record<string, unknown>;
+  root?: string;
+  shell?: boolean;
 }
 
 interface LmStudioSettings {
+  engine?: string;
+  root?: string;
+  shell?: unknown;
+  compactThreshold?: unknown;
+  compactModel?: unknown;
+  compactKeepTurns?: unknown;
   showUsage?: boolean;
   baseUrl?: string;
   model?: string;
@@ -156,6 +172,11 @@ interface Session {
   // the reply back via applyAuthoredPrompt. Null when no hand-off is active.
   pendingAuthor: PendingAuthor | null;
   charterError?: string;
+  presetId?: string;
+  // Set when OpenCode runs this tab's turns; the relay fields above stay idle then.
+  es: EngineSession | null;
+  rootSetting: string;
+  engineNoted: boolean;
 }
 
 interface PendingAuthor {
@@ -286,6 +307,8 @@ function presets(): Preset[] {
     const preset: Preset = { id: p.id, name: p.name, model: presetModelId(p), params: presetParams(p) };
     if (p.description) preset.description = p.description;
     if (p.systemPrompt !== undefined) preset.systemPrompt = p.systemPrompt;
+    if (p.root) preset.root = p.root;
+    if (p.shell !== undefined) preset.shell = p.shell;
     return preset;
   });
 }
@@ -493,10 +516,11 @@ function sessionFor(sid: string): Session | undefined {
   if (live) return live;
   const saved = savedSession(sid);
   if (!saved) return undefined;
-  const s = resolveSession({ tabId: sid, model: saved.model, preset: saved.preset } as unknown as ChatBackendOpenSessionCtx);
+  const s = resolveSession({ tabId: sid, model: saved.model, preset: saved.preset } as unknown as ChatBackendOpenSessionCtx, saved);
   if (s.charterError) return undefined;
   s.cursorReset = true;
-  append(s, "system", "Router reloaded: earlier turns of this tab are no longer in the model's context.");
+  if (s.es && s.es.ocSessionId) append(s, "system", "Router reloaded: this tab's OpenCode session keeps the conversation.");
+  else append(s, "system", "Router reloaded: earlier turns of this tab are no longer in the model's context.");
   sessions.set(sid, s);
   return s;
 }
@@ -1082,7 +1106,11 @@ function publishStream(s: Session, stream: StreamState, done: boolean): void {
   }
 }
 
-function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
+function cfgString(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
+
+function resolveSession(ctx: ChatBackendOpenSessionCtx, saved?: SavedSession | null): Session {
   const s = readSettings();
   const allPresets = presets();
   const explicitModel = cleanModel(ctx.model);
@@ -1120,6 +1148,10 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
     if (!charter) charterError = "no charter provided and no shipped default";
   }
   const effectiveSystemPrompt = mode === "watcher" ? "" : systemPrompt;
+  const cfg = ctx.config && typeof ctx.config === "object" && !Array.isArray(ctx.config) ? (ctx.config as Record<string, unknown>) : {};
+  const useEngine = mode !== "watcher" && !(engine && engine.kind === "machine") && cfgString(s.engine) !== "relay";
+  const shell = shellFlag(cfg.shell) ?? (preset && preset.shell) ?? shellFlag(s.shell) ?? true;
+  const rootSetting = (saved && saved.root) || cfgString(cfg.root) || (preset && preset.root) || cfgString(s.root);
   return {
     tabId: ctx.tabId,
     messages: [],
@@ -1152,7 +1184,150 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
     roundResults: [],
     pendingAuthor: null,
     charterError,
+    presetId: ctx.preset,
+    es: useEngine ? newEngineSession(null, shell, (saved && saved.engineSession) || null) : null,
+    rootSetting,
+    engineNoted: false,
   };
+}
+
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+function isAbsolute(p: string): boolean {
+  return /^([A-Za-z]:[\\/]|\/)/.test(p);
+}
+
+/** The tab's own cwd from the instance CLI; the host does not put it in the open ctx. */
+function tabCwd(tabId: string): string {
+  const cmd = toolShell(`codeterm tab inspect ${shellQuote(tabId)} --json`, instanceBinDir());
+  const res = parseJson<{ code?: number; stdout?: string }>(host.exec(JSON.stringify({ bin: "sh", args: ["-lc", cmd], timeoutMs: 10000 })), {});
+  const rows = parseJson<unknown>(res.stdout || "", null);
+  const row = Array.isArray(rows) ? rows[0] : rows;
+  const cwd = row && typeof row === "object" ? (row as Record<string, unknown>).cwd : undefined;
+  return typeof cwd === "string" ? cwd.trim() : "";
+}
+
+function resolveRoot(s: Session): { root?: string; error?: string } {
+  const configured = s.rootSetting;
+  const root = configured || tabCwd(s.tabId);
+  if (!root) return { error: "Router error: this tab has no working directory; set `root` for the session or preset." };
+  if (!isAbsolute(root)) return { error: `Router error: root must be an absolute path, got ${root}.` };
+  if (!host.fileExists(root)) return { error: `Router error: root ${root} does not exist.` };
+  return { root };
+}
+
+function engineSessions(): Session[] {
+  const out: Session[] = [];
+  sessions.forEach((x) => {
+    if (x.es) out.push(x);
+  });
+  return out;
+}
+
+/** Declares only the providers and models live tabs use, so catalogue refreshes do not restart the engine. */
+function wantEngine(): void {
+  const router = snapshot();
+  const settings = readSettings() as Record<string, unknown>;
+  const compaction = compactionSettings(settings);
+  const used: Record<string, string[]> = {};
+  const add = (providerId: string, model: string) => {
+    if (!providerId || !model) return;
+    used[providerId] = used[providerId] || [];
+    if (used[providerId].indexOf(model) < 0) used[providerId].push(model);
+  };
+  for (const x of engineSessions()) if (x.provider && x.model) add(x.provider.id, x.model);
+  if (compaction.model) {
+    const split = splitModelId(compaction.model);
+    add(split.providerId || router.defaultProvider, split.model);
+  }
+  const providers: EngineProvider[] = [];
+  const keyed: { provider: ProviderConfig; key: string | null }[] = [];
+  for (const provider of router.providers) {
+    if (!provider.enabled || !used[provider.id]) continue;
+    const key = getKey(provider);
+    const cached = cachedModels(provider);
+    const models = (cached ? cached.models : []).filter((m) => used[provider.id].indexOf(m.id) >= 0);
+    providers.push({ provider, models, extraModels: used[provider.id], hasKey: !!key });
+    keyed.push({ provider, key });
+  }
+  const configJson = JSON.stringify(buildEngineConfig({ providers, compaction, defaultProvider: router.defaultProvider }));
+  const keyEnv = engineKeyEnv(keyed);
+  const md5 = typeof host.md5 === "function" ? (t: string) => host.md5(t) : fnv;
+  setWanted({ configJson, keyEnv, fingerprint: configFingerprint(configJson, keyEnv, md5) });
+}
+
+function fnv(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16);
+}
+
+function engineTab(s: Session): EngineTab {
+  return {
+    tabId: s.tabId,
+    model: () => (s.provider && s.model ? ocModelRef(s.provider.id, s.model) : null),
+    system: () => {
+      const own = s.systemPrompt.trim();
+      const ctx = engineContext(!!s.es && s.es.shell);
+      return own ? `${ctx}\n\n${own}` : ctx;
+    },
+    emit: (row) => {
+      const { id, type, content, ...extras } = row;
+      append(s, type, content, id, { ...extras, provider: "lmstudio" });
+    },
+    note: (text) => append(s, "system", text),
+    usage: (u) => {
+      if (readSettings().showUsage === false) return;
+      append(s, "system", `${sessionModelId(s)} · ${formatUsage(u)}`, `oc-usage-${u.messageID}`, { usage: u, collapsed: true });
+    },
+    persist: (ocSessionId, root) => saveSession(s.tabId, { model: reportedModel(s), preset: s.presetId, engineSession: ocSessionId, root }),
+  };
+}
+
+function dropEngineTurn(s: Session, message: string): void {
+  if (s.es) engineAbort(s.es);
+  append(s, "system", message);
+  s.done = true;
+}
+
+function engineAdvance(s: Session): void {
+  const es = s.es as EngineSession;
+  if (!engineBusy(es)) {
+    s.done = true;
+    return;
+  }
+  if (!es.root) {
+    refreshRoute(s);
+    if (s.routeError) return dropEngineTurn(s, `Router error: ${s.routeError}`);
+    if (!s.model && s.provider) {
+      s.model = resolveModelId(s.provider);
+      if (!s.model) return dropEngineTurn(s, `${providerLabel(s)} error: no model configured and none could be auto-resolved.`);
+      rememberLastModel(sessionModelId(s));
+    }
+    const r = resolveRoot(s);
+    if (r.error) return dropEngineTurn(s, r.error);
+    es.root = r.root as string;
+  }
+  const anyRunning = engineSessions().some((x) => !!x.es && x.es.inFlight);
+  const phase = ensureEngine(anyRunning);
+  if (phase === "failed") return dropEngineTurn(s, `Router engine error: ${engineError() || "OpenCode is unavailable"}`);
+  if (phase !== "up") {
+    s.done = false;
+    return;
+  }
+  if (!s.engineNoted) {
+    s.engineNoted = true;
+    const note = engineVersionNote();
+    if (note) append(s, "system", note);
+  }
+  const err = engineStep(es, engineTab(s));
+  if (err) return dropEngineTurn(s, `Router engine error: ${err}`);
+  s.done = !engineBusy(es);
 }
 
 interface AuthoringResult {
@@ -1168,7 +1343,9 @@ const plugin: ChatBackend & {
 } = {
   openSession(ctx) {
     const sid = ctx.tabId;
-    const s = resolveSession(ctx);
+    // A restored tab reopens under the same id; its OpenCode session still holds the conversation.
+    const prior = savedSession(sid);
+    const s = resolveSession(ctx, prior && prior.engineSession ? prior : null);
     if (s.charterError) {
       host.log("error", `openSession failed for ${sid}: ${s.charterError}`);
       return { error: s.charterError } as unknown as { sessionId: string };
@@ -1180,7 +1357,7 @@ const plugin: ChatBackend & {
     }
     sessions.set(sid, s);
     rememberLastModel(sessionModelId(s));
-    if (s.mode !== "watcher") saveSession(sid, { model: reportedModel(s), preset: ctx.preset });
+    if (s.mode !== "watcher") saveSession(sid, { model: reportedModel(s), preset: ctx.preset, root: s.rootSetting || undefined });
     return { sessionId: sid };
   },
 
@@ -1192,6 +1369,15 @@ const plugin: ChatBackend & {
       return;
     }
     append(s, "user", text);
+    if (s.es) {
+      refreshRoute(s);
+      s.es.queue.push(text);
+      s.done = false;
+      retryEngine();
+      wantEngine();
+      engineAdvance(s);
+      return;
+    }
     s.toolRounds = 0;
     s.capReached = false;
     s.malformedRetries = 0;
@@ -1232,6 +1418,10 @@ const plugin: ChatBackend & {
   pump(sid) {
     const s = sessions.get(sid);
     if (!s) return;
+    if (s.es) {
+      engineAdvance(s);
+      return;
+    }
     pollStream(s);
     drainExec(s);
     drainAuthor(s);
@@ -1259,7 +1449,7 @@ const plugin: ChatBackend & {
     const done = s.done && !s.stream && !s.pendingExec && !s.pendingAuthor && s.pendingInputs.length === 0;
     const state = activityOf({
       streaming: !!s.stream,
-      answering: !!s.stream && !!s.stream.content,
+      answering: (!!s.stream && !!s.stream.content) || (!!s.es && s.es.inFlight),
       toolsRunning: !!s.pendingExec || !!s.pendingTools,
       queued: !done,
     });
@@ -1275,6 +1465,13 @@ const plugin: ChatBackend & {
   cancel(sid: string): void {
     const s = sessions.get(sid);
     if (!s) return;
+    if (s.es) {
+      const running = engineBusy(s.es);
+      engineAbort(s.es);
+      if (running) append(s, "system", "Stopped.");
+      s.done = true;
+      return;
+    }
     const busy = !!s.stream || !!s.pendingExec || !!s.pendingTools || s.pendingInputs.length > 0;
     if (s.stream) {
       host.fetchStreamClose(s.stream.jobId);
@@ -1299,6 +1496,7 @@ const plugin: ChatBackend & {
     const s = sessions.get(sid);
     if (s && s.stream) host.fetchStreamClose(s.stream.jobId);
     if (s && s.pendingExec) host.execClose(s.pendingExec.jobId);
+    if (s && s.es) closeStream(s.es);
     sessions.delete(sid);
   },
 
@@ -1424,6 +1622,9 @@ export default {
   ...decisionModel,
   viewCall,
   onAgentCommand,
-  __test_resetRouter: resetModelCache,
+  __test_resetRouter: () => {
+    resetModelCache();
+    resetEngineForTests();
+  },
   __test_domiosContext: DOMIOS_CONTEXT,
 };

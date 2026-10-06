@@ -119,6 +119,8 @@ mockHostFetch.async = (opts, then) => {
 };
 
 const secretStore = {};
+const existingPaths = new Set();
+let tabCwdForTests = "";
 const logLines = [];
 globalThis.host = {
   homeDir: () => "/tmp/codeterm-home",
@@ -139,13 +141,13 @@ globalThis.host = {
     const opts = JSON.parse(optsJson);
     streamCalls.push(opts);
     const jobId = `job-${streamJobs.length}`;
-    streamJobs.push({ jobId, polls: [], closed: false });
+    streamJobs.push({ jobId, polls: [], closed: false, live: /\/event\?/.test(opts.url) });
     return JSON.stringify({ jobId });
   },
   fetchStreamPoll: (jobId) => {
     const job = streamJobs.find((j) => j.jobId === jobId);
     if (!job) return JSON.stringify({ chunks: [], done: true, error: "unknown job" });
-    const next = job.polls.shift() || { chunks: [], done: true, status: 200 };
+    const next = job.polls.shift() || (job.live && !job.closed ? { chunks: [], done: false, status: 200 } : { chunks: [], done: true, status: 200 });
     return JSON.stringify(next);
   },
   fetchStreamClose: (jobId) => {
@@ -155,8 +157,12 @@ globalThis.host = {
   exec: (optsJson) => {
     const opts = JSON.parse(optsJson);
     execCalls.push(opts);
+    if (opts.detach) return JSON.stringify({ code: 0, pid: 4242 });
+    const line = opts.args ? opts.args[opts.args.length - 1] : "";
+    if (/codeterm tab inspect/.test(line)) return JSON.stringify({ code: 0, stdout: JSON.stringify([{ id: "x", cwd: tabCwdForTests }]), stderr: "" });
     return JSON.stringify({ code: 0, stdout: "pane-1\npane-2\n", stderr: "" });
   },
+  fileExists: (path) => existingPaths.has(path) || Object.prototype.hasOwnProperty.call(fileStore, path),
   // Async exec: start returns a jobId, poll drains queued responses (or a
   // default done) just like the fetch-stream job-id/poll shape.
   execStart: (optsJson) => {
@@ -261,7 +267,8 @@ function reset(settings) {
   agentReply = "DRAFTED PROMPT";
   pendingExecPolls = null;
   forceParse = null;
-  settingsObj = settings || {};
+  // The legacy relay path; engine tests opt into OpenCode explicitly.
+  settingsObj = Object.assign({ engine: "relay" }, settings || {});
   for (const key of Object.keys(fileStore)) delete fileStore[key];
   for (const key of Object.keys(secretStore)) delete secretStore[key];
   logLines.length = 0;
@@ -2765,6 +2772,230 @@ test("router_session_revives_after_a_plugin_reload_without_a_new_tab", () => {
   reloaded.closeSession("t-rev");
   assert(!/t-rev/.test(fileStore[DATA_DIR + "sessions.json"] || ""), "closing forgets the saved route");
   plugin.closeSession("t-rev");
+});
+
+// ── Engine: OpenCode serve as the agent loop, against an in-process fake server ──
+
+const ENGINE_DIR = DATA_DIR + "engine/";
+const ROOT = "/work/scratch";
+const SID_OC = "ses_fake1";
+
+function fakeOpencode() {
+  const fake = { requests: [], sessions: {}, nextSession: 1, password: null, healthy: true, version: "1.18.34" };
+  fake.handle = (opts) => {
+    const url = new URL(opts.url);
+    const auth = (opts.headers || {}).authorization || "";
+    const body = opts.body ? JSON.parse(opts.body) : undefined;
+    fake.requests.push({ method: opts.method, path: url.pathname, directory: url.searchParams.get("directory"), body, auth });
+    const ok = (status, payload) => JSON.stringify({ status, body: payload === undefined ? "" : JSON.stringify(payload) });
+    if (!/^Basic /.test(auth)) return ok(401, { error: "unauthorized" });
+    if (url.pathname === "/global/health") return fake.healthy ? ok(200, { healthy: true, version: fake.version }) : JSON.stringify({ error: "connection refused" });
+    if (opts.method === "POST" && url.pathname === "/session") {
+      const id = fake.nextSession === 1 ? SID_OC : `ses_fake${fake.nextSession}`;
+      fake.nextSession += 1;
+      fake.sessions[id] = { permission: body.permission, directory: url.searchParams.get("directory") };
+      return ok(200, { id, directory: url.searchParams.get("directory"), permission: body.permission });
+    }
+    const m = /^\/session\/([^/]+)(\/[a-z_]+)?$/.exec(url.pathname);
+    if (m && opts.method === "PATCH" && !m[2]) {
+      if (!fake.sessions[m[1]]) return ok(404, { name: "NotFoundError", data: { message: "Session not found" } });
+      fake.sessions[m[1]].permission = body.permission;
+      return ok(200, { id: m[1] });
+    }
+    if (m && m[2] === "/prompt_async") return ok(204);
+    if (m && m[2] === "/abort") return ok(200, true);
+    if (m && m[2] === "/message") return ok(200, []);
+    if (url.pathname === "/session/status") return ok(200, {});
+    if (/^\/permission\/[^/]+\/reply$/.test(url.pathname)) return ok(200, true);
+    return ok(404, { name: "NotFoundError" });
+  };
+  fake.find = (method, re) => fake.requests.filter((r) => r.method === method && re.test(r.path));
+  return fake;
+}
+
+function ocEvent(type, properties) {
+  return `data: ${JSON.stringify({ id: "evt_" + type, type, properties: Object.assign({ sessionID: SID_OC }, properties) })}\n\n`;
+}
+
+function engineSettings(extra) {
+  return routerSettings(Object.assign({ engine: "opencode", root: ROOT }, extra || {}));
+}
+
+function launchCall() {
+  return execCalls.find((c) => c.detach);
+}
+
+// Drives the plugin until the fake engine is up: launch, the listening line in the launch log, then health.
+function bootEngine(fake, sid) {
+  fetchHandler = (opts) => fake.handle(opts);
+  plugin.pump(sid);
+  const launch = launchCall();
+  assert(launch, "the engine is launched as a detached host job");
+  fileStore[launch.logFile] = "router-engine: launching 1.18.34\nopencode server listening on http://127.0.0.1:4555\n";
+  for (let i = 0; i < 5 && !streamCalls.length; i += 1) plugin.pump(sid);
+  assert(streamCalls.length === 1 && /^http:\/\/127\.0\.0\.1:4555\/event\?directory=/.test(streamCalls[0].url), "event stream opened, got " + JSON.stringify(streamCalls.map((c) => c.url)));
+}
+
+function openEngineTab(sid, settings) {
+  reset(settings || engineSettings());
+  seedRouter(mimoProviders());
+  secretStore.mimo_api_key = MIMO_KEY;
+  existingPaths.add(ROOT);
+  plugin.openSession({ tabId: sid, config: {}, model: "mimo::mimo-v2.6-pro", systemPrompt: "Be terse." });
+}
+
+const EDIT_TURN = [
+  ocEvent("session.status", { status: { type: "busy" } }),
+  ocEvent("message.updated", { info: { id: "msg_a1", role: "assistant", time: { created: 2 } } }),
+  ocEvent("message.part.updated", { part: { id: "prt_r1", messageID: "msg_a1", type: "reasoning", text: "Add the function.", time: { start: 2 } }, time: 2 }),
+  ocEvent("message.part.updated", { part: { id: "prt_e1", messageID: "msg_a1", type: "tool", tool: "edit", callID: "call_1", state: { status: "completed", input: { filePath: "math.ts", oldString: "export {}", newString: "export function add(a: number, b: number) {\n  return a + b;\n}" }, output: "Edit applied successfully.", title: "math.ts", metadata: {}, time: { start: 3, end: 4 } } }, time: 4 }),
+  ocEvent("message.part.updated", { part: { id: "prt_t1", messageID: "msg_a1", type: "text", text: "Added" }, time: 5 }),
+  ocEvent("message.part.delta", { messageID: "msg_a1", partID: "prt_t1", field: "text", delta: " add()." }),
+  ocEvent("message.updated", { info: { id: "msg_a1", role: "assistant", time: { created: 2, completed: 6 }, tokens: { input: 1200, output: 40, reasoning: 0, cache: { read: 1000, write: 0 } } } }),
+  ocEvent("session.status", { status: { type: "idle" } }),
+  ocEvent("session.idle", {}),
+].join("");
+
+test("engine_turn_runs_through_opencode_and_renders_edit_diff_rows", () => {
+  openEngineTab("e-edit");
+  const fake = fakeOpencode();
+  plugin.sendMessage("e-edit", "add an add() function to math.ts");
+  bootEngine(fake, "e-edit");
+  const launch = launchCall();
+  assert(launch.bin === "sh" && !JSON.stringify(launch.args).includes(MIMO_KEY), "the key is not in argv");
+  assert(launch.env.ROUTER_KEY_MIMO === MIMO_KEY, "the key reaches the engine through its env");
+  const config = JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT);
+  assert(config.provider["router-mimo"].options.apiKey === "{env:ROUTER_KEY_MIMO}" && !launch.env.OPENCODE_CONFIG_CONTENT.includes(MIMO_KEY), "config names the key variable only");
+  assert(config.provider["router-mimo"].models["mimo-v2.6-pro"], "the session's model is declared");
+  assert(/^.+\/engine\/xdg\/data$/.test(launch.env.XDG_DATA_HOME), "engine state lives in the plugin data dir");
+  const created = fake.find("POST", /^\/session$/)[0];
+  assert(created && created.directory === ROOT, "session rooted at the tab root");
+  assert(created.body.permission.some((r) => r.permission === "external_directory" && r.action === "deny"), "confined to root");
+  assert(!created.body.permission.some((r) => r.permission === "bash"), "shell on by default");
+  assert(fake.find("POST", /prompt_async$/).length === 0, "no prompt before the stream is connected");
+  enqueueStream(0, [{ chunks: [ocEvent("server.connected", {})], done: false, status: 200 }]);
+  plugin.pump("e-edit");
+  const prompt = fake.find("POST", /prompt_async$/)[0];
+  assert(prompt && prompt.path === `/session/${SID_OC}/prompt_async`, "prompt posted to the tab's session");
+  assertJsonEqual(prompt.body.model, { providerID: "router-mimo", modelID: "mimo-v2.6-pro" }, "per-message model");
+  assertJsonEqual(prompt.body.parts, [{ type: "text", text: "add an add() function to math.ts" }], "the user's text");
+  assert(/Domios Router coding agent/.test(prompt.body.system) && /Be terse\.$/.test(prompt.body.system), "Domios context plus the preset prompt");
+  assert(!plugin.poll("e-edit", null).done, "turn in flight");
+  enqueueStream(0, [{ chunks: [EDIT_TURN], done: false, status: 200 }]);
+  const p = pumpUntilDone("e-edit");
+  const edit = p.messages.find((m) => m.type === "tool_call");
+  assert(edit && edit.toolKind === "edit" && edit.toolName === "edit", "edit tool row, got " + JSON.stringify(edit));
+  assertJsonEqual(edit.toolEdits, [{ path: "math.ts", old: "export {}", new: "export function add(a: number, b: number) {\n  return a + b;\n}" }], "diff pair for the UI");
+  assert(edit.toolInput.filePath === "math.ts" && edit.toolInput.oldString === "export {}", "OpenCode input shape kept");
+  assert(contents(p.messages, "thinking").includes("Add the function."), "reasoning row");
+  assert(contents(p.messages, "assistant").pop() === "Added add().", "assistant text grows with deltas");
+  assert(contents(p.messages, "system").some((m) => m === "mimo::mimo-v2.6-pro · 1,200 in · 1,000 cached · 200 fresh · 40 out"), "usage line");
+  assert(contents(p.messages, "user").filter((m) => /add an add/.test(m)).length === 1, "user bubble not duplicated");
+  assert(streamJobs[0].closed, "event stream closed once idle");
+  assert(!allText().includes(MIMO_KEY), "key never in files, settings or logs");
+  plugin.closeSession("e-edit");
+});
+
+test("engine_stop_aborts_the_opencode_turn", () => {
+  openEngineTab("e-stop");
+  const fake = fakeOpencode();
+  plugin.sendMessage("e-stop", "long task");
+  bootEngine(fake, "e-stop");
+  enqueueStream(0, [{ chunks: [ocEvent("server.connected", {}), ocEvent("session.status", { status: { type: "busy" } })], done: false, status: 200 }]);
+  plugin.pump("e-stop");
+  plugin.pump("e-stop");
+  assert(plugin.poll("e-stop", null).activity.state !== "idle", "busy while the turn runs");
+  plugin.cancel("e-stop");
+  const abort = fake.find("POST", /\/abort$/);
+  assert(abort.length === 1 && abort[0].path === `/session/${SID_OC}/abort` && abort[0].directory === ROOT, "abort route called");
+  const p = plugin.poll("e-stop", null);
+  assert(p.done && contents(p.messages, "system").includes("Stopped."), "turn ends with Stopped.");
+  assert(streamJobs[0].closed, "stream closed");
+  plugin.closeSession("e-stop");
+});
+
+test("engine_restart_reattaches_the_same_opencode_session_and_reuses_the_running_engine", () => {
+  openEngineTab("e-rev");
+  const fake = fakeOpencode();
+  plugin.sendMessage("e-rev", "first");
+  bootEngine(fake, "e-rev");
+  enqueueStream(0, [{ chunks: [ocEvent("server.connected", {}), EDIT_TURN], done: false, status: 200 }]);
+  pumpUntilDone("e-rev");
+  assert(/ses_fake1/.test(fileStore[DATA_DIR + "sessions.json"]), "the tab's OpenCode session is stored");
+  assert(JSON.parse(fileStore[ENGINE_DIR + "engine.json"]).port === 4555, "engine record stored");
+
+  const reloaded = loadPlugin();
+  reloaded.__test_resetRouter();
+  reloaded.openSession({ tabId: "e-rev", config: {}, model: "mimo::mimo-v2.6-pro", systemPrompt: "Be terse." });
+  reloaded.sendMessage("e-rev", "second");
+  for (let i = 0; i < 3 && streamCalls.length < 2; i += 1) reloaded.pump("e-rev");
+  assert(execCalls.filter((c) => c.detach).length === 1, "the running engine is adopted, not relaunched");
+  assert(fake.find("POST", /^\/session$/).length === 1, "no second session created");
+  const patch = fake.find("PATCH", /^\/session\/ses_fake1$/);
+  assert(patch.length === 1 && patch[0].body.permission.some((r) => r.permission === "external_directory"), "re-attached with this tab's rules");
+  enqueueStream(1, [{ chunks: [ocEvent("server.connected", {})], done: false, status: 200 }]);
+  reloaded.pump("e-rev");
+  const prompts = fake.find("POST", /prompt_async$/);
+  assert(prompts.length === 2 && prompts[1].path === `/session/${SID_OC}/prompt_async`, "second turn continues the same conversation");
+  reloaded.closeSession("e-rev");
+});
+
+test("engine_shell_off_denies_bash_and_says_so", () => {
+  openEngineTab("e-noshell", engineSettings({ shell: "off" }));
+  const fake = fakeOpencode();
+  plugin.sendMessage("e-noshell", "hi");
+  bootEngine(fake, "e-noshell");
+  const created = fake.find("POST", /^\/session$/)[0];
+  assertJsonEqual(created.body.permission.filter((r) => r.permission === "bash"), [{ permission: "bash", pattern: "*", action: "deny" }], "bash denied for the session");
+  enqueueStream(0, [{ chunks: [ocEvent("server.connected", {})], done: false, status: 200 }]);
+  plugin.pump("e-noshell");
+  const prompt = fake.find("POST", /prompt_async$/)[0];
+  assert(/Shell commands are disabled/.test(prompt.body.system) && !/bash tool/.test(prompt.body.system), "context matches the confinement");
+  plugin.closeSession("e-noshell");
+});
+
+test("engine_defaults_root_to_the_tab_cwd_and_refuses_a_missing_root", () => {
+  openEngineTab("e-cwd", engineSettings({ root: "" }));
+  tabCwdForTests = "/work/from-tab";
+  existingPaths.add("/work/from-tab");
+  const fake = fakeOpencode();
+  plugin.sendMessage("e-cwd", "hi");
+  bootEngine(fake, "e-cwd");
+  assert(fake.find("POST", /^\/session$/)[0].directory === "/work/from-tab", "root is the tab's cwd");
+  plugin.closeSession("e-cwd");
+
+  openEngineTab("e-noroot", engineSettings({ root: "/does/not/exist" }));
+  fetchHandler = (opts) => fakeOpencode().handle(opts);
+  plugin.sendMessage("e-noroot", "hi");
+  const p = pumpUntilDone("e-noroot");
+  assert(contents(p.messages, "system").some((m) => /root \/does\/not\/exist does not exist/.test(m)), "typed refusal");
+  assert(!launchCall(), "no engine launched for a refused root");
+  plugin.closeSession("e-noroot");
+  tabCwdForTests = "";
+});
+
+test("engine_rejects_approval_requests_instead_of_hanging", () => {
+  openEngineTab("e-perm");
+  const fake = fakeOpencode();
+  plugin.sendMessage("e-perm", "read the env file");
+  bootEngine(fake, "e-perm");
+  enqueueStream(0, [{ chunks: [ocEvent("server.connected", {}), ocEvent("session.status", { status: { type: "busy" } }), ocEvent("permission.asked", { id: "per_1", permission: "read", patterns: [".env"], metadata: {}, always: [] })], done: false, status: 200 }]);
+  plugin.pump("e-perm");
+  plugin.pump("e-perm");
+  const reply = fake.find("POST", /^\/permission\/per_1\/reply$/);
+  assert(reply.length === 1 && reply[0].body.reply === "reject", "auto-rejected");
+  plugin.closeSession("e-perm");
+});
+
+test("engine_missing_opencode_reports_the_install_command", () => {
+  openEngineTab("e-missing");
+  fetchHandler = (opts) => fakeOpencode().handle(opts);
+  plugin.sendMessage("e-missing", "hi");
+  plugin.pump("e-missing");
+  fileStore[launchCall().logFile] = "router-engine: opencode not found on PATH\n";
+  const p = pumpUntilDone("e-missing");
+  assert(contents(p.messages, "system").some((m) => /npm i -g opencode-ai@1\.18\.34/.test(m)), "install hint, got " + JSON.stringify(contents(p.messages, "system")));
+  plugin.closeSession("e-missing");
 });
 
 for (const [name, fn] of tests) {

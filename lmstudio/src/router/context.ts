@@ -11,3 +11,20 @@ export const DOMIOS_CONTEXT = [
 export function withDomiosContext(prompt: string): string {
   return prompt.trim() ? `${DOMIOS_CONTEXT}\n\n${prompt}` : DOMIOS_CONTEXT;
 }
+
+/** Appended to OpenCode's own system prompt; the engine's tools already describe file work. */
+export function engineContext(shell: boolean): string {
+  const lines = [
+    "You run inside Domios, a terminal multiplexer where AI agents work, as the Domios Router coding agent.",
+    "Prefer edit over write for existing files, read a file before editing it, and use grep/glob instead of shell commands to search.",
+  ];
+  if (shell) {
+    lines.push(
+      "The Domios CLI is `codeterm`; run it with the bash tool (`codeterm --help`, `codeterm docs`).",
+      "Messages from other tabs arrive as <domios from=\"tab\" tab=\"ID\" ...>BODY</domios>; answer with `codeterm send \"reply\" --tab ID`.",
+    );
+  } else {
+    lines.push("Shell commands are disabled in this session; work with the file tools only.");
+  }
+  return lines.join("\n");
+}

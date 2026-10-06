@@ -77,6 +77,8 @@ export interface PresetInput {
   maxTokens?: unknown;
   systemPrompt?: unknown;
   params?: unknown;
+  root?: unknown;
+  shell?: unknown;
 }
 
 export interface RouterState {
@@ -175,6 +177,15 @@ export function apiRoot(provider: Pick<ProviderConfig, "kind" | "baseUrl">): str
   return parsed.path ? origin + parsed.path : `${origin}/v1`;
 }
 
+/** `on`/`off`, `true`/`false` or a boolean; anything else is unset. */
+export function shellFlag(v: unknown): boolean | undefined {
+  if (typeof v === "boolean") return v;
+  const t = typeof v === "string" ? v.trim().toLowerCase() : "";
+  if (t === "on" || t === "true" || t === "yes") return true;
+  if (t === "off" || t === "false" || t === "no") return false;
+  return undefined;
+}
+
 function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
 }
@@ -259,6 +270,10 @@ export function validatePreset(
   if (maxTokens !== undefined) preset.maxTokens = maxTokens;
   if (typeof input.systemPrompt === "string") preset.systemPrompt = input.systemPrompt;
   if (input.params && typeof input.params === "object") preset.params = { ...(input.params as Record<string, unknown>) };
+  const root = str(input.root);
+  if (root) preset.root = root;
+  const shell = shellFlag(input.shell);
+  if (shell !== undefined) preset.shell = shell;
   return { ok: true, value: preset };
 }
 

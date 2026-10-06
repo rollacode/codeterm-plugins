@@ -26,6 +26,9 @@ export interface RouterPreset {
   maxTokens?: number;
   systemPrompt?: string;
   params?: Record<string, unknown>;
+  /** Directory the coding engine is confined to; defaults to the tab's cwd. */
+  root?: string;
+  shell?: boolean;
   source: ProviderSource;
 }
 
