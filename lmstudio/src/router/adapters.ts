@@ -6,8 +6,11 @@ import type {
   ProviderConfig,
   RouterError,
   StreamDelta,
+  ToolPart,
   Usage,
 } from "./types";
+import { anthropicTools, openAiTools } from "./toolspec";
+import { anthropicMessages, openAiMessage, pairToolCalls } from "./toolwire";
 
 export const ANTHROPIC_VERSION = "2023-06-01";
 export const ANTHROPIC_DEFAULT_MAX_TOKENS = 4096;
@@ -39,11 +42,19 @@ export function modelsRequests(provider: ProviderConfig, key: string | null): Ht
 /** Merges same-role neighbours; the Messages API needs strict user/assistant alternation starting with user. */
 export function normalizeTurns(turns: ChatTurn[]): ChatTurn[] {
   const out: ChatTurn[] = [];
-  for (const t of turns) {
-    if (!t.content) continue;
+  for (const t of pairToolCalls(turns)) {
+    const calls = t.toolCalls && t.toolCalls.length ? t.toolCalls : undefined;
+    if (!t.content && !calls && t.role !== "tool") continue;
     const last = out[out.length - 1];
-    if (last && last.role === t.role) last.content = `${last.content}\n\n${t.content}`;
-    else out.push({ role: t.role, content: t.content });
+    if (last && last.role === t.role && t.role !== "tool" && !last.toolCalls) {
+      last.content = last.content && t.content ? `${last.content}\n\n${t.content}` : last.content || t.content;
+      if (calls) last.toolCalls = calls;
+    } else {
+      const turn: ChatTurn = { role: t.role, content: t.content };
+      if (calls) turn.toolCalls = calls;
+      if (t.toolCallId) turn.toolCallId = t.toolCallId;
+      out.push(turn);
+    }
   }
   while (out.length && out[0].role !== "user") out.shift();
   return out;
@@ -55,7 +66,7 @@ export interface CachePlan {
 }
 
 /** Breakpoints on the system block and on the last turn before the newest user message (2 of the API's 4). */
-export function cacheBreakpoints(hasSystem: boolean, turns: ChatTurn[]): CachePlan {
+export function cacheBreakpoints(hasSystem: boolean, turns: { role: string }[]): CachePlan {
   let newestUser = -1;
   for (let i = turns.length - 1; i >= 0; i -= 1) {
     if (turns[i].role === "user") {
@@ -69,12 +80,13 @@ export function cacheBreakpoints(hasSystem: boolean, turns: ChatTurn[]): CachePl
 const EPHEMERAL = { type: "ephemeral" };
 
 export function anthropicBody(req: ChatRequest): Json {
-  const turns = normalizeTurns(req.turns);
-  const plan = cacheBreakpoints(!!req.system, turns);
-  const messages = turns.map((t, i) => ({
-    role: t.role,
-    content: [i === plan.messageIndex ? { type: "text", text: t.content, cache_control: EPHEMERAL } : { type: "text", text: t.content }],
-  }));
+  const messages = anthropicMessages(normalizeTurns(req.turns));
+  const plan = cacheBreakpoints(!!req.system, messages);
+  const marked = messages[plan.messageIndex];
+  if (marked) {
+    const blocks = marked.content;
+    blocks[blocks.length - 1] = { ...blocks[blocks.length - 1], cache_control: EPHEMERAL };
+  }
   const { max_tokens: maxTokens, ...rest } = req.params;
   const body: Json = {
     ...rest,
@@ -84,20 +96,29 @@ export function anthropicBody(req: ChatRequest): Json {
     stream: true,
   };
   if (req.system) body.system = [{ type: "text", text: req.system, cache_control: EPHEMERAL }];
+  if (req.tools) {
+    body.tools = anthropicTools();
+    body.tool_choice = { type: "auto" };
+  }
   return body;
 }
 
 export function openAiBody(req: ChatRequest): Json {
-  const messages: { role: string; content: string }[] = [];
+  const messages: Json[] = [];
   if (req.system) messages.push({ role: "system", content: req.system });
-  for (const t of normalizeTurns(req.turns)) messages.push({ role: t.role, content: t.content });
-  return {
+  for (const t of normalizeTurns(req.turns)) messages.push(openAiMessage(t));
+  const body: Json = {
     ...req.params,
     model: req.model,
     messages,
     stream: true,
     stream_options: { include_usage: true },
   };
+  if (req.tools) {
+    body.tools = openAiTools();
+    body.tool_choice = "auto";
+  }
+  return body;
 }
 
 export function chatRequest(provider: ProviderConfig, key: string | null, req: ChatRequest): HttpRequest {
@@ -140,7 +161,7 @@ function n(v: unknown): number {
 }
 
 export function emptyDelta(): StreamDelta {
-  return { content: "", reasoning: "", usage: null, responseId: null, error: null };
+  return { content: "", reasoning: "", usage: null, responseId: null, error: null, toolParts: [] };
 }
 
 /** OpenAI-style usage: prompt_tokens already includes cached tokens. */
@@ -189,6 +210,23 @@ function errorMessage(raw: unknown): string | null {
   return null;
 }
 
+function openAiToolParts(calls: Json[]): ToolPart[] {
+  return calls.map((call, i) => {
+    const fn = call && typeof call.function === "object" && call.function ? (call.function as Json) : {};
+    const part: ToolPart = { index: typeof call.index === "number" ? call.index : i, args: "" };
+    if (typeof call.id === "string" && call.id) part.id = call.id;
+    if (typeof fn.name === "string" && fn.name) part.name = fn.name;
+    if (typeof fn.arguments === "string") part.args = fn.arguments;
+    else if (fn.arguments && typeof fn.arguments === "object") part.args = JSON.stringify(fn.arguments);
+    return part;
+  });
+}
+
+function anthropicToolPart(index: number, block: Json): ToolPart {
+  const input = block.input && typeof block.input === "object" && Object.keys(block.input as Json).length ? JSON.stringify(block.input) : "";
+  return { index, id: String(block.id || ""), name: String(block.name || ""), args: input };
+}
+
 export function applyOpenAiEvent(acc: StreamDelta, ev: SseEvent): void {
   if (!ev.data || ev.data === "[DONE]") return;
   let data: Json;
@@ -208,6 +246,7 @@ export function applyOpenAiEvent(acc: StreamDelta, ev: SseEvent): void {
     if (typeof delta.content === "string") acc.content += delta.content;
     const reasoning = typeof delta.reasoning_content === "string" ? delta.reasoning_content : typeof delta.reasoning === "string" ? delta.reasoning : "";
     if (reasoning) acc.reasoning += reasoning;
+    if (Array.isArray(delta.tool_calls)) acc.toolParts.push(...openAiToolParts(delta.tool_calls as Json[]));
   }
   acc.usage = mergeUsage(acc.usage, openAiUsage(data.usage));
 }
@@ -227,10 +266,14 @@ export function applyAnthropicEvent(acc: StreamDelta, ev: SseEvent): void {
     const message = data.message as Json;
     if (typeof message.id === "string") acc.responseId = message.id;
     acc.usage = mergeUsage(acc.usage, anthropicUsage(message.usage));
+  } else if (type === "content_block_start" && data.content_block && typeof data.content_block === "object") {
+    const block = data.content_block as Json;
+    if (block.type === "tool_use") acc.toolParts.push(anthropicToolPart(Number(data.index) || 0, block));
   } else if (type === "content_block_delta" && data.delta && typeof data.delta === "object") {
     const delta = data.delta as Json;
     if (typeof delta.text === "string") acc.content += delta.text;
     else if (typeof delta.thinking === "string") acc.reasoning += delta.thinking;
+    else if (typeof delta.partial_json === "string") acc.toolParts.push({ index: Number(data.index) || 0, args: delta.partial_json });
   } else if (type === "message_delta" && data.usage && typeof data.usage === "object") {
     const u = data.usage as Json;
     const prev = acc.usage || { input: 0, cachedInput: 0, cacheWrite: 0, output: 0 };
@@ -251,10 +294,11 @@ export function applyWholeBody(kind: ProviderConfig["kind"], acc: StreamDelta, b
   }
   if (!data || typeof data !== "object") return false;
   if (kind === "anthropic" && Array.isArray(data.content)) {
-    for (const block of data.content as Json[]) {
+    (data.content as Json[]).forEach((block, i) => {
       if (block && block.type === "text" && typeof block.text === "string") acc.content += block.text;
       if (block && block.type === "thinking" && typeof block.thinking === "string") acc.reasoning += block.thinking;
-    }
+      if (block && block.type === "tool_use") acc.toolParts.push(anthropicToolPart(i, block));
+    });
     if (typeof data.id === "string") acc.responseId = data.id;
     acc.usage = anthropicUsage(data.usage) || acc.usage;
     return true;

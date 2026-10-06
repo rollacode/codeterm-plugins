@@ -234,6 +234,10 @@ function loadPlugin() {
 }
 
 const plugin = loadPlugin();
+const DOMIOS_CONTEXT = plugin.__test_domiosContext;
+// The wire system prompt is the Domios context fragment followed by the session's own prompt.
+const withContext = (prompt) => (prompt ? DOMIOS_CONTEXT + "\n\n" + prompt : DOMIOS_CONTEXT);
+const ownPrompt = (system) => (typeof system === "string" && system.indexOf(DOMIOS_CONTEXT + "\n\n") === 0 ? system.slice(DOMIOS_CONTEXT.length + 2) : system);
 
 const tests = [];
 function test(name, fn) { tests.push([name, fn]); }
@@ -442,7 +446,7 @@ test("lmstudio_open_session_uses_session_config_system_prompt_and_model", () => 
 
   const body = openAndStartBody(ctx);
   assert(body.model === "host-selected-model", "openSession uses the model from host session config");
-  assert(body.system_prompt === "Host-composed system prompt", "openSession uses the system prompt from host session config");
+  assert(ownPrompt(body.system_prompt) === "Host-composed system prompt", "openSession uses the system prompt from host session config");
   assert(
     streamCalls[0].url === `${endpoint}/api/v1/chat`,
     "chat request uses the configured server address",
@@ -458,7 +462,7 @@ test("sendMessage sends stream:true and streams a growing assistant message with
   const body = JSON.parse(streamCalls[0].body);
   assert(streamCalls[0].url === "http://localhost:1234/api/v1/chat", "native v1 url");
   assert(body.model === "llama", "model from settings");
-  assert(body.system_prompt === "sys", "system prompt sent");
+  assert(ownPrompt(body.system_prompt) === "sys", "system prompt sent");
   assert(body.input === "hello", "input is user text");
   assert(body.stream === true, "stream:true requested");
 
@@ -1257,7 +1261,7 @@ test("tri-state malformed: a {status:'malformed'} parse injects a retry note ins
   assert(/ERROR/.test(retry.input), "retry input flags an error: " + retry.input);
   assert(/invalid/i.test(retry.input), "retry input says the JSON was invalid");
   assert(/unterminated args object/.test(retry.input), "retry input includes the parser's reason");
-  assert(/resend a single valid json tool call/i.test(retry.input), "retry input asks for a corrected call");
+  assert(/resend a single valid tool call/i.test(retry.input), "retry input asks for a corrected call");
 });
 
 test("tri-state malformed retries are capped per turn so a stuck model cannot loop forever", () => {
@@ -1351,7 +1355,7 @@ test("model-bound preset resolves prompt and params for the chosen model", () =>
   plugin.sendMessage("bound-model", "hello");
   const body = JSON.parse(streamCalls[0].body);
   assert(body.model === "tiny-model", "uses chosen model");
-  assert(body.system_prompt === "simple prompt", "uses bound preset prompt");
+  assert(ownPrompt(body.system_prompt) === "simple prompt", "uses bound preset prompt");
   assert(body.temperature === 0.2, "bound preset temperature overrides defaults");
   assert(body.top_p === 0.8, "bound preset params are included");
   assert(body.max_tokens === 512, "global params are retained");
@@ -1371,7 +1375,7 @@ test("unbound model falls back to defaultPreset", () => {
 
   const body = openAndStartBody({ tabId: "unbound-model", config: {} });
   assert(body.model === "unbound-model", "keeps unbound chosen model");
-  assert(body.system_prompt === "default prompt", "falls back to default preset prompt");
+  assert(ownPrompt(body.system_prompt) === "default prompt", "falls back to default preset prompt");
   assert(body.temperature === 0.6, "default preset params override global defaults");
 });
 
@@ -1389,7 +1393,7 @@ test("explicit preset request wins when the model has no binding", () => {
 
   const body = openAndStartBody({ tabId: "explicit-preset", config: {}, model: "unbound-model", preset: "creative" });
   assert(body.model === "unbound-model", "keeps explicit unbound model");
-  assert(body.system_prompt === "creative prompt", "uses explicit preset prompt");
+  assert(ownPrompt(body.system_prompt) === "creative prompt", "uses explicit preset prompt");
   assert(body.temperature === 0.95, "uses explicit preset params");
 });
 
@@ -1405,7 +1409,7 @@ test("model-bound preset without systemPrompt falls back to default prompt", () 
   });
 
   const body = openAndStartBody({ tabId: "bound-without-prompt", config: {} });
-  assert(body.system_prompt === "default prompt", "missing bound prompt falls back to default");
+  assert(ownPrompt(body.system_prompt) === "default prompt", "missing bound prompt falls back to default");
   assert(body.temperature === 0.2, "bound preset params still apply");
 });
 
@@ -1464,7 +1468,7 @@ test("explicit model and preset-bound model win over the persisted last-used mod
   fileStore[lastModelPath] = JSON.stringify({ lastModel: "remembered-model" });
   body = openAndStartBody({ tabId: "preset-over-persisted", config: {}, preset: "tiny" });
   assert(body.model === "tiny-model", "preset-bound model wins, got " + body.model);
-  assert(body.system_prompt === "tiny prompt", "preset-bound prompt used");
+  assert(ownPrompt(body.system_prompt) === "tiny prompt", "preset-bound prompt used");
 });
 
 test("missing or corrupt persisted last-used model falls back to defaultModel without throwing", () => {
@@ -1611,12 +1615,13 @@ test("settings schema and config expose presets/defaultPreset", () => {
   assert(watcherCharter.includes("from_pane_id"), "watcher charter documents report field names");
   assert(watcherCharter.includes("7+ minutes"), "stalled example aligns with ~5+ min threshold");
 
-  const prompt = readFileSync(join(__dirname, "prompts", "codeterm-default.md"), "utf8");
-  const replyExample = '{"tool":"codeterm","args":{"args":"send \\"Hi, I got your message.\\" --pane 36b00886"}}';
-  assert(prompt.includes("Replying to messages from other panes"), "prompt documents inbound pane replies");
-  assert(prompt.includes("from_mesh=<peer>"), "prompt documents mesh reply routing");
-  assert(prompt.includes(replyExample), "prompt includes single-string codeterm reply example");
-  assert(config.includes(replyExample), "seed config includes single-string codeterm reply example");
+  // CLI contract: every `codeterm <noun>` the shipped prompts teach must be a live top-level noun.
+  const cliNouns = new Set(["tab", "send", "agent", "plan", "task", "mem", "docs", "workspace", "team", "orchestrator", "inbox", "notify", "cron", "mesh", "sessions", "plugin", "pad", "identify"]);
+  const shipped = [config, watcherCharter, readFileSync(join(__dirname, "prompts", "codeterm-default.md"), "utf8"), DOMIOS_CONTEXT];
+  for (const text of shipped) {
+    for (const m of text.matchAll(/[`"]codeterm ([a-z][a-z-]*)/g)) assert(cliNouns.has(m[1]), `prompt teaches unknown CLI noun: codeterm ${m[1]}`);
+    for (const m of text.matchAll(/"args":"([a-z][a-z-]*)/g)) assert(cliNouns.has(m[1]), `tool example uses unknown CLI noun: ${m[1]}`);
+  }
 });
 
 // ── R6: authorSystemPrompt — author/refine a pane's system prompt ─────────────
@@ -1667,7 +1672,7 @@ test("openSession for the same model picks up the authored prompt on subsequent 
 
   const body = openAndStartBody({ tabId: "authored-init-r6", config: {}, model: "gemma-3" });
   assert(
-    body.system_prompt === "Tuned prompt from author",
+    ownPrompt(body.system_prompt) === "Tuned prompt from author",
     "authored prompt wins over preset on session init, got " + body.system_prompt,
   );
 });
@@ -1747,7 +1752,7 @@ test("the prompt authored via the round-trip is used on the next session init", 
   streamJobs.length = 0;
   const body = openAndStartBody({ tabId: "author-init-rt-r6b", config: {}, model: "gemma-3" });
   assert(
-    body.system_prompt === "ROUND-TRIP TUNED PROMPT",
+    ownPrompt(body.system_prompt) === "ROUND-TRIP TUNED PROMPT",
     "next init uses the round-trip authored prompt over the preset, got " + body.system_prompt,
   );
 });
@@ -2211,7 +2216,7 @@ test("router_openai_provider_streams_through_chat_completions_with_bearer_key_an
   assert(call.headers.authorization === `Bearer ${MIMO_KEY}`, "bearer key header");
   const body = JSON.parse(call.body);
   assert(body.model === "mimo-v2.6-pro" && body.stream === true, "bare model id on the wire");
-  assertJsonEqual(body.messages, [{ role: "system", content: "Be brief." }, { role: "user", content: "reply with OK" }], "system + user messages");
+  assertJsonEqual(body.messages, [{ role: "system", content: withContext("Be brief.") }, { role: "user", content: "reply with OK" }], "system + user messages");
   assert(!call.body.includes(MIMO_KEY), "key never in the request body");
   enqueueStream(0, [
     { chunks: [oaiChunk({ id: "c1", choices: [{ delta: { content: "O" } }] })], done: false, status: 200 },
@@ -2236,7 +2241,7 @@ test("router_anthropic_provider_uses_messages_api_cache_breakpoints_and_cache_re
   assert(call.headers["x-api-key"] === MIMO_KEY && call.headers["anthropic-version"] === "2023-06-01", "anthropic auth headers");
   assert(!call.headers.authorization, "no bearer header for anthropic");
   let body = JSON.parse(call.body);
-  assertJsonEqual(body.system, [{ type: "text", text: "LONG STABLE PREFIX", cache_control: { type: "ephemeral" } }], "system block is a breakpoint");
+  assertJsonEqual(body.system, [{ type: "text", text: withContext("LONG STABLE PREFIX"), cache_control: { type: "ephemeral" } }], "system block is a breakpoint");
   assert(body.max_tokens === 4096, "default max_tokens");
   enqueueStream(0, [{
     chunks: [
@@ -2352,7 +2357,7 @@ test("router_preset_with_provider_model_and_knobs_routes_and_maps_params", () =>
   plugin.sendMessage("r-preset", "hi");
   const body = JSON.parse(streamCalls[0].body);
   assert(body.temperature === 0.2 && body.max_tokens === 64, "preset knobs on the wire");
-  assert(body.messages[0].content === "Terse.", "preset system prompt");
+  assert(ownPrompt(body.messages[0].content) === "Terse.", "preset system prompt");
   plugin.closeSession("r-preset");
 });
 
@@ -2476,6 +2481,220 @@ test("router_manifest_declares_view_secrets_agent_verbs_and_key_slots", () => {
 });
 
 let failed = 0;
+// ── Router: native tool calls and the Qwen/Hermes text fallback ──
+const DECLARED_TOOLS = ["codeterm", "exec", "mem_search", "read_file", "spawn_agent", "write_file"];
+
+function pumpUntilStreams(sid, count, limit = 50) {
+  for (let i = 0; i < limit && streamCalls.length < count; i += 1) plugin.pump(sid);
+  assert(streamCalls.length >= count, `expected ${count} stream requests, got ${streamCalls.length}`);
+}
+
+function openMimo(sid, model) {
+  reset(routerSettings());
+  seedRouter(mimoProviders());
+  secretStore.mimo_api_key = MIMO_KEY;
+  plugin.openSession({ tabId: sid, config: {}, model: model || "mimo::mimo-v2.6-pro" });
+}
+
+function oaiDone(text) {
+  return [{ chunks: [oaiChunk({ choices: [{ delta: { content: text } }] }), "data: [DONE]\n\n"], done: true, status: 200 }];
+}
+
+function shellOf(execCall) {
+  return execCall.args[execCall.args.length - 1];
+}
+
+test("router_native_openai_tool_call_executes_and_loops_with_tool_history", () => {
+  openMimo("t-oai");
+  plugin.sendMessage("t-oai", "list my tabs");
+  let body = JSON.parse(streamCalls[0].body);
+  assertJsonEqual(body.tools.map((t) => t.function.name).sort(), DECLARED_TOOLS, "declared tools on the wire");
+  assert(body.tools.every((t) => t.type === "function" && t.function.parameters.type === "object"), "OpenAI function schema");
+  assert(body.tool_choice === "auto", "tool_choice auto");
+  enqueueStream(0, [{
+    chunks: [
+      oaiChunk({ id: "c1", choices: [{ delta: { reasoning_content: "Need the tab list." } }] }),
+      oaiChunk({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_a", type: "function", function: { name: "codeterm", arguments: "" } }] } }] }),
+      oaiChunk({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "{\"args\":\"tab" } }] } }] }),
+      oaiChunk({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: " list\"}" } }] }, finish_reason: "tool_calls" }] }),
+      "data: [DONE]\n\n",
+    ],
+    done: true,
+    status: 200,
+  }]);
+  enqueueExec([{ done: true, code: 0, stdout: "e3ec9ee9 Fermi\n", stderr: "" }]);
+  pumpUntilStreams("t-oai", 2);
+  assert(execCalls.length === 1 && shellOf(execCalls[0]) === "codeterm tab list", "declared tool executed once, got " + JSON.stringify(execCalls));
+  const rows = plugin.poll("t-oai", null).messages;
+  const call = rows.find((m) => m.type === "tool_call");
+  assert(call && call.toolName === "codeterm" && call.content === "codeterm tab list", "tool row shows the command");
+  assert(rows.some((m) => m.type === "thinking" && m.content === "Need the tab list."), "reasoning lands in the thinking row");
+  body = JSON.parse(streamCalls[1].body);
+  const assistant = body.messages.find((m) => m.role === "assistant");
+  assertJsonEqual(assistant.tool_calls, [{ id: "call_a", type: "function", function: { name: "codeterm", arguments: "{\"args\":\"tab list\"}" } }], "assistant tool_calls replayed");
+  const tool = body.messages.find((m) => m.role === "tool");
+  assert(tool && tool.tool_call_id === "call_a" && tool.content.includes("e3ec9ee9 Fermi"), "tool result fed back by id");
+  assert(!body.messages.some((m) => m.role === "user" && /tool_result/.test(m.content)), "no text tool_result turn for a native call");
+  assert(body.messages.filter((m) => m.role === "user").length === 1, "user turn sent once");
+  enqueueStream(1, oaiDone("One tab: Fermi (e3ec9ee9)."));
+  const p = pumpUntilDone("t-oai");
+  assert(contents(p.messages, "assistant").pop() === "One tab: Fermi (e3ec9ee9).", "answer after the tool result");
+  assert(streamCalls.length === 2, "loop ends after a text answer");
+  plugin.closeSession("t-oai");
+});
+
+test("router_two_native_calls_run_before_one_continuation", () => {
+  openMimo("t-two");
+  plugin.sendMessage("t-two", "tabs and help");
+  enqueueStream(0, [{
+    chunks: [
+      oaiChunk({ choices: [{ delta: { tool_calls: [
+        { index: 0, id: "c0", function: { name: "codeterm", arguments: "{\"args\":\"tab list\"}" } },
+        { index: 1, id: "c1", function: { name: "exec", arguments: "{\"cmd\":\"codeterm --help\"}" } },
+      ] } }] }),
+      "data: [DONE]\n\n",
+    ],
+    done: true,
+    status: 200,
+  }]);
+  pumpUntilStreams("t-two", 2);
+  for (let i = 0; i < 5; i += 1) plugin.pump("t-two");
+  assert(streamCalls.length === 2, "one continuation for the whole round, got " + streamCalls.length);
+  assertJsonEqual(execCalls.map(shellOf), ["codeterm tab list", "codeterm --help"], "both calls executed in order");
+  const body = JSON.parse(streamCalls[1].body);
+  assertJsonEqual(body.messages.filter((m) => m.role === "tool").map((m) => m.tool_call_id), ["c0", "c1"], "both results paired");
+  plugin.closeSession("t-two");
+});
+
+test("router_text_fallback_runs_the_exact_mimo_strings_as_tool_rows", () => {
+  const replies = [
+    ["Let me look.\n<tool_call><function=exec><parameter=cmd>codeterm pane list</tool_call>", "codeterm pane list", "Let me look."],
+    ["<tool_call><function=exec><parameter=cmd>codeterm --help</tool_call>", "codeterm --help", ""],
+  ];
+  for (const [reply, cmd, prose] of replies) {
+    openMimo("t-txt");
+    plugin.sendMessage("t-txt", "create a couple of tabs");
+    enqueueStream(0, oaiDone(reply));
+    pumpUntilStreams("t-txt", 2);
+    assert(execCalls.length === 1 && shellOf(execCalls[0]) === cmd, "text-form call executed: " + cmd);
+    const rows = plugin.poll("t-txt", null).messages;
+    assert(rows.some((m) => m.type === "tool_call" && m.toolName === "exec" && m.content === cmd), "shown as a tool row");
+    assertJsonEqual(contents(rows, "assistant"), prose ? [prose] : [], "raw call text is not shown");
+    const body = JSON.parse(streamCalls[1].body);
+    const assistant = body.messages.find((m) => m.role === "assistant");
+    assert(assistant.tool_calls[0].function.name === "exec", "replayed as a native call");
+    assert(body.messages.find((m) => m.role === "tool").tool_call_id === assistant.tool_calls[0].id, "result paired with the synthetic id");
+    plugin.closeSession("t-txt");
+  }
+});
+
+test("router_undeclared_tools_never_execute", () => {
+  openMimo("t-bad");
+  plugin.sendMessage("t-bad", "go");
+  enqueueStream(0, [{ chunks: [oaiChunk({ choices: [{ delta: { tool_calls: [{ index: 0, id: "x1", function: { name: "shell", arguments: "{\"cmd\":\"rm -rf /\"}" } }] } }] }), "data: [DONE]\n\n"], done: true, status: 200 }]);
+  pumpUntilStreams("t-bad", 2);
+  assert(execCalls.length === 0, "undeclared native tool not executed");
+  const tool = JSON.parse(streamCalls[1].body).messages.find((m) => m.role === "tool");
+  assert(tool && tool.tool_call_id === "x1" && /unknown tool/.test(tool.content), "error result keeps the call paired");
+  plugin.closeSession("t-bad");
+
+  openMimo("t-bad2");
+  plugin.sendMessage("t-bad2", "go");
+  enqueueStream(0, oaiDone("<tool_call><function=shell><parameter=cmd>rm -rf /</parameter></function></tool_call>"));
+  pumpUntilStreams("t-bad2", 2);
+  assert(execCalls.length === 0, "undeclared text-form tool not executed");
+  assert(toolParseCalls.length === 0, "a tool_call block never falls through to a looser parser");
+  const last = JSON.parse(streamCalls[1].body).messages.pop();
+  assert(last.role === "user" && /invalid/.test(last.content), "corrective note asks for a valid call");
+  plugin.closeSession("t-bad2");
+});
+
+test("router_native_anthropic_tool_use_executes_and_replays_blocks", () => {
+  openMimo("t-anth", "mimo-anthropic::mimo-v2.6-pro");
+  plugin.sendMessage("t-anth", "list my tabs");
+  let body = JSON.parse(streamCalls[0].body);
+  assertJsonEqual(body.tools.map((t) => t.name).sort(), DECLARED_TOOLS, "declared tools on the wire");
+  assert(body.tools.every((t) => t.input_schema.type === "object"), "Anthropic input_schema");
+  assertJsonEqual(body.tool_choice, { type: "auto" }, "tool_choice auto");
+  enqueueStream(0, [{
+    chunks: [
+      anthEvent("message_start", { message: { id: "msg_1", usage: { input_tokens: 10, output_tokens: 1 } } }),
+      anthEvent("content_block_start", { index: 0, content_block: { type: "tool_use", id: "toolu_1", name: "codeterm", input: {} } }),
+      anthEvent("content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: "{\"args\":" } }),
+      anthEvent("content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: "\"tab list\"}" } }),
+      anthEvent("content_block_stop", { index: 0 }),
+      anthEvent("message_delta", { delta: { stop_reason: "tool_use" }, usage: { output_tokens: 9 } }),
+    ],
+    done: true,
+    status: 200,
+  }]);
+  pumpUntilStreams("t-anth", 2);
+  assert(execCalls.length === 1 && shellOf(execCalls[0]) === "codeterm tab list", "tool_use executed");
+  body = JSON.parse(streamCalls[1].body);
+  const assistant = body.messages.find((m) => m.role === "assistant");
+  assertJsonEqual(assistant.content.map((b) => [b.type, b.id, b.name, b.input]), [["tool_use", "toolu_1", "codeterm", { args: "tab list" }]], "tool_use block replayed");
+  const result = body.messages[body.messages.length - 1];
+  assert(result.role === "user" && result.content[0].type === "tool_result" && result.content[0].tool_use_id === "toolu_1", "tool_result block answers it");
+  plugin.closeSession("t-anth");
+});
+
+test("lmstudio_native_text_call_feeds_results_back_as_input", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [] });
+  plugin.openSession({ tabId: "t-lms", config: {}, model: "qwen3-coder" });
+  plugin.sendMessage("t-lms", "list tabs");
+  assert(!JSON.parse(streamCalls[0].body).tools, "LM Studio native chat gets no native tools");
+  enqueueStream(0, [{ chunks: [msg("<tool_call>\n<function=codeterm>\n<parameter=args>\ntab list\n</parameter>\n</function>\n</tool_call>"), chatEnd("resp-1")], done: true, status: 200 }]);
+  pumpUntilStreams("t-lms", 2);
+  assert(execCalls.length === 1 && shellOf(execCalls[0]) === "codeterm tab list", "text call executed");
+  const body = JSON.parse(streamCalls[1].body);
+  assert(body.previous_response_id === "resp-1" && /^tool_result:/.test(body.input), "result continues the stateful chain");
+  plugin.closeSession("t-lms");
+});
+
+test("lmstudio_native_usage_reads_cache_fields", () => {
+  reset({ baseUrl: "http://localhost:1234", presets: [] });
+  plugin.openSession({ tabId: "t-usage", config: {}, model: "qwen3" });
+  plugin.sendMessage("t-usage", "hi");
+  enqueueStream(0, [{ chunks: [msg("hello"), sse("chat.end", { result: { response_id: "r1", stats: { input_tokens: 100, total_output_tokens: 5, cached_tokens: 64 } } })], done: true, status: 200 }]);
+  const p = pumpUntilDone("t-usage");
+  const usage = contents(p.messages, "system").find((m) => / in · /.test(m));
+  assert(usage === "qwen3 · 100 in · 64 cached · 36 fresh · 5 out", "cached input reported, got " + usage);
+  plugin.closeSession("t-usage");
+});
+
+test("router_activity_tracks_the_request_and_cancel_stops_it", () => {
+  openMimo("t-act");
+  assert(plugin.poll("t-act", null).activity.state === "idle", "idle before a send");
+  plugin.sendMessage("t-act", "list my tabs");
+  assert(plugin.poll("t-act", null).activity.state === "thinking", "thinking once the request starts");
+  enqueueStream(0, [{ chunks: [oaiChunk({ choices: [{ delta: { content: "Work" } }] })], done: false, status: 200 }]);
+  plugin.pump("t-act");
+  const working = plugin.poll("t-act", null);
+  assert(working.activity.state === "working" && !working.done, "working while answer tokens stream");
+  assert(working.activity.statusLine.includes("mimo::mimo-v2.6-pro"), "status line names the model");
+  plugin.cancel("t-act");
+  const stopped = plugin.poll("t-act", null);
+  assert(streamJobs[0].closed, "cancel closes the in-flight request");
+  assert(stopped.done && stopped.activity.state === "idle" && stopped.activity.statusLine === "", "cancel clears the working state");
+  plugin.pump("t-act");
+  assert(streamCalls.length === 1, "nothing restarts after cancel");
+  plugin.closeSession("t-act");
+});
+
+test("router_cancel_during_a_tool_closes_the_exec_and_keeps_history_paired", () => {
+  openMimo("t-cx");
+  plugin.sendMessage("t-cx", "go");
+  enqueueStream(0, [{ chunks: [oaiChunk({ choices: [{ delta: { tool_calls: [{ index: 0, id: "c9", function: { name: "exec", arguments: "{\"cmd\":\"sleep-like\"}" } }] } }] }), "data: [DONE]\n\n"], done: true, status: 200 }]);
+  enqueueExec([{ done: false }, { done: false }]);
+  plugin.pump("t-cx");
+  assert(plugin.poll("t-cx", null).activity.state === "working", "working while a tool runs");
+  plugin.cancel("t-cx");
+  assert(execJobs[0].closed, "cancel closes the exec job");
+  const p = plugin.poll("t-cx", null);
+  assert(p.done && p.messages.some((m) => m.type === "tool_result" && m.callId === "c9" && /cancelled/.test(m.content)), "call answered as cancelled");
+  plugin.closeSession("t-cx");
+});
+
 for (const [name, fn] of tests) {
   try { fn(); console.log(`✓ ${name}`); }
   catch (err) { failed += 1; console.error(`✗ ${name}`); console.error(err); }

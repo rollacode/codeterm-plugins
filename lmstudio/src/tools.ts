@@ -7,10 +7,16 @@ export interface PendingExec {
   call: ToolCall;
   jobId: string;
   toolId?: string;
+  callId?: string;
 }
 
 export interface ToolParseEntry {
   call: ToolCall;
+  /** Provider call id; set when the call replays as a native tool call. */
+  callId?: string;
+  replyId?: string;
+  /** Rejected before execution; surfaced as the tool result. */
+  error?: string;
 }
 
 interface ParsedToolCall {

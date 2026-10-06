@@ -95,3 +95,29 @@ fallback list. `mimo-v2.6-pro` replied "OK" over `/anthropic/v1/messages`. For a
 4,015-token system prompt the second request reported `cache_read_input_tokens:
 3968`; `cache_creation_input_tokens` is not reported.
 
+
+## Tool calling
+- `openai` and `anthropic` routes send the declared tools natively (`tools` + `tool_choice: auto`;
+  `function.parameters` / `input_schema`). Streamed `tool_calls` deltas and `tool_use` +
+  `input_json_delta` blocks merge by index into whole calls. History replays them natively:
+  assistant `tool_calls` + `role: tool` messages, or `tool_use` + `tool_result` blocks. Calls
+  without a result are dropped so a cancelled round never 400s the next turn.
+- Text fallback: Qwen/Hermes `<tool_call>` blocks (XML `<function=…><parameter=…>`, with or without
+  closing tags, or JSON inside the wrapper) parse strictly. Only declared tools with their
+  required args become calls. One bad block in a reply executes nothing and sends a corrective
+  note. Parsed text calls on a native route get synthetic ids and replay as native calls.
+  LM Studio's native `/api/v1/chat` keeps the text protocol (`codeterm-tool` fences, host parser).
+- A tool round runs every call before one continuation request.
+- MiMo documents `tool_calls` inside `reasoning_content` as a thinking-mode instability. Native
+  tools are the fix; reasoning is shown in the Thinking row but never parsed for calls.
+
+## Activity and cancel
+`poll()` also returns `activity: {state: idle|thinking|working, statusLine}`. `cancel(sid)`
+closes the in-flight stream or exec, answers a running call as cancelled, and ends the turn. The
+host does not read either yet: chatBackend tabs show Idle, and Stop is hidden for them.
+
+## Restart
+The host keeps the visible transcript (`chatbackend-sessions/lmstudio/<sid>.jsonl`). The model's
+context is the plugin's in-memory session, so it starts empty after a restart. Durable context
+belongs to the host-owned context contract (`sendTurn(sid, {system, groups})`, composed from that
+JSONL), not to a second store in the plugin.

@@ -68,9 +68,18 @@ export interface Usage {
   output: number;
 }
 
+export interface NativeToolCall {
+  id: string;
+  name: string;
+  /** Raw JSON text exactly as the model produced it. */
+  arguments: string;
+}
+
 export interface ChatTurn {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "tool";
   content: string;
+  toolCalls?: NativeToolCall[];
+  toolCallId?: string;
 }
 
 export interface ChatRequest {
@@ -78,6 +87,15 @@ export interface ChatRequest {
   system: string;
   turns: ChatTurn[];
   params: Record<string, unknown>;
+  tools?: boolean;
+}
+
+/** One streamed fragment of a native tool call, keyed by its position in the reply. */
+export interface ToolPart {
+  index: number;
+  id?: string;
+  name?: string;
+  args: string;
 }
 
 export interface HttpRequest {
@@ -94,4 +112,5 @@ export interface StreamDelta {
   usage: Usage | null;
   responseId: string | null;
   error: string | null;
+  toolParts: ToolPart[];
 }
