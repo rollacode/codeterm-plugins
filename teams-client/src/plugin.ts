@@ -3,7 +3,9 @@ import { decideSend, matchChats, parseSendScope, validateSendScope, type SendOri
 
 const VERSION = "11.11.0";
 const PACKAGE = "@pnp/cli-microsoft365";
-const CLIENT_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
+// Microsoft Graph Command Line Tools: a public client that accepts http://localhost loopback and device code.
+const DEFAULT_APP_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
+const APP_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ROOT = "~/.codeterm/teams-client";
 const GRAPH = "https://graph.microsoft.com/v1.0";
 const MAX_COUNT = 50;
@@ -25,15 +27,16 @@ type RunResult = { ok: true; stdout: string; stderr: string } | { ok: false; err
 type Target = { platform: string; arch: string; node: string; npm: string; m365: string; integrity: string };
 type StateResult = { state: string; message: string; accountId?: string | null; upn?: string | null; tenantId?: string | null; expiresOn?: string | null; accounts?: any[] };
 type LoginAuthType = "browser" | "deviceCode";
-// The pinned Teams client id is refused device-code grants (invalid_grant), so agents use the browser sign-in.
-const AGENT_LOGIN_AUTH: LoginAuthType = "browser";
+// The loopback link needs one click and no code; device code is the fallback when the link is refused.
+const LOOPBACK_REFUSED = ["wrong-client-redirect", "loopback-unavailable"];
 const SIGN_IN_TTL_MS = 10 * 60 * 1000;
 const SIGN_IN_MARKER = "codeterm-signin:";
 const PREPARING_SIGN_IN_MESSAGE = "The Microsoft sign-in link is being prepared. Poll login-status until it returns signInUrl.";
+const PREPARING_CODE_MESSAGE = "The Microsoft sign-in code is being prepared. Poll login-status until it returns signInUrl and deviceCode.";
 // m365 would launch the browser itself with this runtime's sandboxed HOME/APPDATA, so the browser starts on an empty
 // profile. The wrapper prints the URL instead and exits when the lease file no longer holds its nonce or the TTL passes.
 const SIGN_IN_WRAPPER = "const fs=require('node:fs');const path=require('node:path');const {pathToFileURL}=require('node:url');const [lease,nonce,ttl,...cli]=process.argv.slice(1);const say=s=>process.stderr.write('" + SIGN_IN_MARKER + " '+s+'\\n');const owned=()=>{try{return fs.readFileSync(lease,'utf8').trim()===nonce}catch{return false}};const stop=(s,c)=>{say(s);process.exit(c)};if(!owned())stop('cancelled',3);setInterval(()=>{if(!owned())stop('cancelled',3)},1000).unref();setTimeout(()=>stop('expired',4),Number(ttl)||600000).unref();process.env.CLIMICROSOFT365_NOUPDATE='1';const dist=path.resolve(process.env.M365_RUNTIME,'node_modules/@pnp/cli-microsoft365/dist');const load=f=>import(pathToFileURL(path.join(dist,f)).href);load('utils/browserUtil.js').then(async m=>{m.browserUtil.open=async url=>say('url '+url);process.argv=[process.argv[0],path.join(dist,'index.js'),...cli];await load('index.js')}).catch(e=>{process.stderr.write('Error: '+String(e&&e.message||e).split('\\n')[0]+'\\n');process.exit(1)});";
-type LoginJob = { stage: "pack" | "install" | "browser"; paths: Paths; target: Target; packagePath?: string; launchComplete?: boolean; authType: LoginAuthType; logFile?: string; leaseFile?: string; startedAt?: number };
+type LoginJob = { stage: "pack" | "install" | "browser"; paths: Paths; target: Target; packagePath?: string; launchComplete?: boolean; authType: LoginAuthType; appId: string; logFile?: string; leaseFile?: string; startedAt?: number; fallbackFrom?: string };
 export type SignInLog =
   | { state: "starting" }
   | { state: "awaiting-browser"; signInUrl: string }
@@ -236,7 +239,7 @@ function applyCacheFileProtection(p: Paths): { error?: string; message?: string 
   return {};
 }
 
-function startLoginProcess(p: Paths, target: Target, stage: LoginJob["stage"], args: string[], packagePath?: string, authType: LoginAuthType = "browser", leaseFile?: string): { jobId?: string; error?: string } {
+function startLoginProcess(p: Paths, target: Target, stage: LoginJob["stage"], args: string[], packagePath?: string, authType: LoginAuthType = "browser", leaseFile?: string, appId = configuredAppId()): { jobId?: string; error?: string } {
   let started: { jobId?: string; error?: string };
   const bin = stage === "pack" || stage === "install" ? target.npm : target.node;
   const logFile = stage === "browser" ? joinPath(p.root, `login-${authType}.log`) : undefined;
@@ -246,7 +249,7 @@ function startLoginProcess(p: Paths, target: Target, stage: LoginJob["stage"], a
   try { started = host.exec.start({ bin, args, env: envFor(p), timeoutMs: 120000, detach, ...(logFile ? { logFile } : {}) }); }
   catch { return { error: `Could not start the m365 ${stage} step.` }; }
   if (!started.jobId) return { error: started.error || `The m365 ${stage} step did not start.` };
-  loginJobs[started.jobId] = { stage, paths: p, target, packagePath, authType, logFile, leaseFile, startedAt: stage === "browser" ? now() : undefined };
+  loginJobs[started.jobId] = { stage, paths: p, target, packagePath, authType, appId, logFile, leaseFile, startedAt: stage === "browser" ? now() : undefined };
   activeLoginJobId = started.jobId;
   return { jobId: started.jobId };
 }
@@ -320,12 +323,13 @@ function startBrowserLogin(p: Paths, target: Target, authType: LoginAuthType = "
   const lease = leasePath(p);
   const nonce = `${now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   if (!host.fs.writeFile(lease, nonce)) return { error: "Could not prepare the Microsoft sign-in lease file." };
-  const args = ["-e", SIGN_IN_WRAPPER, nativePath(lease), nonce, String(SIGN_IN_TTL_MS), "login", "--authType", authType, "--appId", CLIENT_ID, "--output", "json"];
-  return startLoginProcess(p, target, "browser", args, undefined, authType, lease);
+  const appId = configuredAppId();
+  const args = ["-e", SIGN_IN_WRAPPER, nativePath(lease), nonce, String(SIGN_IN_TTL_MS), "login", "--authType", authType, "--appId", appId, "--output", "json"];
+  return startLoginProcess(p, target, "browser", args, undefined, authType, lease, appId);
 }
 
-function signInLogFailure(text: string): { state: string; message: string } | null {
-  const known = authState(text);
+function signInLogFailure(text: string, appId?: string): { state: string; message: string } | null {
+  const known = authState(text, appId);
   if (known) return known;
   const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const last = lines[lines.length - 1] || "";
@@ -336,13 +340,13 @@ const AUTHORIZE_URL = /^https:\/\/login\.(?:microsoftonline\.(?:com|us)|chinaclo
 const DEVICE_LOGIN_URL = /https?:\/\/(?:aka\.ms|microsoft\.com)\/devicelogin\b[^\s<>"']*/i;
 const USER_CODE = /^[A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?$|^[A-Z0-9]{6,12}$/i;
 
-function parseSignInLog(text: string): SignInLog {
+function parseSignInLog(text: string, appId?: string): SignInLog {
   const raw = String(text || "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, " ");
   const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const markers = lines.filter((line) => line.startsWith(SIGN_IN_MARKER)).map((line) => line.slice(SIGN_IN_MARKER.length).trim());
   if (markers.includes("cancelled")) return { state: "cancelled" };
   if (markers.includes("expired")) return { state: "expired" };
-  const failure = signInLogFailure(lines.filter((line) => !line.startsWith(SIGN_IN_MARKER)).join("\n"));
+  const failure = signInLogFailure(lines.filter((line) => !line.startsWith(SIGN_IN_MARKER)).join("\n"), appId);
   if (failure) return { state: "failed", failure };
   const browserUrl = markers.filter((marker) => marker.startsWith("url ")).map((marker) => marker.slice(4).trim()).reverse().find((url) => AUTHORIZE_URL.test(url));
   if (browserUrl) return { state: "awaiting-browser", signInUrl: browserUrl };
@@ -357,7 +361,7 @@ function parseSignInLog(text: string): SignInLog {
 }
 
 function readSignInLog(login: LoginJob): SignInLog {
-  return login.logFile ? parseSignInLog(String(host.fs.readFileTail(login.logFile, 8192) || "")) : { state: "starting" };
+  return login.logFile ? parseSignInLog(String(host.fs.readFileTail(login.logFile, 8192) || ""), login.appId) : { state: "starting" };
 }
 
 function signInArtifacts(log: SignInLog): { signInUrl?: string; deviceCode?: string } {
@@ -386,16 +390,40 @@ function runM365(args: string[]): RunResult {
   return result;
 }
 
-function authState(text: string): { state: string; message: string } | null {
+// Microsoft's own error line, without anything shaped like a token or an authorization code.
+function upstreamLine(text: string, pattern: RegExp): string {
+  const line = String(text || "").split(/\r?\n/).map((item) => item.trim()).find((item) => pattern.test(item)) || "";
+  return line
+    .replace(/eyJ[\w-]+\.[\w-]+(?:\.[\w-]*)?/g, "[redacted]")
+    .replace(/\b((?:code|access_token|refresh_token|id_token|client_secret)=)[^&\s"']+/gi, "$1[redacted]")
+    .replace(/^Error:\s*/, "")
+    .slice(0, 400);
+}
+
+function quoted(line: string): string {
+  return line ? ` Microsoft said: "${line}"` : "";
+}
+
+const REDIRECT_REFUSED = /AADSTS50011|AADSTS500113|redirect_uri_mismatch|redirect URI[^\n]*does not match|reply (?:url|address)[^\n]*(?:does not match|not registered)/i;
+const CONSENT_REQUIRED = /AADSTS65001|AADSTS65004|AADSTS90094|AADSTS90095|consent_required|consent[^\n]*(?:not granted|withdrawn|revoked|removed)|(?:withdrawn|revoked|removed)[^\n]*consent|admin(?:istrator)? (?:consent|approval)|has not consented|Missing scope permissions|API requires one of/i;
+const LOOPBACK_UNAVAILABLE = /listen (?:EADDRINUSE|EACCES|EADDRNOTAVAIL)|EADDRINUSE[^\n]*(?:127\.0\.0\.1|localhost|::1)/i;
+
+function authState(text: string, appId?: string): { state: string; message: string } | null {
   const value = String(text || "");
+  if (REDIRECT_REFUSED.test(value)) {
+    return { state: "wrong-client-redirect", message: `Microsoft refused the localhost sign-in link because app id ${appId || "in use"} has no http://localhost redirect registered.${quoted(upstreamLine(value, REDIRECT_REFUSED))} Run login --device-code, or set Sign-in app id to ${DEFAULT_APP_ID} (Microsoft Graph Command Line Tools) in Teams Client settings and sign in again.` };
+  }
+  if (CONSENT_REQUIRED.test(value)) {
+    return { state: "consent-required", message: `Microsoft Graph consent is missing for app id ${appId || DEFAULT_APP_ID}.${quoted(upstreamLine(value, CONSENT_REQUIRED))} A tenant administrator must approve the delegated permissions Chat.ReadWrite and ChatMessage.Send for that app once (for example Connect-MgGraph -Scopes Chat.ReadWrite,ChatMessage.Send with Consent on behalf of your organization), then sign in again.` };
+  }
+  if (LOOPBACK_UNAVAILABLE.test(value)) {
+    return { state: "loopback-unavailable", message: `m365 could not open its localhost sign-in listener.${quoted(upstreamLine(value, LOOPBACK_UNAVAILABLE))} Run login --device-code to sign in with a code instead.` };
+  }
   if (/AADSTS53003|conditional[ -]access|blocked by (?:your )?(?:organization|tenant) policy/i.test(value)) {
     return { state: "conditional-access-blocked", message: "Your organization's Conditional Access policy blocked this sign-in. Ask your IT administrator which browser sign-in policy applies, then sign in again." };
   }
   if (/AADSTS50076|AADSTS50079|multi[ -]?factor|\bMFA\b|additional authentication is required/i.test(value)) {
     return { state: "mfa-required", message: "Complete the MFA step in the Microsoft browser sign-in, then sign in again." };
-  }
-  if (/AADSTS65001|AADSTS65004|consent_required|consent[^\n]*(?:not granted|withdrawn|revoked|removed)|(?:withdrawn|revoked|removed)[^\n]*consent|admin consent/i.test(value)) {
-    return { state: "consent-not-granted", message: "Microsoft Graph consent is missing or was withdrawn. If your tenant allows user consent, sign in again and review the consent prompt; otherwise ask a tenant administrator to approve the m365 app's requested permissions, then sign in again." };
   }
   if (/AADSTS50173|refresh token[^\n]*(?:revoked|invalidated)|(?:revoked|invalidated)[^\n]*refresh token/i.test(value)) {
     return { state: "refresh-token-revoked", message: "The Microsoft refresh token was revoked. Sign in again to create a new browser session." };
@@ -528,7 +556,7 @@ function previewSender(): { sender: Sender } | { error: string } {
 
 function liveSender(): { sender: Sender } | { error: string } {
   const current = status();
-  const reauthStates = ["conditional-access-blocked", "mfa-required", "consent-not-granted", "refresh-token-revoked", "token-expired"];
+  const reauthStates = ["conditional-access-blocked", "mfa-required", "consent-required", "wrong-client-redirect", "refresh-token-revoked", "token-expired"];
   if (reauthStates.includes(current.state)) return { error: `reauth-needed: ${current.state}. ${current.message}` };
   if (current.state === "reauth-needed") return { error: `reauth-needed: session status needs attention. ${current.message} Review the tenant sign-in and sign in again.` };
   if (["logged-out", "installed-not-configured"].includes(current.state)) return { error: "not-logged-in: Sign in to Teams Client with the intended work or school account before sending." };
@@ -638,7 +666,7 @@ function status(): StateResult {
   if (protectedState.error) return { state: "install-failed", message: protectedState.message || lifecycleMessage("install-failed"), accounts: [] };
   const run = runM365(["status", "--output", "json"]);
   if (!run.ok) {
-    const reauth = authState(`${run.error}\n${run.stderr}`);
+    const reauth = authState(`${run.error}\n${run.stderr}`, configuredAppId());
     if (reauth) return { ...reauth, accounts: [] };
     if (/timed out after \d+ms/i.test(run.error)) return { state: "status-unavailable", message: lifecycleMessage("status-unavailable"), accounts: [] };
     return { state: "reauth-needed", message: lifecycleMessage("reauth-needed"), accounts: [] };
@@ -680,10 +708,10 @@ function statusView(): StateResult {
   return value;
 }
 
-function jsonCommand(args: string[]): { data?: any; error?: string; reauth?: { state: string; message: string } } {
+function jsonCommand(args: string[], appId = configuredAppId()): { data?: any; error?: string; reauth?: { state: string; message: string } } {
   const run = runM365(args.concat(["--output", "json"]));
   if (!run.ok) {
-    const auth = authState(`${run.error}\n${run.stderr}`);
+    const auth = authState(`${run.error}\n${run.stderr}`, appId);
     return { error: auth ? auth.message : "The m365 command failed. Refresh status and try again.", reauth: auth || undefined };
   }
   const data = parseJson(run.stdout.trim());
@@ -849,14 +877,20 @@ function boundedHistory(chatId: string, source: any[], count: number, maxBytes: 
   return out;
 }
 
-function settings(): { historyCount: number; historyMaxBytes: number } {
+function settings(): { historyCount: number; historyMaxBytes: number; appId: string } {
   const value = parseJson<any>(host.settingsJson()) || {};
   const count = Number(value.historyCount);
   const bytes = Number(value.historyMaxBytes);
+  const appId = String(value.appId || "").trim();
   return {
     historyCount: Number.isInteger(count) ? Math.max(1, Math.min(MAX_COUNT, count)) : 20,
     historyMaxBytes: Number.isInteger(bytes) ? Math.max(1024, Math.min(MAX_BYTES, bytes)) : MAX_BYTES,
+    appId: APP_ID_PATTERN.test(appId) ? appId.toLowerCase() : DEFAULT_APP_ID,
   };
+}
+
+function configuredAppId(): string {
+  try { return settings().appId; } catch { return DEFAULT_APP_ID; }
 }
 
 function agentHistory(args: string[]): { result: string } | { error: string } {
@@ -965,7 +999,7 @@ function parseSendArgs(args: string[]): { chatId: string; text: string; key?: st
 }
 
 function failureForUpstream(message: string): { kind: SendFailure; detail?: string; cause?: string } {
-  const auth = authState(message);
+  const auth = authState(message, configuredAppId());
   if (auth) return { kind: "reauth-needed", detail: auth.message, cause: auth.state };
   if (/not signed in|not logged in|no active connection|logged out|run m365 login/i.test(message)) return { kind: "not-logged-in" };
   // The pinned m365 CLI consumes Retry-After and retries 429/503 inside its
@@ -1141,7 +1175,7 @@ function logout(): { result: string } | { error: string } {
   }
   const run = runM365(["logout"]);
   if (!run.ok) {
-    const reauth = authState(`${run.error}\n${run.stderr}`);
+    const reauth = authState(`${run.error}\n${run.stderr}`, configuredAppId());
     if (reauth) return { error: reauth.message };
     return { error: "m365 could not clear its plugin-owned session files. The files were kept so logout can be retried." };
   }
@@ -1157,8 +1191,8 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
   const args = Array.isArray(ctx.args) ? ctx.args : [];
   switch (ctx.verb) {
     case "login": {
-      if (args.length) return { error: "Usage: login." };
-      const started = loginStart(AGENT_LOGIN_AUTH);
+      if (args.length > 1 || (args.length === 1 && args[0] !== "--device-code")) return { error: "Usage: login [--device-code]." };
+      const started = loginStart(args.length ? "deviceCode" : "browser");
       if (started.error) return { error: started.error };
       const current = loginPoll(started.jobId);
       if (current.error && !current.done) return { error: current.error };
@@ -1176,7 +1210,7 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
     case "use": return args.length === 1 ? useAccount(args[0]) : { error: "Usage: use <account-id>." };
     case "chats": return agentChats(args);
     case "history": return agentHistory(args);
-    case "health": return { result: JSON.stringify({ ...statusView(), sendScope: readSendScope(), lastSend: lastSendState }) };
+    case "health": return { result: JSON.stringify({ ...statusView(), appId: configuredAppId(), sendScope: readSendScope(), lastSend: lastSendState }) };
     case "logout": return logout();
     case "send": return sendCommand("agent", args);
     case "preview": return previewCommand(args, "agent");
@@ -1190,10 +1224,12 @@ function agentLoginView(current: any, fallbackJobId?: string): Record<string, un
     done: current.done === true,
     state: String(current.state || "login-in-progress"),
     jobId: current.jobId || fallbackJobId,
+    appId: current.appId || configuredAppId(),
     signIn,
     signInUrl: current.signInUrl,
     deviceCode: current.deviceCode,
     message: current.error || current.message,
+    ...(current.fallbackFrom ? { fallbackFrom: current.fallbackFrom } : {}),
     ...(current.error ? { error: current.error } : {}),
   };
 }
@@ -1221,20 +1257,44 @@ function loginStart(authType: LoginAuthType = "browser"): any {
   return { jobId: started.jobId, state: "login-in-progress", message: PREPARING_SIGN_IN_MESSAGE };
 }
 
-function signInPending(jobId: string, log: SignInLog): any {
+function signInPending(jobId: string, log: SignInLog, login?: LoginJob): any {
   const artifacts = signInArtifacts(log);
-  if (artifacts.deviceCode) return { done: false, jobId, state: "waiting-for-sign-in", ...artifacts, message: `Open ${artifacts.signInUrl} and enter code ${artifacts.deviceCode}.` };
-  if (artifacts.signInUrl) return { done: false, jobId, state: "waiting-for-sign-in", ...artifacts, message: "Open the sign-in link in your usual browser on this computer and sign in with your Microsoft 365 work or school account. The link expires in 10 minutes; run login again for a fresh one." };
-  return { done: false, jobId, state: "login-in-progress", message: PREPARING_SIGN_IN_MESSAGE };
+  const context = { appId: login?.appId, ...(login?.fallbackFrom ? { fallbackFrom: login.fallbackFrom } : {}) };
+  const fallback = login?.fallbackFrom ? "The localhost link was refused, so this sign-in uses a code instead. " : "";
+  if (artifacts.deviceCode) return { done: false, jobId, state: "waiting-for-sign-in", ...context, ...artifacts, message: `${fallback}Open ${artifacts.signInUrl} and enter code ${artifacts.deviceCode}.` };
+  if (artifacts.signInUrl) return { done: false, jobId, state: "waiting-for-sign-in", ...context, ...artifacts, message: "Open the sign-in link in your usual browser on this computer and sign in with your Microsoft 365 work or school account. The link expires in 10 minutes; run login again for a fresh one." };
+  return { done: false, jobId, state: "login-in-progress", ...context, message: login?.authType === "deviceCode" ? `${fallback}${PREPARING_CODE_MESSAGE}` : PREPARING_SIGN_IN_MESSAGE };
+}
+
+// One fallback per sign-in: the code job never falls back again.
+function fallBackToDeviceCode(jobId: string, login: LoginJob, failure: { state: string; message: string }): any {
+  try { host.exec.close(jobId); } catch { }
+  finishLoginJob(jobId, failure.state);
+  const started = startBrowserLogin(login.paths, login.target, "deviceCode");
+  if (!started.jobId) return { done: true, state: failure.state, error: failure.message };
+  const next = loginJobs[started.jobId];
+  next.fallbackFrom = failure.state;
+  return signInPending(started.jobId, { state: "starting" }, next);
+}
+
+// m365 asks for graph/.default, so a sign-in can succeed while the app still lacks the chat scopes.
+function missingChatConsent(login: LoginJob): { state: string; message: string } | null {
+  const probe = jsonCommand(["request", "--url", `${GRAPH}/me/chats?$top=1`], login.appId);
+  return probe.reauth?.state === "consent-required" ? probe.reauth : null;
 }
 
 function pollSignIn(jobId: string, login: LoginJob): any {
   const log = readSignInLog(login);
-  if (log.state === "failed") return finishLoginJob(jobId, log.failure.state, log.failure.message);
+  if (log.state === "failed") {
+    if (login.authType === "browser" && LOOPBACK_REFUSED.includes(log.failure.state)) return fallBackToDeviceCode(jobId, login, log.failure);
+    return finishLoginJob(jobId, log.failure.state, log.failure.message);
+  }
   const current = statusView();
   if (current.state === "logged-in" && log.state !== "cancelled") {
     const secured = protectCacheFiles(login.paths, true);
     if (secured.error) return finishLoginJob(jobId, "install-failed", secured.message || lifecycleMessage("install-failed"));
+    const consent = missingChatConsent(login);
+    if (consent) return finishLoginJob(jobId, consent.state, consent.message);
     return finishLoginJob(jobId, "logged-in");
   }
   if (log.state === "cancelled") return finishLoginJob(jobId, "sign-in-cancelled", "This sign-in was replaced or cancelled. Run login again for a fresh link.");
@@ -1242,7 +1302,7 @@ function pollSignIn(jobId: string, login: LoginJob): any {
     if (login.leaseFile) try { host.fs.removeFile(login.leaseFile); } catch { }
     return finishLoginJob(jobId, "sign-in-expired", "The sign-in link expired. Run login again for a fresh link.");
   }
-  return signInPending(jobId, log);
+  return signInPending(jobId, log, login);
 }
 
 function loginPoll(jobId: string): any {
@@ -1252,13 +1312,13 @@ function loginPoll(jobId: string): any {
   let poll: { done: boolean; code?: number; stdout?: string; stderr?: string; error?: string };
   try { poll = host.exec.poll(jobId); }
   catch { return { error: "Could not read the Microsoft sign-in job." }; }
-  if (!poll.done) return login.stage === "browser" ? signInPending(jobId, readSignInLog(login)) : { done: false, jobId, state: "install-in-progress", message: "The pinned m365 package setup is still running." };
+  if (!poll.done) return login.stage === "browser" ? signInPending(jobId, readSignInLog(login), login) : { done: false, jobId, state: "install-in-progress", message: "The pinned m365 package setup is still running." };
   try { host.exec.close(jobId); } catch { }
   if (poll.error || poll.code !== 0) {
     const reason = `${poll.error || ""}
 ${poll.stderr || ""}
 ${poll.stdout || ""}`;
-    const auth = authState(reason);
+    const auth = authState(reason, login.appId);
     return finishLoginJob(jobId, auth ? auth.state : "install-failed", auth ? auth.message : lifecycleMessage("install-failed"));
   }
   if (login.stage === "pack") {
@@ -1295,8 +1355,8 @@ ${poll.stdout || ""}`;
 
 function viewCall(method: string, args: any): unknown {
   const value = args || {};
-  if (method === "status") return { ...statusView(), loginJobId: activeLoginJobId };
-  if (method === "loginStart") return loginStart();
+  if (method === "status") return { ...statusView(), appId: configuredAppId(), loginJobId: activeLoginJobId };
+  if (method === "loginStart") return loginStart(value.authType === "deviceCode" ? "deviceCode" : "browser");
   if (method === "loginPoll") return loginPoll(String(value.jobId || ""));
   if (method === "useAccount") return useAccount(String(value.id || ""));
   if (method === "logout") return logout();
@@ -1362,6 +1422,7 @@ const plugin: PluginModule = {
   __test_parseSignInLog: parseSignInLog,
   __test_signInTtlMs: SIGN_IN_TTL_MS,
   __test_signInWrapper: SIGN_IN_WRAPPER,
+  __test_defaultAppId: DEFAULT_APP_ID,
   __test_metadataReader: METADATA_READER,
 };
 

@@ -40,7 +40,14 @@ export type SendPreview = {
   restriction?: string | null;
 };
 
-export function SignInLink({ url }: { url: string }) {
+export function SignInLink({ url, code }: { url: string; code?: string }) {
+  if (code) return (
+    <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+      <span style={{ fontSize: 12.5 }}>Open this page in your usual browser, enter the code, and sign in. If the code expired, choose Sign in again.</span>
+      <a href={url} target="_blank" rel="noopener noreferrer" style={{ fontWeight: 600 }}>{url}</a>
+      <pre style={{ ...codeBlock, fontSize: 16, fontWeight: 700, userSelect: "all" }}>{code}</pre>
+    </div>
+  );
   return (
     <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
       <span style={{ fontSize: 12.5 }}>Open this link in your usual browser on this computer and sign in. If the tab was closed or the link expired, choose Sign in again.</span>
@@ -64,6 +71,7 @@ export function App() {
   const [sendInProgress, setSendInProgress] = useState(false);
   const [jobId, setJobId] = useState("");
   const [signInUrl, setSignInUrl] = useState("");
+  const [deviceCode, setDeviceCode] = useState("");
   const [linkPolls, setLinkPolls] = useState(0);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -95,13 +103,14 @@ export function App() {
 
   useEffect(() => { void refresh(); }, []);
 
-  async function startLogin() {
+  async function startLogin(authType: "browser" | "deviceCode" = "browser") {
     setBusy(true);
     setMessage("");
     try {
-      const result = await window.ct!.invoke("loginStart") as { jobId?: string; error?: string; message?: string };
+      const result = await window.ct!.invoke("loginStart", { authType }) as { jobId?: string; error?: string; message?: string };
       if (result.error) throw new Error(result.error);
       setSignInUrl("");
+      setDeviceCode("");
       setLinkPolls(0);
       setJobId(result.jobId || "");
       setMessage(result.message || "Microsoft sign-in started.");
@@ -123,11 +132,13 @@ export function App() {
         error?: string;
         message?: string;
         signInUrl?: string;
+        deviceCode?: string;
       };
-      if (result.done) { setJobId(""); setSignInUrl(""); }
+      if (result.done) { setJobId(""); setSignInUrl(""); setDeviceCode(""); }
       else {
         if (result.jobId) setJobId(result.jobId);
-        if (result.signInUrl) setSignInUrl(result.signInUrl);
+        setSignInUrl(result.signInUrl || "");
+        setDeviceCode(result.deviceCode || "");
       }
       if (result.error) setMessage(result.error);
       else setMessage(result.message || "Sign-in is still running. Open the sign-in link, then check again.");
@@ -263,14 +274,18 @@ export function App() {
       ) : section === "unknown" ? null : (
         <Section title="Sign in" hint="Use your Microsoft 365 work or school account. You get a sign-in link to open in your usual browser.">
           {accounts.length > 0 && <AccountList accounts={accounts} busy={busy} onUse={(id) => void useAccount(id)} />}
-          {jobId && signInUrl && <SignInLink url={signInUrl} />}
+          {jobId && signInUrl && <SignInLink url={signInUrl} code={deviceCode} />}
           <Actions>
             {jobId
               ? <>
                 <Btn kind="primary" disabled={busy} onClick={() => void checkLogin()}>Check sign-in status</Btn>
                 <Btn disabled={busy} onClick={() => void startLogin()}>Sign in again</Btn>
+                <Btn disabled={busy} onClick={() => void startLogin("deviceCode")}>Use a code instead</Btn>
               </>
-              : <Btn kind="primary" disabled={busy} onClick={() => void startLogin()}>{busy ? "Working…" : "Get sign-in link"}</Btn>}
+              : <>
+                <Btn kind="primary" disabled={busy} onClick={() => void startLogin()}>{busy ? "Working…" : "Get sign-in link"}</Btn>
+                <Btn disabled={busy} onClick={() => void startLogin("deviceCode")}>Use a code instead</Btn>
+              </>}
           </Actions>
         </Section>
       )}
@@ -318,7 +333,7 @@ export function App() {
       </Section>
 
       <Disclosure summary="Security details">
-        <p style={{ margin: "0 0 6px" }}>If your tenant allows user consent, approve the m365 permissions in the browser. If it restricts user consent, a tenant administrator must approve those permissions once. This plugin does not create an Entra app registration.</p>
+        <p style={{ margin: "0 0 6px" }}>Sign-in uses the Microsoft Graph Command Line Tools app id by default; plugin settings can change it. Chat.ReadWrite and ChatMessage.Send must be consented for that app in your tenant, and if your tenant restricts user consent, a tenant administrator must approve them once. This plugin does not create an Entra app registration.</p>
         <p style={{ margin: "0 0 6px" }}>Every send is recorded in a local idempotency ledger, so a repeated key is never sent twice, and a send without a Graph message id is reported as unknown rather than delivered.</p>
         <p style={{ margin: "0 0 6px" }}>m365 retries throttling internally. A surfaced 429 or 503 is recorded as unknown because the message may already have arrived.</p>
         <p style={{ margin: 0 }}>Agent verbs: accounts, use, chats, history, health, preview, send, logout.</p>

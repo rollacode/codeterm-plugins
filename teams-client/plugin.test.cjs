@@ -28,11 +28,11 @@ test("plugin view does not repeat the plugin name and shows status as a label, n
     if (state) assert.equal(bar.includes(state), false, `${state} is never shown raw`);
   }
 });
-const REAL_SIGN_IN_URL = (port) => `https://login.microsoftonline.com/common/oauth2/authorize?response_type=code&client_id=1fec8e78-bce4-4aaf-ab1b-5451cc387264&redirect_uri=http://localhost:${port}&state=0a1b2c3d4e5f60718293&resource=https://graph.microsoft.com&prompt=select_account`;
+const REAL_SIGN_IN_URL = (port) => `https://login.microsoftonline.com/common/oauth2/authorize?response_type=code&client_id=14d82eec-204b-4c2f-b7e8-296a70dab67e&redirect_uri=http://localhost:${port}&state=0a1b2c3d4e5f60718293&resource=https://graph.microsoft.com&prompt=select_account`;
 const REAL_SIGN_IN_LOG = (port) => `codeterm-signin: url ${REAL_SIGN_IN_URL(port)}
 To sign in, use the web browser that just has been opened. Please sign-in there.
 `;
-const LOGIN_ARGS = ["login", "--authType", "browser", "--appId", "1fec8e78-bce4-4aaf-ab1b-5451cc387264", "--output", "json"];
+const LOGIN_ARGS = ["login", "--authType", "browser", "--appId", "14d82eec-204b-4c2f-b7e8-296a70dab67e", "--output", "json"];
 function loginCalls(env) { return env.calls.filter((call) => call.args[0] === "-e" && call.args[5] === "login"); }
 function assertOk(value, message) { assert.equal(!!value, true, message); }
 function normalize(value) { return path.posix.normalize(String(value).replaceAll("\\", "/")); }
@@ -142,6 +142,7 @@ function mockHost(options = {}) {
       }
       const requestMethod = args.includes("--method") ? args[args.indexOf("--method") + 1] : "get";
       if (args[0] === "request" && requestMethod === "get" && /\/me\/chats\?/.test(args[args.indexOf("--url") + 1] || "")) {
+        if (options.chatsError) return { code: 1, stdout: "", stderr: options.chatsError };
         const rows = (options.chats || [{ id: "19:chat-a@thread.v2", topic: "Project" }]).map((chat) => ({ chatType: "group", members: [], ...chat }));
         return { code: 0, stdout: JSON.stringify({ value: rows }), stderr: "" };
       }
@@ -193,7 +194,8 @@ function mockHost(options = {}) {
   exec.start = (opts) => {
     const id = `job-${++nextJob}`;
     const result = resultFor(opts);
-    if (opts.logFile) files.set(normalize(opts.logFile), options.loginOutput || (result.code !== 0 ? `${result.stdout || ""}${result.stderr || ""}` : REAL_SIGN_IN_LOG(50000 + nextJob)));
+    const loginOutput = typeof options.loginOutput === "function" ? options.loginOutput(calls[calls.length - 1]) : options.loginOutput;
+    if (opts.logFile) files.set(normalize(opts.logFile), loginOutput || (result.code !== 0 ? `${result.stdout || ""}${result.stderr || ""}` : REAL_SIGN_IN_LOG(50000 + nextJob)));
     jobs.set(id, opts.detach ? { done: true, code: 0, stdout: "", stderr: "" } : { ...result, done: true });
     return { jobId: id };
   };
@@ -570,7 +572,7 @@ test("reauth causes map to distinct actionable states", () => {
   const cases = [
     ["AADSTS50076 MFA required", "mfa-required", /complete the MFA/i],
     ["AADSTS53003 Conditional Access blocked", "conditional-access-blocked", /IT administrator/i],
-    ["AADSTS65001 consent_required", "consent-not-granted", /user consent|tenant administrator/i],
+    ["AADSTS65001 consent_required", "consent-required", /tenant administrator.*Chat\.ReadWrite.*ChatMessage\.Send/i],
     ["AADSTS50173 refresh token revoked", "refresh-token-revoked", /Sign in/i],
     ["AADSTS700082 token expired", "token-expired", /renew/i],
   ];
@@ -1072,7 +1074,7 @@ test("m365 internal Retry-After handling leaves a throttled outcome unknown and 
 test("reauth failures retain the read taxonomy and never enter the rate-limit path", () => {
   const cases = [
     ["refresh-token-revoked", "refresh-token-revoked", /Sign in again/i],
-    ["consent-withdrawn", "consent-not-granted", /tenant administrator|user consent/i],
+    ["consent-withdrawn", "consent-required", /tenant administrator/i],
     ["conditional-access-blocked", "conditional-access-blocked", /IT administrator/i],
     ["mfa-required", "mfa-required", /Complete the MFA/i],
   ];
@@ -1285,7 +1287,7 @@ test("sign-in log parser types every state from real m365 and wrapper lines", ()
   assert.deepEqual(parse(`${REAL_SIGN_IN_LOG(58950)}codeterm-signin: cancelled\n`), { state: "cancelled" });
   assert.deepEqual(parse(`${REAL_SIGN_IN_LOG(58950)}codeterm-signin: expired\n`), { state: "expired" });
   assert.deepEqual(parse(`${REAL_SIGN_IN_LOG(58950)}Error: post_request_failed: invalid_grant\n`), { state: "failed", failure: { state: "sign-in-failed", message: "Microsoft sign-in failed: post_request_failed: invalid_grant" } });
-  assert.equal(parse(`${REAL_SIGN_IN_LOG(58950)}AADSTS65001 consent_required\n`).failure.state, "consent-not-granted");
+  assert.equal(parse(`${REAL_SIGN_IN_LOG(58950)}AADSTS65001 consent_required\n`).failure.state, "consent-required");
   assert.deepEqual(parse("\u001b[33m🌶️  To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABCD-EFGH to authenticate.\u001b[0m"), { state: "awaiting-device-code", signInUrl: "https://microsoft.com/devicelogin", deviceCode: "ABCD-EFGH" });
   assert.deepEqual(parse("codeterm-signin: url https://evil.example/common/oauth2/authorize?redirect_uri=http://localhost:1\n"), { state: "starting" }, "only Microsoft authorize URLs are surfaced");
   assert.deepEqual(parse("codeterm-signin: url https://login.microsoftonline.com/common/oauth2/authorize?redirect_uri=https://attacker.example\n"), { state: "starting" }, "only loopback redirects are surfaced");
@@ -1379,7 +1381,7 @@ test("the sign-in wrapper prints the URL instead of opening a browser and exits 
     const parsed = plugin.__test_parseSignInLog(result.log.replace("codeterm-signin: cancelled", ""));
     assert.equal(parsed.state, "awaiting-browser");
     assert.match(parsed.signInUrl, new RegExp(`redirect_uri=http://localhost:${result.port}&`));
-    assert.match(parsed.signInUrl, /client_id=1fec8e78-bce4-4aaf-ab1b-5451cc387264/);
+    assert.match(parsed.signInUrl, /client_id=14d82eec-204b-4c2f-b7e8-296a70dab67e/);
     assert.equal(plugin.__test_parseSignInLog(result.log).state, "cancelled");
     assert.equal(result.code, 3, "the replaced wrapper exits");
     assert.equal(result.listening, false, "its loopback listener is released");
@@ -1465,6 +1467,168 @@ test("view shows the sign-in link as a link and as copyable text, with typed sig
   assert.match(html, /Sign in again/);
   assert.equal(statusView("waiting-for-sign-in").label, "Waiting for sign-in");
   assert.equal(statusView("sign-in-expired").label, "Sign-in link expired");
+});
+
+const GRAPH_CLI_APP_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
+const TEAMS_APP_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
+const OWNER_AADSTS50011 = `AADSTS50011: The redirect URI 'http://localhost:58950' specified in the request does not match the redirect URIs configured for the application '${TEAMS_APP_ID}'. Make sure the redirect URI sent in the request matches one added to your application in the Azure portal. Navigate to https://aka.ms/redirectUriMismatchError to learn more about how to fix this.`;
+const CONSENT_AADSTS65001 = `AADSTS65001: The user or administrator has not consented to use the application with ID '${GRAPH_CLI_APP_ID}' named 'Microsoft Graph Command Line Tools'. Send an interactive authorization request for this user and resource.`;
+const MISSING_SCOPE_403 = `{"error":{"code":"Forbidden","message":"Missing scope permissions on the request. API requires one of 'Chat.ReadBasic, Chat.Read, Chat.ReadWrite'. Scopes on the request 'openid, profile, User.Read, email'"}}`;
+const DEVICE_CODE_LOG = "To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABCD-EFGH to authenticate.\n";
+
+test("AADSTS50011 maps to wrong-client-redirect and consent errors to consent-required, quoting Microsoft", () => {
+  const redirect = plugin.__test_authState(`Error: ${OWNER_AADSTS50011}`, TEAMS_APP_ID);
+  assert.equal(redirect.state, "wrong-client-redirect");
+  assert.ok(redirect.message.includes(OWNER_AADSTS50011.slice(0, 120)), "the owner sees Microsoft's exact error");
+  assert.ok(redirect.message.includes(TEAMS_APP_ID));
+  assert.match(redirect.message, /login --device-code/);
+  assert.ok(redirect.message.includes(GRAPH_CLI_APP_ID), "the fix names the default app id");
+  assert.equal(plugin.__test_authState("Error: AADSTS500113: No reply address is registered for the application.").state, "wrong-client-redirect");
+
+  for (const input of [
+    `Error: ${CONSENT_AADSTS65001}`,
+    "AADSTS90094: The grant requires admin permission.",
+    "Need admin approval: Microsoft Graph Command Line Tools needs permission to access resources in your organization that only an admin can grant.",
+    `Error: ${MISSING_SCOPE_403}`,
+  ]) {
+    const consent = plugin.__test_authState(input, GRAPH_CLI_APP_ID);
+    assert.equal(consent.state, "consent-required", input);
+    assert.ok(consent.message.includes(input.replace(/^Error:\s*/, "").slice(0, 60)), `exact message kept: ${input}`);
+    assert.ok(consent.message.includes(GRAPH_CLI_APP_ID));
+    assert.match(consent.message, /tenant administrator must approve[^.]*Chat\.ReadWrite and ChatMessage\.Send/);
+  }
+
+  const loopback = plugin.__test_authState("Error: listen EADDRINUSE: address already in use 127.0.0.1:58950");
+  assert.equal(loopback.state, "loopback-unavailable");
+  assert.match(loopback.message, /login --device-code/);
+
+  const parsed = plugin.__test_parseSignInLog(`${REAL_SIGN_IN_LOG(58950)}Error: ${OWNER_AADSTS50011}\n`, TEAMS_APP_ID);
+  assert.equal(parsed.state, "failed");
+  assert.equal(parsed.failure.state, "wrong-client-redirect");
+});
+
+test("quoted Microsoft errors never carry a token or an authorization code", () => {
+  const mapped = plugin.__test_authState("Error: AADSTS65001 consent_required for http://localhost:1/?code=0.AXoAsecretcode&state=abc access_token=plainsecret bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJvd25lciJ9.c2lnbmF0dXJl");
+  assert.equal(mapped.state, "consent-required");
+  for (const secret of ["0.AXoAsecretcode", "plainsecret", "eyJhbGciOiJSUzI1NiJ9", "eyJzdWIiOiJvd25lciJ9"]) assert.equal(mapped.message.includes(secret), false, secret);
+  assert.match(mapped.message, /code=\[redacted\]/);
+});
+
+test("the sign-in app id defaults to Graph Command Line Tools and follows the appId setting", () => {
+  for (const [settings, expected] of [
+    [undefined, GRAPH_CLI_APP_ID],
+    [{ appId: TEAMS_APP_ID.toUpperCase() }, TEAMS_APP_ID],
+    [{ appId: "  0a1b2c3d-1111-2222-3333-444455556666 " }, "0a1b2c3d-1111-2222-3333-444455556666"],
+    [{ appId: "not-a-guid" }, GRAPH_CLI_APP_ID],
+  ]) {
+    const env = mockHost({ platform: "darwin", status: "logged-out", settings });
+    try {
+      const login = JSON.parse(command("login").result);
+      assert.equal(login.appId, expected);
+      const args = loginCalls(env)[0].args;
+      assert.equal(args[args.indexOf("--appId") + 1], expected);
+      assert.equal(JSON.parse(command("health").result).appId, expected);
+    } finally { env.cleanup(); }
+  }
+  assert.equal(plugin.__test_defaultAppId, GRAPH_CLI_APP_ID);
+  const schema = JSON.parse(fs.readFileSync(path.join(__dirname, "settings.schema.json"), "utf8"));
+  const field = schema.flatMap((section) => section.fields).find((item) => item.key === "appId");
+  assert.equal(field.kind, "select");
+  assert.equal(field.default, GRAPH_CLI_APP_ID);
+  assert.deepEqual(field.options.map(([id]) => id), [GRAPH_CLI_APP_ID, TEAMS_APP_ID]);
+});
+
+test("a refused loopback link falls back to device code once and completes there", () => {
+  const env = mockHost({
+    platform: "win32", arch: "x64", isWindows: true, status: "logged-out",
+    loginOutput: (call) => call.args[7] === "browser" ? `${REAL_SIGN_IN_LOG(58950)}Error: ${OWNER_AADSTS50011}\n` : DEVICE_CODE_LOG,
+  });
+  try {
+    const login = JSON.parse(command("login").result);
+    assert.equal(login.done, false);
+    assert.equal(login.fallbackFrom, "wrong-client-redirect");
+    assert.equal(login.signIn, undefined, "the refused link is not shown again");
+    assert.equal(loginCalls(env).length, 2);
+    assert.deepEqual(loginCalls(env).map((call) => call.args[7]), ["browser", "deviceCode"]);
+    assert.ok(env.closedJobs.includes("job-1"), "the refused loopback job is released");
+    const code = JSON.parse(command("login-status").result);
+    assert.equal(code.state, "waiting-for-sign-in");
+    assert.equal(code.signIn, "device-code");
+    assert.equal(code.signInUrl, "https://microsoft.com/devicelogin");
+    assert.equal(code.deviceCode, "ABCD-EFGH");
+    assert.equal(code.fallbackFrom, "wrong-client-redirect");
+    assert.match(code.message, /uses a code instead/);
+    env.setCurrentName("account-a");
+    assert.equal(JSON.parse(command("login-status").result).state, "logged-in");
+    assert.equal(loginCalls(env).length, 2);
+  } finally { env.cleanup(); }
+});
+
+test("a device code refused after the fallback ends the sign-in instead of looping", () => {
+  const env = mockHost({ platform: "darwin", status: "logged-out", loginOutput: `Error: ${OWNER_AADSTS50011}\n` });
+  try {
+    JSON.parse(command("login").result);
+    const ended = JSON.parse(command("login-status").result);
+    assert.equal(ended.done, true);
+    assert.equal(ended.state, "wrong-client-redirect");
+    assert.ok(ended.message.includes("AADSTS50011"));
+    assert.equal(JSON.parse(command("login-status").result).done, true);
+    assert.equal(loginCalls(env).length, 2, "one loopback attempt and one code attempt, nothing more");
+  } finally { env.cleanup(); }
+});
+
+test("consent-required during sign-in is final and never falls back", () => {
+  const env = mockHost({ platform: "darwin", status: "logged-out", loginOutput: `${REAL_SIGN_IN_LOG(58950)}Error: ${CONSENT_AADSTS65001}\n` });
+  try {
+    const ended = JSON.parse(command("login").result);
+    assert.equal(ended.done, true);
+    assert.equal(ended.state, "consent-required");
+    assert.ok(ended.message.includes(CONSENT_AADSTS65001.slice(0, 80)));
+    assert.match(ended.message, /Chat\.ReadWrite and ChatMessage\.Send/);
+    assert.equal(JSON.parse(command("login-status").result).done, true);
+    assert.equal(loginCalls(env).length, 1);
+  } finally { env.cleanup(); }
+});
+
+test("a sign-in whose token lacks the chat scopes ends as consent-required", () => {
+  const env = mockHost({ platform: "darwin", status: "logged-out", chatsError: `Error: ${MISSING_SCOPE_403}` });
+  try {
+    JSON.parse(command("login").result);
+    env.setCurrentName("account-a");
+    const ended = JSON.parse(command("login-status").result);
+    assert.equal(ended.done, true);
+    assert.equal(ended.state, "consent-required");
+    assert.match(ended.message, /Missing scope permissions on the request/);
+    assert.ok(ended.message.includes(GRAPH_CLI_APP_ID));
+    assert.equal(loginCalls(env).length, 1);
+  } finally { env.cleanup(); }
+});
+
+test("login --device-code starts a code sign-in; other login arguments are refused", () => {
+  const env = mockHost({ platform: "linux", status: "logged-out", loginOutput: DEVICE_CODE_LOG });
+  try {
+    const login = JSON.parse(command("login", ["--device-code"]).result);
+    assert.equal(login.signIn, "device-code");
+    assert.equal(login.deviceCode, "ABCD-EFGH");
+    assert.equal(login.fallbackFrom, undefined);
+    assert.equal(loginCalls(env)[0].args[7], "deviceCode");
+    assert.match(command("login", ["--browser"]).error, /Usage: login \[--device-code\]/);
+    const view = plugin.viewCall("loginStart", { authType: "deviceCode" });
+    assert.ok(view.jobId);
+    assert.equal(loginCalls(env)[1].args[7], "deviceCode");
+  } finally { env.cleanup(); }
+});
+
+test("the view labels the new sign-in states and shows a device code", () => {
+  const React = require("react");
+  const { renderToStaticMarkup } = require("react-dom/server");
+  const { SignInLink } = require("./ui/src/app.tsx");
+  const { statusView } = require("./ui/src/status.ts");
+  assert.equal(statusView("consent-required").label, "Admin consent needed");
+  assert.equal(statusView("wrong-client-redirect").label, "Link refused");
+  const page = renderToStaticMarkup(React.createElement(SignInLink, { url: "https://microsoft.com/devicelogin", code: "ABCD-EFGH" }));
+  assert.ok(page.includes("ABCD-EFGH"));
+  assert.ok(page.includes("https://microsoft.com/devicelogin"));
 });
 
 for (const [name, fn] of tests) {
