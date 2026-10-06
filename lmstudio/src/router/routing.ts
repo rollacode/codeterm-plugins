@@ -70,3 +70,20 @@ export function presetParams(preset: RouterPreset | null): Record<string, unknow
   if (preset.maxTokens !== undefined) params.max_tokens = preset.maxTokens;
   return params;
 }
+
+export interface RouteRequest {
+  raw: string;
+  presetProvider?: string;
+}
+
+/** Re-resolves a live session against the current registry; an auto-picked model survives while its provider does. */
+export function reroute(
+  req: RouteRequest,
+  current: { providerId: string | null; model: string },
+  providers: ProviderConfig[],
+  defaultProvider: string,
+): ModelTarget {
+  const target = resolveModelTarget(req.raw, providers, defaultProvider, req.raw ? undefined : req.presetProvider);
+  if (!target.provider || target.model) return target;
+  return { provider: target.provider, model: current.providerId === target.provider.id ? current.model : "" };
+}

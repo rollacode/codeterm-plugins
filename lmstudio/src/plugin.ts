@@ -32,11 +32,20 @@ import {
 } from "./router/adapters";
 import { apiRoot, LMSTUDIO_PROVIDER_ID } from "./router/config";
 import { capabilityBadges } from "./router/models";
-import { presetModelId, presetParams, qualifyModel, resolveModelTarget } from "./router/routing";
+import { presetModelId, presetParams, qualifyModel, reroute, resolveModelTarget, type RouteRequest } from "./router/routing";
 import { discoverModels, getKey, resetModelCache, snapshot } from "./router/store";
 import { runAgentVerb } from "./router/verbs";
 import { viewCall } from "./router/view";
-import type { ChatTurn, ProviderConfig, StreamDelta, Usage } from "./router/types";
+import { applyNativeEvent } from "./router/lmstudioNative";
+import { readDataFile, writeDataFile } from "./router/datafiles";
+import { forgetSession, savedSession, saveSession } from "./router/sessionstore";
+import { parseTextToolCalls } from "./router/textcalls";
+import { checkToolArgs } from "./router/toolspec";
+import { finishToolCalls, mergeToolParts } from "./router/toolwire";
+import { transcriptTurns } from "./router/transcript";
+import { DOMIOS_CONTEXT, withDomiosContext } from "./router/context";
+import { activityLine, activityOf } from "./router/activity";
+import type { ChatTurn, NativeToolCall, ProviderConfig, StreamDelta, ToolPart, Usage } from "./router/types";
 
 interface Preset {
   id: string;
@@ -99,11 +108,17 @@ interface StreamState {
   kind: ProviderConfig["kind"];
   usage: Usage | null;
   error: string | null;
+  toolParts: ToolPart[];
 }
 
 interface Session {
+  tabId: string;
   messages: NormalizedChatMessage[];
   seq: number;
+  // Scopes message ids to this session object; a session revived after a plugin reload must not reuse ids the host already stored.
+  epoch: string;
+  // A revived session answers its first poll from 0: the host's cursor belongs to the previous VM.
+  cursorReset: boolean;
   systemPrompt: string;
   mode: SessionMode;
   engine: ContextEngineConfig | null;
@@ -115,6 +130,8 @@ interface Session {
   watcherLastAssistant: string;
   model: string;
   provider: ProviderConfig | null;
+  // What the session asked for; re-resolved against the live registry before every request.
+  route: RouteRequest;
   routeError: string | null;
   params: Record<string, unknown>;
   previousResponseId: string | null;
@@ -132,6 +149,8 @@ interface Session {
   pendingTools: ToolParseEntry[] | null;
   // The async exec currently in flight (host.exec.start jobId), if any.
   pendingExec: PendingExec | null;
+  // Formatted results of the current tool round, sent back as one continuation once the round drains.
+  roundResults: string[];
   // An in-flight prompt-authoring hand-off (R6): an agent pane is drafting a
   // tuned system prompt; drainAuthor polls its ticket across pumps and writes
   // the reply back via applyAuthoredPrompt. Null when no hand-off is active.
@@ -156,8 +175,8 @@ interface StreamPoll {
 }
 
 const DEFAULT_BASE_URL = "http://localhost:1234";
-const LAST_MODEL_PATH = ".codeterm/plugins/lmstudio/last-model.json";
-const AUTHORED_PROMPTS_PATH = ".codeterm/plugins/lmstudio/authored-prompts.json";
+const LAST_MODEL_FILE = "last-model.json";
+const AUTHORED_PROMPTS_FILE = "authored-prompts.json";
 const PROMPT_AUTHOR_WORKSPACE = "lmstudio-prompt-authoring";
 const MAX_TOOL_ROUNDS = 8;
 const MAX_MALFORMED_RETRIES = 2;
@@ -189,79 +208,25 @@ function cleanModel(model?: unknown): string {
   return typeof model === "string" ? model.trim() : "";
 }
 
-function lastModelFilePath(): string | null {
-  try {
-    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
-    if (!home) return null;
-    return `${home.replace(/\/+$/, "")}/${LAST_MODEL_PATH}`;
-  } catch {
-    return null;
-  }
-}
-
 function readLastModel(): string {
-  try {
-    const path = lastModelFilePath();
-    if (!path) return "";
-    const raw = host.readFile(path);
-    if (!raw) return "";
-    const state = JSON.parse(raw) as LastModelState;
-    return cleanModel(state && state.lastModel);
-  } catch {
-    return "";
-  }
+  const state = parseJson<LastModelState | null>(readDataFile(LAST_MODEL_FILE) || "", null);
+  return cleanModel(state && state.lastModel);
 }
 
 function rememberLastModel(model: string): void {
   const lastModel = cleanModel(model);
-  if (!lastModel) return;
-  try {
-    const path = lastModelFilePath();
-    if (!path) return;
-    const slash = path.lastIndexOf("/");
-    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
-    host.writeFile(path, JSON.stringify({ lastModel }));
-  } catch {
-    // Best-effort persistence must never break chat.
-  }
-}
-
-function authoredPromptsFilePath(): string | null {
-  try {
-    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
-    if (!home) return null;
-    return `${home.replace(/\/+$/, "")}/${AUTHORED_PROMPTS_PATH}`;
-  } catch {
-    return null;
-  }
+  if (lastModel) writeDataFile(LAST_MODEL_FILE, JSON.stringify({ lastModel }));
 }
 
 function readAuthoredPrompts(): Record<string, string> {
-  try {
-    const path = authoredPromptsFilePath();
-    if (!path) return {};
-    const raw = host.readFile(path);
-    if (!raw) return {};
-    const data = JSON.parse(raw) as unknown;
-    if (!data || typeof data !== "object" || Array.isArray(data)) return {};
-    return data as Record<string, string>;
-  } catch {
-    return {};
-  }
+  const data = parseJson<unknown>(readDataFile(AUTHORED_PROMPTS_FILE) || "", null);
+  return data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, string>) : {};
 }
 
 function writeAuthoredPrompt(model: string, draft: string): void {
-  try {
-    const path = authoredPromptsFilePath();
-    if (!path) return;
-    const current = readAuthoredPrompts();
-    current[model] = draft;
-    const slash = path.lastIndexOf("/");
-    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
-    host.writeFile(path, JSON.stringify(current));
-  } catch {
-    // Best-effort persistence must never break chat.
-  }
+  const current = readAuthoredPrompts();
+  current[model] = draft;
+  writeDataFile(AUTHORED_PROMPTS_FILE, JSON.stringify(current));
 }
 
 // Persist a draft as the authored prompt for `model` AND apply it to the live
@@ -352,8 +317,12 @@ function defaultSystemPrompt(all: Preset[]): string {
   return p && typeof p.systemPrompt === "string" ? p.systemPrompt : "";
 }
 
+function sessionEpoch(): string {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
 function nextId(s: Session, prefix = "lmstudio"): string {
-  const id = `${prefix}-${s.seq}`;
+  const id = `${prefix}-${s.epoch}-${s.seq}`;
   s.seq += 1;
   return id;
 }
@@ -493,29 +462,78 @@ function pollFetchStream(jobId: string): StreamPoll {
   });
 }
 
-function emitToolCall(s: Session, call: ToolCall): string {
+function emitToolCall(s: Session, entry: ToolParseEntry): string {
+  const call = entry.call;
   const toolId = nextId(s, `lmstudio-tool-${call.tool}`);
   const toolArgs = JSON.stringify(call.args);
-  append(s, "tool_call", toolContent(call), toolId, {
+  const extras: Record<string, unknown> = {
     toolName: call.tool,
     toolInput: call.args,
     toolArgs,
     toolId,
     collapsed: true,
     provider: "lmstudio",
-  });
+  };
+  if (entry.callId) Object.assign(extras, { callId: entry.callId, replyId: entry.replyId || "" });
+  append(s, "tool_call", toolContent(call), toolId, extras);
   return toolId;
 }
 
-function emitToolResult(s: Session, call: ToolCall, result: unknown, toolId?: string): void {
+function emitToolResult(s: Session, call: ToolCall, result: unknown, toolId?: string, callId?: string): void {
   const formatted = formatToolResult(call, result);
-  append(s, "tool_result", formatted, undefined, {
-    toolId,
-    toolResult: formatted,
-    collapsed: true,
-    provider: "lmstudio",
-  });
-  s.pendingInputs.push(`tool_result:\n${formatted}`);
+  const extras: Record<string, unknown> = { toolId, toolResult: formatted, collapsed: true, provider: "lmstudio" };
+  if (callId) extras.callId = callId;
+  append(s, "tool_result", formatted, undefined, extras);
+  s.roundResults.push(formatted);
+}
+
+// The host does not reopen live sessions when the plugin VM reloads; revive one from its saved route.
+function sessionFor(sid: string): Session | undefined {
+  const live = sessions.get(sid);
+  if (live) return live;
+  const saved = savedSession(sid);
+  if (!saved) return undefined;
+  const s = resolveSession({ tabId: sid, model: saved.model, preset: saved.preset } as unknown as ChatBackendOpenSessionCtx);
+  if (s.charterError) return undefined;
+  s.cursorReset = true;
+  append(s, "system", "Router reloaded: earlier turns of this tab are no longer in the model's context.");
+  sessions.set(sid, s);
+  return s;
+}
+
+function refreshRoute(s: Session): void {
+  const router = snapshot();
+  const target = reroute(s.route, { providerId: s.provider ? s.provider.id : null, model: s.model }, router.providers, router.defaultProvider);
+  if (!target.provider) {
+    s.routeError = target.error || "no enabled provider";
+    return;
+  }
+  if (!s.provider || s.provider.id !== target.provider.id || s.model !== target.model) s.previousResponseId = null;
+  s.provider = target.provider;
+  s.model = target.model;
+  s.routeError = null;
+}
+
+function reportedModel(s: Session): string {
+  return s.provider ? sessionModelId(s) : s.route.raw;
+}
+
+function requestSystem(s: Session): string {
+  if (s.mode === "watcher" || (s.engine && s.engine.kind === "machine")) return s.systemPrompt;
+  return withDomiosContext(s.systemPrompt);
+}
+
+function routesNatively(s: Session): boolean {
+  return !!s.provider && s.provider.kind !== "lmstudio" && s.currentRun !== "watcher" && s.mode !== "watcher";
+}
+
+// Stateless routes rebuild the whole transcript (results included); LM Studio chains on previous_response_id and needs them as input.
+function queueContinuation(s: Session): void {
+  const results = s.roundResults;
+  s.roundResults = [];
+  if (!results.length) return;
+  const stateless = !!s.provider && s.provider.kind !== "lmstudio" && s.currentRun !== "watcher";
+  s.pendingInputs.push(stateless ? "" : results.map((r) => `tool_result:\n${r}`).join("\n\n"));
 }
 
 function promptVariantForModel(modelId: string, generalPrompt: string): string {
@@ -528,48 +546,13 @@ function systemPromptForModel(generalPrompt: string, modelId: string): string {
   return promptVariantForModel(modelId, generalPrompt);
 }
 
-// Native streaming is SSE: `event: <name>` + `data: {json}` blocks separated by
-// blank lines. The answer is the message.* deltas; reasoning.* is the model's
-// private thinking (surfaced separately, never mixed into the answer); chat.end
-// carries the response_id used for previous_response_id continuation.
-function consumeSseEvent(stream: StreamState, segment: string): void {
-  if (!segment) return;
-  let dataStr = "";
-  for (const line of segment.split(/\r?\n/)) {
-    if (line.indexOf("data:") !== 0) continue;
-    let value = line.slice(5);
-    if (value.charAt(0) === " ") value = value.slice(1);
-    dataStr += value;
-  }
-  if (!dataStr) return;
-  const data = parseJson<{ type?: unknown; content?: unknown; result?: { response_id?: unknown } } | null>(
-    dataStr,
-    null,
-  );
-  if (!data || typeof data !== "object") return;
-  const type = typeof data.type === "string" ? data.type : "";
-  if (type.indexOf("message.") === 0 && typeof data.content === "string") {
-    stream.content += data.content;
-  } else if (type.indexOf("reasoning.") === 0 && typeof data.content === "string") {
-    stream.reasoning += data.content;
-  } else if (type === "chat.end") {
-    const result = (data.result || {}) as { response_id?: unknown; stats?: Record<string, unknown> };
-    if (typeof result.response_id === "string") stream.responseId = result.response_id;
-    const stats = result.stats;
-    if (stats && typeof stats === "object") {
-      const input = typeof stats.input_tokens === "number" ? stats.input_tokens : 0;
-      const output = typeof stats.total_output_tokens === "number" ? stats.total_output_tokens : 0;
-      if (input || output) stream.usage = { input, cachedInput: 0, cacheWrite: 0, output };
-    }
-  }
-}
-
 function consumeRouterEvents(stream: StreamState, flush: boolean): void {
   const { events, rest } = splitSse(stream.buffer, flush);
   stream.buffer = rest;
   const acc: StreamDelta = emptyDelta();
   for (const ev of events) {
     if (stream.kind === "anthropic") applyAnthropicEvent(acc, ev);
+    else if (stream.kind === "lmstudio") applyNativeEvent(acc, ev);
     else applyOpenAiEvent(acc, ev);
   }
   stream.content += acc.content;
@@ -577,17 +560,7 @@ function consumeRouterEvents(stream: StreamState, flush: boolean): void {
   if (acc.responseId && !stream.responseId) stream.responseId = acc.responseId;
   if (acc.error) stream.error = acc.error;
   stream.usage = mergeUsage(stream.usage, acc.usage);
-}
-
-// Drain complete SSE events from the buffer. Events are terminated by a blank
-// line; an incomplete trailing event (a `data:` JSON split across chunk
-// boundaries) is retained until the next chunk completes it. On `flush` the
-// remaining buffer is treated as a final, possibly unterminated, event.
-function parseSse(stream: StreamState, flush: boolean): void {
-  const segments = stream.buffer.split(/\r?\n\r?\n/);
-  // When not flushing, the final segment may be a partial event — keep it.
-  stream.buffer = flush ? "" : segments.pop() ?? "";
-  for (const seg of segments) consumeSseEvent(stream, seg);
+  mergeToolParts(stream.toolParts, acc.toolParts);
 }
 
 function assembledContext(s: Session): string {
@@ -637,19 +610,9 @@ function providerLabel(s: Session): string {
   return s.provider && s.provider.id !== LMSTUDIO_PROVIDER_ID ? s.provider.name : "LM Studio";
 }
 
-// Stateless APIs get the whole visible conversation each turn; tool results ride as user turns.
+// Stateless APIs get the whole visible conversation each turn.
 function routerTurns(s: Session, input: string): ChatTurn[] {
-  const turns: ChatTurn[] = [];
-  for (const m of s.messages) {
-    if (m.type === "user") {
-      if (m.content.indexOf(SYSTEM_PROMPT_MARKER) === 0) continue;
-      turns.push({ role: "user", content: m.content });
-    } else if (m.type === "assistant") {
-      turns.push({ role: "assistant", content: m.content });
-    } else if (m.type === "tool_result") {
-      turns.push({ role: "user", content: `tool_result:\n${m.content}` });
-    }
-  }
+  const turns = transcriptTurns(s.messages, (content) => content.indexOf(SYSTEM_PROMPT_MARKER) === 0);
   const last = turns[turns.length - 1];
   if (input && !(last && last.role === "user" && last.content === input)) turns.push({ role: "user", content: input });
   return turns;
@@ -666,7 +629,7 @@ function engineToRouter(messages: EngineMessage[]): { system: string; turns: Cha
 }
 
 function startRouterCall(s: Session, provider: ProviderConfig, input: string, opts?: { messages?: EngineMessage[]; watcher?: boolean }): void {
-  let system = s.systemPrompt;
+  let system = requestSystem(s);
   let turns: ChatTurn[];
   if (opts?.messages) {
     const converted = engineToRouter(opts.messages);
@@ -678,7 +641,8 @@ function startRouterCall(s: Session, provider: ProviderConfig, input: string, op
     turns = routerTurns(s, input);
   }
   const key = getKey(provider);
-  const req = chatRequest(provider, key, { model: s.model, system, turns, params: s.params });
+  const tools = !opts?.watcher && s.mode !== "watcher";
+  const req = chatRequest(provider, key, { model: s.model, system, turns, params: s.params, tools });
   const started = startFetchStream({ url: req.url, method: req.method, headers: req.headers, body: req.body || "", timeoutMs: req.timeoutMs });
   if (!started.jobId) {
     append(s, "system", `${provider.name} stream error: ${redact(started.error || "missing jobId", key)}`);
@@ -700,12 +664,14 @@ function beginStream(s: Session, jobId: string, kind: ProviderConfig["kind"], wa
     kind,
     usage: null,
     error: null,
+    toolParts: [],
   };
   s.currentRun = watcher || s.mode === "watcher" ? "watcher" : "interactive";
   s.done = false;
 }
 
 function startLmStudioCall(s: Session, input: string, opts?: { messages?: EngineMessage[]; watcher?: boolean }): void {
+  refreshRoute(s);
   if (s.routeError) {
     append(s, "system", `Router error: ${s.routeError}`);
     s.done = true;
@@ -739,7 +705,7 @@ function startLmStudioCall(s: Session, input: string, opts?: { messages?: Engine
   }
   const body: Record<string, unknown> = {
     model: s.model,
-    system_prompt: s.systemPrompt,
+    system_prompt: opts?.messages ? s.systemPrompt : requestSystem(s),
     input: requestInput,
     stream: true,
     ...s.params,
@@ -763,7 +729,7 @@ function startLmStudioCall(s: Session, input: string, opts?: { messages?: Engine
 }
 
 function startNextIfIdle(s: Session): void {
-  if (!s.stream && s.pendingInputs.length) {
+  if (!s.stream && !s.pendingExec && !s.pendingTools && s.pendingInputs.length) {
     const next = s.pendingInputs.shift() || "";
     const queued = parseJson<{ watcherMessages?: EngineMessage[]; machineMessages?: EngineMessage[] } | null>(next, null);
     if (queued && Array.isArray(queued.watcherMessages)) {
@@ -781,14 +747,37 @@ function finishAssistantMessage(
   content: string,
   responseId: string | null,
   messageId: string,
+  nativeCalls: NativeToolCall[],
 ): void {
-  if (s.currentRun === "watcher") {
-    finishLoopAssistantMessage(s, content, responseId, messageId);
-    return;
-  }
+  if (s.currentRun !== "watcher" && responseId && !(s.engine && s.engine.kind === "machine")) s.previousResponseId = responseId;
+  finishLoopAssistantMessage(s, content, responseId, messageId, nativeCalls);
+}
 
-  if (responseId && !(s.engine && s.engine.kind === "machine")) s.previousResponseId = responseId;
-  finishLoopAssistantMessage(s, content, responseId, messageId);
+function nativeEntry(call: NativeToolCall, replyId: string): ToolParseEntry {
+  let raw: unknown = {};
+  try {
+    raw = JSON.parse(call.arguments);
+  } catch {
+    return { call: { tool: call.name, args: {} }, callId: call.id, replyId, error: `${call.name} arguments are not valid JSON` };
+  }
+  const checked = checkToolArgs(call.name, raw);
+  if (checked.ok) return { call: { tool: call.name, args: checked.args }, callId: call.id, replyId };
+  const args = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  return { call: { tool: call.name, args }, callId: call.id, replyId, error: checked.error };
+}
+
+// Native calls win; then Qwen/Hermes text forms; then the host parser for fenced codeterm-tool JSON.
+function toolEntries(s: Session, content: string, messageId: string, nativeCalls: NativeToolCall[]) {
+  if (nativeCalls.length) return { entries: nativeCalls.map((c) => nativeEntry(c, messageId)), cleaned: content, status: "ok" as const, reason: undefined };
+  const text = parseTextToolCalls(content);
+  if (text.status === "none") return parseToolEntries(content);
+  const native = routesNatively(s);
+  const entries: ToolParseEntry[] = text.calls.map((call) => {
+    const entry: ToolParseEntry = { call: { tool: call.tool, args: call.args } };
+    if (native) Object.assign(entry, { callId: nextId(s, "call"), replyId: messageId });
+    return entry;
+  });
+  return { entries, cleaned: text.cleaned, status: text.status, reason: text.reason };
 }
 
 function finishLoopAssistantMessage(
@@ -796,12 +785,13 @@ function finishLoopAssistantMessage(
   content: string,
   responseId: string | null,
   messageId: string,
+  nativeCalls: NativeToolCall[],
 ): void {
   if (s.currentRun === "watcher") {
     s.watcherLastAssistant = content;
     if (responseId) s.previousResponseId = responseId;
   }
-  const { entries, cleaned, status, reason } = parseToolEntries(content);
+  const { entries, cleaned, status, reason } = toolEntries(s, content, messageId, nativeCalls);
   // A tool-call-shaped block that failed parse+repair: don't drop it silently
   // (the live Gemma bug — the model never learns and the reply never arrives).
   // Feed back a corrective note so the model resends a valid call, capping the
@@ -810,8 +800,8 @@ function finishLoopAssistantMessage(
     if (s.malformedRetries < MAX_MALFORMED_RETRIES) {
       s.malformedRetries += 1;
       s.pendingInputs.push(
-        `tool_result:\nERROR: your codeterm-tool JSON was invalid (${reason || "unparseable tool call"}). ` +
-          "Resend a single valid JSON tool call, or answer in plain text if no tool is needed.",
+        `tool_result:\nERROR: your tool call was invalid (${reason || "unparseable tool call"}). ` +
+          "Resend a single valid tool call, or answer in plain text if no tool is needed.",
       );
       // Leave s.done false: startNextIfIdle will start the retry continuation.
       return;
@@ -902,6 +892,7 @@ function advanceTools(s: Session): void {
     if (s.toolRounds >= MAX_TOOL_ROUNDS) {
       s.pendingInputs = [];
       s.pendingTools = null;
+      s.roundResults = [];
       if (!s.capReached) {
         append(s, "system", `Tool round cap (${MAX_TOOL_ROUNDS}) reached; stopping this turn.`);
         s.capReached = true;
@@ -911,24 +902,29 @@ function advanceTools(s: Session): void {
       return;
     }
     s.toolRounds += 1;
-    const toolId = emitToolCall(s, call);
+    const toolId = emitToolCall(s, entry);
+    if (entry.error) {
+      emitToolResult(s, call, { error: entry.error }, toolId, entry.callId);
+      continue;
+    }
     if (call.tool === "exec" || call.tool === "codeterm") {
       const shell = execShellCmd(call);
       if (shell.error) {
-        emitToolResult(s, call, { error: shell.error }, toolId);
+        emitToolResult(s, call, { error: shell.error }, toolId, entry.callId);
         continue;
       }
-      const started = startExecJob(shell.shellCmd as string);
+      const started = startExecJob(shell.shellCmd as string, s.tabId);
       if (started.jobId) {
-        s.pendingExec = { call, jobId: started.jobId, toolId };
+        s.pendingExec = { call, jobId: started.jobId, toolId, callId: entry.callId };
         return; // park until drainExec sees the job finish
       }
-      emitToolResult(s, call, { error: started.error || "host.exec.start failed" }, toolId);
+      emitToolResult(s, call, { error: started.error || "host.exec.start failed" }, toolId, entry.callId);
       continue;
     }
-    emitToolResult(s, call, executeTool(call), toolId);
+    emitToolResult(s, call, executeTool(call), toolId, entry.callId);
   }
   s.pendingTools = null;
+  queueContinuation(s);
 }
 
 // Poll the in-flight async exec(s). Non-blocking: a not-done poll returns and we
@@ -941,7 +937,7 @@ function drainExec(s: Session): void {
     const finished = s.pendingExec;
     host.execClose(finished.jobId);
     s.pendingExec = null;
-    emitToolResult(s, finished.call, execResultFromPoll(poll), finished.toolId);
+    emitToolResult(s, finished.call, execResultFromPoll(poll), finished.toolId, finished.callId);
     advanceTools(s);
   }
 }
@@ -1015,11 +1011,8 @@ function pollStream(s: Session): void {
   }
 
   const chunks = Array.isArray(poll.chunks) ? poll.chunks : [];
-  if (chunks.length) {
-    stream.buffer += chunks.join("");
-    parseSse(stream, false);
-  }
-  if (poll.done) parseSse(stream, true);
+  if (chunks.length) stream.buffer += chunks.join("");
+  consumeRouterEvents(stream, !!poll.done);
   publishStream(s, stream, !!poll.done);
 }
 
@@ -1085,7 +1078,7 @@ function publishStream(s: Session, stream: StreamState, done: boolean): void {
     host.fetchStreamClose(stream.jobId);
     s.stream = null;
     emitUsage(s, stream.usage, stream.messageId);
-    finishAssistantMessage(s, stream.content, stream.kind === "lmstudio" ? stream.responseId : null, stream.messageId);
+    finishAssistantMessage(s, stream.content, stream.kind === "lmstudio" ? stream.responseId : null, stream.messageId, finishToolCalls(stream.toolParts));
   }
 }
 
@@ -1128,8 +1121,11 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
   }
   const effectiveSystemPrompt = mode === "watcher" ? "" : systemPrompt;
   return {
+    tabId: ctx.tabId,
     messages: [],
     seq: 0,
+    epoch: sessionEpoch(),
+    cursorReset: false,
     systemPrompt: effectiveSystemPrompt,
     mode,
     engine,
@@ -1141,6 +1137,7 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
     watcherLastAssistant: "",
     model: target.model,
     provider: target.provider,
+    route: { raw: model, presetProvider: model ? undefined : routerPreset && routerPreset.provider },
     routeError: target.error || null,
     params,
     previousResponseId: null,
@@ -1152,6 +1149,7 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
     malformedRetries: 0,
     pendingTools: null,
     pendingExec: null,
+    roundResults: [],
     pendingAuthor: null,
     charterError,
   };
@@ -1166,6 +1164,7 @@ const plugin: ChatBackend & {
   describeModelSwitch: (sessionId: string, targetModel: string) => ModelSwitchDescription;
   authorSystemPrompt: (sessionId: string, draft: string) => void;
   requestPromptAuthoring: (sessionId: string, instruction?: string) => AuthoringResult;
+  cancel: (sessionId: string) => void;
 } = {
   openSession(ctx) {
     const sid = ctx.tabId;
@@ -1181,11 +1180,12 @@ const plugin: ChatBackend & {
     }
     sessions.set(sid, s);
     rememberLastModel(sessionModelId(s));
+    if (s.mode !== "watcher") saveSession(sid, { model: reportedModel(s), preset: ctx.preset });
     return { sessionId: sid };
   },
 
   sendMessage(sid, text) {
-    const s = sessions.get(sid);
+    const s = sessionFor(sid);
     if (!s) return;
     if (s.mode === "watcher") {
       host.log("warn", `sendMessage ignored for watcher session ${sid}`);
@@ -1217,6 +1217,7 @@ const plugin: ChatBackend & {
     s.pendingInputs = [];
     s.pendingTools = null;
     s.pendingExec = null;
+    s.roundResults = [];
     s.stream = null;
     s.toolRounds = 0;
     s.capReached = false;
@@ -1240,7 +1241,8 @@ const plugin: ChatBackend & {
   poll(sid, cursor) {
     const s = sessions.get(sid);
     if (!s) return { messages: [], cursor: cursor ?? "0", done: true };
-    const from = Number(cursor ?? 0) || 0;
+    const from = s.cursorReset ? 0 : Number(cursor ?? 0) || 0;
+    s.cursorReset = false;
     // While a stream is live, its assistant/thinking entries grow in place (see
     // append upsert). Pin the cursor at the lowest live entry's index so the
     // next poll re-reads the grown content instead of slicing past it.
@@ -1254,16 +1256,49 @@ const plugin: ChatBackend & {
       }
     }
     const nextCursor = liveFrom >= 0 ? liveFrom : s.messages.length;
-    return {
+    const done = s.done && !s.stream && !s.pendingExec && !s.pendingAuthor && s.pendingInputs.length === 0;
+    const state = activityOf({
+      streaming: !!s.stream,
+      answering: !!s.stream && !!s.stream.content,
+      toolsRunning: !!s.pendingExec || !!s.pendingTools,
+      queued: !done,
+    });
+    const result = {
       messages: s.messages.slice(from),
       cursor: String(nextCursor),
-      done: s.done && !s.stream && !s.pendingExec && !s.pendingAuthor && s.pendingInputs.length === 0,
+      done,
+      activity: { state, statusLine: activityLine(sessionModelId(s), state) },
     };
+    return result;
+  },
+
+  cancel(sid: string): void {
+    const s = sessions.get(sid);
+    if (!s) return;
+    const busy = !!s.stream || !!s.pendingExec || !!s.pendingTools || s.pendingInputs.length > 0;
+    if (s.stream) {
+      host.fetchStreamClose(s.stream.jobId);
+      if (s.stream.content) append(s, "assistant", s.stream.content, s.stream.messageId);
+      s.stream = null;
+    }
+    if (s.pendingExec) {
+      host.execClose(s.pendingExec.jobId);
+      emitToolResult(s, s.pendingExec.call, { error: "cancelled" }, s.pendingExec.toolId, s.pendingExec.callId);
+      s.pendingExec = null;
+    }
+    s.pendingTools = null;
+    s.pendingInputs = [];
+    s.roundResults = [];
+    if (busy) append(s, "system", "Stopped.");
+    if (s.currentRun === "watcher") completeWatcherTick(s, null);
+    else s.done = true;
   },
 
   closeSession(sid) {
+    forgetSession(sid);
     const s = sessions.get(sid);
     if (s && s.stream) host.fetchStreamClose(s.stream.jobId);
+    if (s && s.pendingExec) host.execClose(s.pendingExec.jobId);
     sessions.delete(sid);
   },
 
@@ -1291,7 +1326,8 @@ const plugin: ChatBackend & {
 
   sessionInfo(sid): ChatSessionInfo & { systemPrompt?: string } {
     const s = sessions.get(sid);
-    return { model: s ? sessionModelId(s) || undefined : undefined, systemPrompt: s ? s.systemPrompt : undefined };
+    if (s) refreshRoute(s);
+    return { model: s ? reportedModel(s) || undefined : undefined, systemPrompt: s ? s.systemPrompt : undefined };
   },
 
   describeModelSwitch,
@@ -1361,6 +1397,8 @@ const plugin: ChatBackend & {
       append(s, "system", `Router error: ${target.error || `cannot route ${model}`}`);
       return;
     }
+    s.route = { raw: model.trim() };
+    saveSession(sid, { model: model.trim() });
     if (s.provider && s.provider.id === target.provider.id && s.model === target.model) return;
     s.provider = target.provider;
     s.model = target.model;
@@ -1387,4 +1425,5 @@ export default {
   viewCall,
   onAgentCommand,
   __test_resetRouter: resetModelCache,
+  __test_domiosContext: DOMIOS_CONTEXT,
 };

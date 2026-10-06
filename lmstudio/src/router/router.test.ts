@@ -33,9 +33,16 @@ import {
   validateProvider,
 } from "./config";
 import { capabilityBadges, formatContext, groupAndSearch, matchScore, parseModelList } from "./models";
-import { presetModelId, presetParams, qualifyModel, resolveModelTarget, splitModelId } from "./routing";
+import { presetModelId, presetParams, qualifyModel, reroute, resolveModelTarget, splitModelId } from "./routing";
 import { parseArgs } from "./verbs";
 import type { ChatTurn, ProviderConfig } from "./types";
+import { parseTextToolCalls } from "./textcalls";
+import { checkToolArgs, TOOL_SPECS } from "./toolspec";
+import { finishToolCalls, mergeToolParts, pairToolCalls } from "./toolwire";
+import { transcriptTurns } from "./transcript";
+import { nativeStatsUsage } from "./lmstudioNative";
+import { activityLine, activityOf } from "./activity";
+import { posixDir, toolShell } from "./instanceCli";
 
 const provider = (over: Partial<ProviderConfig>): ProviderConfig => ({
   id: "p",
@@ -336,4 +343,118 @@ test("agent verb args parse flags with values, equals and booleans", () => {
     positional: ["mimo", "openai", "https://x/v1"],
     flags: { name: "Xiaomi MiMo", "key-slot": "mimo_api_key", refresh: true },
   });
+});
+
+test("text fallback parses the exact MiMo strings with missing closing tags", () => {
+  const a = parseTextToolCalls("<tool_call><function=exec><parameter=cmd>codeterm pane list</tool_call>");
+  assert.deepEqual(a, { status: "ok", calls: [{ tool: "exec", args: { cmd: "codeterm pane list" } }], cleaned: "" });
+  const b = parseTextToolCalls("<tool_call><function=exec><parameter=cmd>codeterm --help</tool_call>");
+  assert.deepEqual(b.calls, [{ tool: "exec", args: { cmd: "codeterm --help" } }]);
+});
+
+test("text fallback parses closed Qwen XML, Hermes JSON and several calls in order", () => {
+  const xml = parseTextToolCalls("I'll check now.\n<tool_call>\n<function=write_file>\n<parameter=path>\na.txt\n</parameter>\n<parameter=content>\nl1\nl2\n</parameter>\n</function>\n</tool_call>");
+  assert.equal(xml.status, "ok");
+  assert.deepEqual(xml.calls, [{ tool: "write_file", args: { path: "a.txt", content: "l1\nl2" } }]);
+  assert.equal(xml.cleaned, "I'll check now.");
+  const json = parseTextToolCalls('<tool_call>{"name":"codeterm","arguments":{"args":"tab list"}}</tool_call><tool_call>{"name":"exec","arguments":"{\\"cmd\\":\\"ls\\"}"}</tool_call>');
+  assert.deepEqual(json.calls, [{ tool: "codeterm", args: { args: "tab list" } }, { tool: "exec", args: { cmd: "ls" } }]);
+});
+
+test("text fallback refuses undeclared tools and missing args without returning calls", () => {
+  const unknown = parseTextToolCalls("<tool_call><function=shell><parameter=cmd>rm -rf /</parameter></function></tool_call>");
+  assert.equal(unknown.status, "malformed");
+  assert.deepEqual(unknown.calls, []);
+  const missing = parseTextToolCalls("<tool_call><function=exec></function></tool_call>");
+  assert.equal(missing.status, "malformed");
+  const mixed = parseTextToolCalls("<tool_call><function=exec><parameter=cmd>ls</tool_call><tool_call><function=nope></tool_call>");
+  assert.deepEqual(mixed.calls, [], "one bad block executes nothing from the reply");
+  assert.equal(parseTextToolCalls("plain answer").status, "none");
+});
+
+test("tool args keep declared params only and require the required ones", () => {
+  assert.deepEqual(checkToolArgs("exec", { cmd: "ls", extra: "x" }), { ok: true, args: { cmd: "ls" } });
+  assert.equal(checkToolArgs("exec", {}).ok, false);
+  assert.equal(checkToolArgs("nope", { cmd: "ls" }).ok, false);
+  const names = TOOL_SPECS.map((t) => t.name);
+  const openai = openAiBody({ model: "m", system: "", turns: [{ role: "user", content: "hi" }], params: {}, tools: true });
+  assert.deepEqual((openai.tools as { function: { name: string } }[]).map((t) => t.function.name), names);
+  assert.equal(openAiBody({ model: "m", system: "", turns: [{ role: "user", content: "hi" }], params: {} }).tools, undefined);
+  const anthropic = anthropicBody({ model: "m", system: "", turns: [{ role: "user", content: "hi" }], params: {}, tools: true });
+  assert.deepEqual((anthropic.tools as { name: string }[]).map((t) => t.name), names);
+  assert.deepEqual(anthropic.tool_choice, { type: "auto" });
+});
+
+test("streamed tool-call fragments merge by index into whole calls", () => {
+  const acc = emptyDelta();
+  applyOpenAiEvent(acc, { event: "", data: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "c0", function: { name: "exec", arguments: "{\"cmd\":" } }] } }] }) });
+  applyOpenAiEvent(acc, { event: "", data: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "\"ls\"}" } }] } }] }) });
+  const anth = emptyDelta();
+  applyAnthropicEvent(anth, { event: "", data: JSON.stringify({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "t1", name: "codeterm", input: {} } }) });
+  applyAnthropicEvent(anth, { event: "", data: JSON.stringify({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"args\":\"tab list\"}" } }) });
+  const parts = [] as typeof acc.toolParts;
+  mergeToolParts(parts, acc.toolParts);
+  assert.deepEqual(finishToolCalls(parts), [{ id: "c0", name: "exec", arguments: "{\"cmd\":\"ls\"}" }]);
+  const aparts = [] as typeof acc.toolParts;
+  mergeToolParts(aparts, anth.toolParts);
+  assert.deepEqual(finishToolCalls(aparts), [{ id: "t1", name: "codeterm", arguments: "{\"args\":\"tab list\"}" }]);
+});
+
+test("transcript rows replay native calls grouped per reply and drop unanswered calls", () => {
+  const rows = [
+    { id: "u", type: "user", content: "go" },
+    { id: "r1", type: "assistant", content: "Checking." },
+    { id: "k1", type: "tool_call", content: "", callId: "a", replyId: "r1", toolName: "exec", toolArgs: "{\"cmd\":\"ls\"}" },
+    { id: "k2", type: "tool_result", content: "out-a", callId: "a" },
+    { id: "k3", type: "tool_call", content: "", callId: "b", replyId: "r1", toolName: "exec", toolArgs: "{\"cmd\":\"pwd\"}" },
+    { id: "k4", type: "tool_result", content: "out-b", callId: "b" },
+    { id: "k5", type: "tool_call", content: "", callId: "c", replyId: "r2", toolName: "exec", toolArgs: "{}" },
+    { id: "k6", type: "tool_result", content: "text-protocol" },
+  ];
+  const turns = pairToolCalls(transcriptTurns(rows, () => false));
+  assert.deepEqual(turns.map((t) => [t.role, t.content, (t.toolCalls || []).map((c) => c.id).join(","), t.toolCallId || ""]), [
+    ["user", "go", "", ""],
+    ["assistant", "Checking.", "a,b", ""],
+    ["tool", "out-a", "", "a"],
+    ["tool", "out-b", "", "b"],
+    ["assistant", "", "", ""],
+    ["user", "tool_result:\ntext-protocol", "", ""],
+  ]);
+  const wire = openAiBody({ model: "m", system: "", turns: transcriptTurns(rows, () => false), params: {} }).messages as { role: string }[];
+  assert.deepEqual(wire.map((m) => m.role), ["user", "assistant", "tool", "tool", "user"]);
+});
+
+test("LM Studio native stats normalize cached input in every reported shape", () => {
+  assert.deepEqual(nativeStatsUsage({ input_tokens: 100, total_output_tokens: 5, cached_tokens: 64 }), { input: 100, cachedInput: 64, cacheWrite: 0, output: 5 });
+  assert.deepEqual(nativeStatsUsage({ input_tokens: 100, total_output_tokens: 5, prompt_tokens_details: { cached_tokens: 30 } })?.cachedInput, 30);
+  assert.deepEqual(nativeStatsUsage({ input_tokens: 100, output_tokens: 5, cache_read_input_tokens: 20, cache_creation_input_tokens: 7 }), { input: 100, cachedInput: 20, cacheWrite: 7, output: 5 });
+  assert.equal(nativeStatsUsage({}), null);
+});
+
+test("activity moves thinking → working → idle and the line names router, model and state", () => {
+  const idle = { streaming: false, answering: false, toolsRunning: false, queued: false };
+  assert.equal(activityOf({ ...idle, queued: true }), "thinking");
+  assert.equal(activityOf({ ...idle, streaming: true, queued: true }), "thinking");
+  assert.equal(activityOf({ ...idle, streaming: true, answering: true, queued: true }), "working");
+  assert.equal(activityOf({ ...idle, toolsRunning: true, queued: true }), "working");
+  assert.equal(activityOf(idle), "idle");
+  assert.equal(activityLine("mimo::m", "idle"), "");
+  assert.deepEqual(activityLine("mimo::m", "thinking").split(" · ").slice(1), ["mimo::m", "Thinking"]);
+});
+
+test("reroute follows the live registry and keeps an auto-picked model only on the same provider", () => {
+  const mimo = provider({ id: "mimo", kind: "openai", baseUrl: "https://a/v1" });
+  const lms = provider({ id: "lmstudio", kind: "lmstudio", baseUrl: "http://localhost:1234" });
+  assert.equal(reroute({ raw: "mimo::m1" }, { providerId: null, model: "" }, [lms], "lmstudio").error, 'unknown provider "mimo"');
+  assert.deepEqual(reroute({ raw: "mimo::m1" }, { providerId: null, model: "" }, [lms, mimo], "lmstudio"), { provider: mimo, model: "m1" });
+  assert.equal(reroute({ raw: "" }, { providerId: "lmstudio", model: "auto" }, [lms], "lmstudio").model, "auto");
+  assert.equal(reroute({ raw: "", presetProvider: "mimo" }, { providerId: "lmstudio", model: "auto" }, [lms, mimo], "lmstudio").model, "");
+});
+
+test("tool shells put the instance CLI first on PATH in Git Bash form", () => {
+  assert.equal(posixDir("C:\\Users\\me\\.codeterm-dev\\bin"), "/c/Users/me/.codeterm-dev/bin");
+  assert.equal(posixDir("/Users/me/.codeterm/bin/"), "/Users/me/.codeterm/bin");
+  assert.equal(toolShell("codeterm tab list", null), "codeterm tab list");
+  assert.equal(toolShell("codeterm tab current", null, "46cae825"), "export CODETERM_TAB_ID='46cae825'; codeterm tab current");
+  assert.equal(toolShell("codeterm tab list", "C:\\Users\\me\\.codeterm-dev\\bin"), "export PATH='/c/Users/me/.codeterm-dev/bin':\"$PATH\"; codeterm tab list");
 });

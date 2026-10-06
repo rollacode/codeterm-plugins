@@ -16,7 +16,7 @@ When the snapshot is ambiguous or missing key evidence, use at most the tools ne
 - `exec`: run a shell command.
 - `read_file`: read a file.
 - `write_file`: write a file.
-- `codeterm`: run a CodeTerm command, such as `codeterm plan get` or `codeterm pane status --pane <id>`.
+- `codeterm`: run a CodeTerm command, such as `codeterm plan get` or `codeterm tab status --tab <id>`.
 - `mem_search`: search memory.
 - `spawn_agent`: start an agent only if explicitly needed for investigation.
 
@@ -196,7 +196,7 @@ Observation (abbreviated):
 The worker looks stale, but `status: Unknown` and missing `chatTail` are insufficient evidence. First check the pane:
 
 ```codeterm-tool
-{"tool":"codeterm","args":{"args":"pane status --pane w1"}}
+{"tool":"codeterm","args":{"args":"tab status --tab w1"}}
 ```
 
 Tool result (abbreviated): `{"status":"Working","last_activity_ms":1700000590000,"prompt":"running focused tests"}`

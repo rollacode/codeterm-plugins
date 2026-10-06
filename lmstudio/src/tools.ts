@@ -1,3 +1,5 @@
+import { instanceBinDir, toolShell } from "./router/instanceCli";
+
 export interface ToolCall {
   tool: string;
   args: Record<string, unknown>;
@@ -7,10 +9,16 @@ export interface PendingExec {
   call: ToolCall;
   jobId: string;
   toolId?: string;
+  callId?: string;
 }
 
 export interface ToolParseEntry {
   call: ToolCall;
+  /** Provider call id; set when the call replays as a native tool call. */
+  callId?: string;
+  replyId?: string;
+  /** Rejected before execution; surfaced as the tool result. */
+  error?: string;
 }
 
 interface ParsedToolCall {
@@ -70,9 +78,9 @@ export function createToolRuntime(
     error?: string;
   }
 
-  function startExecJob(shellCmd: string): ExecStartResult {
+  function startExecJob(shellCmd: string, tabId?: string): ExecStartResult {
     return parseJson<ExecStartResult>(
-      host.execStart(JSON.stringify({ bin: "sh", args: ["-lc", shellCmd], timeoutMs: 120000 })),
+      host.execStart(JSON.stringify({ bin: "sh", args: ["-lc", toolShell(shellCmd, instanceBinDir(), tabId)], timeoutMs: 120000 })),
       { error: "host.exec.start returned non-JSON" },
     );
   }

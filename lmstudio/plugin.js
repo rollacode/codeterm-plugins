@@ -684,6 +684,33 @@ var decisionModel = {
 };
 var decision_default = decisionModel;
 
+// lmstudio/src/router/instanceCli.ts
+function posixDir(dir) {
+  const unified = dir.replace(/\\/g, "/").replace(/\/+$/, "");
+  const drive = /^([A-Za-z]):\/(.*)$/.exec(unified);
+  return drive ? `/${drive[1].toLowerCase()}/${drive[2]}` : unified;
+}
+function shellQuote(s2) {
+  return `'${s2.replace(/'/g, `'\\''`)}'`;
+}
+function toolShell(shellCmd, binDir, tabId) {
+  const prefix = [];
+  if (binDir) prefix.push(`export PATH=${shellQuote(posixDir(binDir))}:"$PATH";`);
+  if (tabId) prefix.push(`export CODETERM_TAB_ID=${shellQuote(tabId)};`);
+  return prefix.length ? `${prefix.join(" ")} ${shellCmd}` : shellCmd;
+}
+function instanceBinDir() {
+  try {
+    const dir = host.fs && typeof host.fs.expandHome === "function" ? host.fs.expandHome("~/.codeterm/bin") : null;
+    if (!dir) return null;
+    const exe = String(host.platform ? host.platform() : "").toLowerCase().indexOf("win") === 0 ? "codeterm.exe" : "codeterm";
+    const sep = dir.indexOf("\\") >= 0 ? "\\" : "/";
+    return host.fileExists(`${dir.replace(/[\\/]+$/, "")}${sep}${exe}`) ? dir : null;
+  } catch {
+    return null;
+  }
+}
+
 // lmstudio/src/tools.ts
 var TOOL_SCHEMA_JSON = JSON.stringify({
   tools: [
@@ -699,7 +726,7 @@ var TOOL_SCHEMA_JSON = JSON.stringify({
 var FENCE_RE = /```[^\r\n`]*\r?\n[\s\S]*?```/g;
 var TOOL_WRAPPER_RE = /<\s*\|?\/?\s*(?:tool_call|tool▁call)\s*\|?\s*>/gi;
 function createToolRuntime(host2, parseJson3) {
-  function shellQuote(s2) {
+  function shellQuote2(s2) {
     return `'${String(s2).replace(/'/g, `'\\''`)}'`;
   }
   function execShellCmd2(call) {
@@ -707,15 +734,15 @@ function createToolRuntime(host2, parseJson3) {
       const cmd = typeof call.args.cmd === "string" ? call.args.cmd : "";
       const cwd = typeof call.args.cwd === "string" ? call.args.cwd : void 0;
       if (!cmd) return { error: "exec requires args.cmd" };
-      return { shellCmd: cwd && cwd.trim() ? `cd ${shellQuote(cwd)} && ${cmd}` : cmd };
+      return { shellCmd: cwd && cwd.trim() ? `cd ${shellQuote2(cwd)} && ${cmd}` : cmd };
     }
     const args = typeof call.args.args === "string" ? call.args.args : "";
     if (!args) return { error: "codeterm requires args.args" };
     return { shellCmd: `codeterm ${args}` };
   }
-  function startExecJob2(shellCmd) {
+  function startExecJob2(shellCmd, tabId) {
     return parseJson3(
-      host2.execStart(JSON.stringify({ bin: "sh", args: ["-lc", shellCmd], timeoutMs: 12e4 })),
+      host2.execStart(JSON.stringify({ bin: "sh", args: ["-lc", toolShell(shellCmd, instanceBinDir(), tabId)], timeoutMs: 12e4 })),
       { error: "host.exec.start returned non-JSON" }
     );
   }
@@ -858,7 +885,7 @@ function createToolRuntime(host2, parseJson3) {
 }
 
 // lmstudio/prompts/watcher-orchestration.md
-var watcher_orchestration_default = '# Orchestration health watcher\r\n\r\nYou observe a **read-only snapshot** of an orchestration group (orchestrator + its managers and workers). Decide whether work is **progressing** or **stalled**. When stalled, you may request a **nudge** to the stuck pane.\r\n\r\nYou may investigate with tools when observations are insufficient, then you must finish with **ONLY the verdict JSON** as the final assistant message (no markdown fences, no prose before or after, and no tool block in the final message).\r\n\r\n## Tools\r\n\r\n**Tool discipline:** call at most ONE tool per tick, only when the snapshot is\r\ninsufficient. After a `tool_result` arrives, your NEXT message MUST be the\r\nverdict JSON \u2014 never another tool call for the same question.\r\n\r\n\r\nWhen the snapshot is ambiguous or missing key evidence, use at most the tools needed to clarify it. Available curated tools:\r\n\r\n- `exec`: run a shell command.\r\n- `read_file`: read a file.\r\n- `write_file`: write a file.\r\n- `codeterm`: run a CodeTerm command, such as `codeterm plan get` or `codeterm pane status --pane <id>`.\r\n- `mem_search`: search memory.\r\n- `spawn_agent`: start an agent only if explicitly needed for investigation.\r\n\r\nTool calls use fenced `codeterm-tool` JSON blocks. After each tool result, continue reasoning internally and either call another needed tool or finish with the verdict JSON. Use tools for facts you cannot infer reliably from `observations`, for example checking a pane\'s status or the current plan. Do not include a tool block in the final verdict message.\r\n\r\n## Input you receive each tick\r\n\r\nThe user message is JSON: `{ "state": <your prior state>, "input": { "tick", "nowMs", "state", "observations" } }`.\r\n\r\n`observations` is the host-assembled snapshot. Typical shape:\r\n\r\n```json\r\n{\r\n  "orchestrator_id": "abc123",\r\n  "panes": [\r\n    {\r\n      "pane_id": "abc123",\r\n      "title": "Orchestrator",\r\n      "role": "Orchestrator",\r\n      "status": "Working",\r\n      "last_activity_ms": 1700000000000\r\n    },\r\n    {\r\n      "pane_id": "def456",\r\n      "title": "Worker Alpha",\r\n      "role": "Worker",\r\n      "role_profile": null,\r\n      "status": "Working",\r\n      "last_activity_ms": 1700000005000,\r\n      "chatTail": [\r\n        { "id": "m1", "kind": "user", "content": "finish the task" },\r\n        { "id": "m2", "kind": "assistant", "content": "working on it\u2026" }\r\n      ]\r\n    }\r\n  ],\r\n  "reports": [\r\n    {\r\n      "id": "r1",\r\n      "from_pane_id": "def456",\r\n      "from_title": "Worker Alpha",\r\n      "message": "Completed step 1",\r\n      "timestamp": 1700000006000,\r\n      "status": "Done"\r\n    }\r\n  ]\r\n}\r\n```\r\n\r\nFields you care about on each pane:\r\n\r\n| Field | Meaning |\r\n|---|---|\r\n| `pane_id` | Target for nudge actions |\r\n| `title` | Human label |\r\n| `role` | `Orchestrator`, `Manager`, or `Worker` (may be absent) |\r\n| `role_profile` | Manager specialization (`planner`, `watcher`, \u2026) or null |\r\n| `status` | `Working`, `Waiting`, `Idle`, `Dead`, or `Unknown` |\r\n| `last_activity_ms` | Host clock when the pane last did something meaningful |\r\n| `chatTail` | Optional: last N parsed chat messages as `{id, kind, content}` objects |\r\n\r\nTop-level `orchestrator_id` identifies the orchestrator; the orchestrator also appears as a row in `panes[]`. `reports` is optional (when observation config enables it).\r\n\r\n## Progressing vs stalled\r\n\r\n**Progressing (`status: "ok"`)** \u2014 recent activity and forward motion:\r\n\r\n- `last_activity_ms` on key panes is within ~3 minutes of `nowMs`, **or**\r\n- worker/manager `status` values are advancing (e.g. `Waiting` \u2192 `Working`, `Working` with fresh `chatTail`), **or**\r\n- new agent reports arrive at the orchestrator with concrete progress.\r\n\r\n**Attention (`status: "attention"`)** \u2014 ambiguous or early warning:\r\n\r\n- activity is slowing but not clearly stuck yet, **or**\r\n- you lack enough data to judge (empty snapshot, missing tails).\r\n\r\n**Stalled (`status: "stalled"`)** \u2014 the group needs a kick:\r\n\r\n- no meaningful activity on workers for ~5+ minutes while tasks should be active, **or**\r\n- a worker sits on the same status with no `chatTail` movement, **or**\r\n- the orchestrator is `Idle` while workers are `Waiting`/`Idle` with no progress, **or**\r\n- unread reports pile up at the orchestrator with no follow-up.\r\n\r\nWhen stalled, emit **at most one nudge** to the most stuck pane. Nudges must be:\r\n\r\n- **Short** (1\u20132 sentences)\r\n- **Evidence-based** (cite what you saw: idle time, status, last `chatTail` line)\r\n- **Addressed to that pane** (use its `pane_id` in the action)\r\n\r\nDo not nudge watchers or the orchestrator unless the orchestrator itself is clearly idle with pending work.\r\n\r\n## State\r\n\r\nUse `state` to remember lightweight notes across ticks (e.g. `{ "last_nudged": { "def456": 1700000000000 } }`). Keep it small.\r\n\r\n## Worked example 1 \u2014 progressing (ok)\r\n\r\nObservation (abbreviated):\r\n\r\n```json\r\n{\r\n  "tick": 2,\r\n  "nowMs": 1700000120000,\r\n  "observations": {\r\n    "orchestrator_id": "o1",\r\n    "panes": [\r\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000110000 },\r\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "role_profile": null, "status": "Working", "last_activity_ms": 1700000118000 }\r\n    ],\r\n    "reports": [\r\n      { "id": "r1", "from_pane_id": "w1", "from_title": "Worker", "message": "Implemented tests", "timestamp": 1700000119000, "status": "Partial" }\r\n    ]\r\n  }\r\n}\r\n```\r\n\r\nYour verdict:\r\n\r\n```json\r\n{"status":"ok","summary":"Worker active in last minute with a progress report.","state":{"seen_ticks":2},"actions":[]}\r\n```\r\n\r\n## Worked example 2 \u2014 stalled worker (one nudge)\r\n\r\nObservation (abbreviated):\r\n\r\n```json\r\n{\r\n  "tick": 5,\r\n  "nowMs": 1700000420000,\r\n  "observations": {\r\n    "orchestrator_id": "o1",\r\n    "panes": [\r\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Idle", "last_activity_ms": 1700000200000 },\r\n      {\r\n        "pane_id": "w1",\r\n        "title": "Worker",\r\n        "role": "Worker",\r\n        "role_profile": null,\r\n        "status": "Waiting",\r\n        "last_activity_ms": 1700000000000,\r\n        "chatTail": [\r\n          { "id": "m1", "kind": "user", "content": "run the tests" },\r\n          { "id": "m2", "kind": "assistant", "content": "I\'ll get to it\u2026" }\r\n        ]\r\n      }\r\n    ]\r\n  }\r\n}\r\n```\r\n\r\nWorker `w1` has been silent ~7 minutes (`nowMs - last_activity_ms` = 420000 ms) with `status: Waiting` and no new `chatTail`.\r\n\r\nYour verdict:\r\n\r\n```json\r\n{"status":"stalled","summary":"Worker w1 Waiting with no activity for 7+ minutes.","state":{"seen_ticks":5,"last_nudged":{"w1":1700000420000}},"actions":[{"kind":"nudge","pane":"w1","message":"Stalled ~7m on \'run the tests\' \u2014 status Waiting, no new chat since \'I\'ll get to it\u2026\'. Please run tests and report STATUS."}]}\r\n```\r\n\r\n## Worked example 3 \u2014 investigate with a codeterm tool, then verdict\r\n\r\nObservation (abbreviated):\r\n\r\n```json\r\n{\r\n  "tick": 8,\r\n  "nowMs": 1700000600000,\r\n  "observations": {\r\n    "orchestrator_id": "o1",\r\n    "panes": [\r\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000580000 },\r\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "status": "Unknown", "last_activity_ms": 1700000200000 }\r\n    ]\r\n  }\r\n}\r\n```\r\n\r\nThe worker looks stale, but `status: Unknown` and missing `chatTail` are insufficient evidence. First check the pane:\r\n\r\n```codeterm-tool\r\n{"tool":"codeterm","args":{"args":"pane status --pane w1"}}\r\n```\r\n\r\nTool result (abbreviated): `{"status":"Working","last_activity_ms":1700000590000,"prompt":"running focused tests"}`\r\n\r\nYour final message:\r\n\r\n```json\r\n{"status":"ok","summary":"Worker w1 is active after status check and is running focused tests.","state":{"seen_ticks":8},"actions":[]}\r\n```\r\n';
+var watcher_orchestration_default = '# Orchestration health watcher\n\nYou observe a **read-only snapshot** of an orchestration group (orchestrator + its managers and workers). Decide whether work is **progressing** or **stalled**. When stalled, you may request a **nudge** to the stuck pane.\n\nYou may investigate with tools when observations are insufficient, then you must finish with **ONLY the verdict JSON** as the final assistant message (no markdown fences, no prose before or after, and no tool block in the final message).\n\n## Tools\n\n**Tool discipline:** call at most ONE tool per tick, only when the snapshot is\ninsufficient. After a `tool_result` arrives, your NEXT message MUST be the\nverdict JSON \u2014 never another tool call for the same question.\n\n\nWhen the snapshot is ambiguous or missing key evidence, use at most the tools needed to clarify it. Available curated tools:\n\n- `exec`: run a shell command.\n- `read_file`: read a file.\n- `write_file`: write a file.\n- `codeterm`: run a CodeTerm command, such as `codeterm plan get` or `codeterm tab status --tab <id>`.\n- `mem_search`: search memory.\n- `spawn_agent`: start an agent only if explicitly needed for investigation.\n\nTool calls use fenced `codeterm-tool` JSON blocks. After each tool result, continue reasoning internally and either call another needed tool or finish with the verdict JSON. Use tools for facts you cannot infer reliably from `observations`, for example checking a pane\'s status or the current plan. Do not include a tool block in the final verdict message.\n\n## Input you receive each tick\n\nThe user message is JSON: `{ "state": <your prior state>, "input": { "tick", "nowMs", "state", "observations" } }`.\n\n`observations` is the host-assembled snapshot. Typical shape:\n\n```json\n{\n  "orchestrator_id": "abc123",\n  "panes": [\n    {\n      "pane_id": "abc123",\n      "title": "Orchestrator",\n      "role": "Orchestrator",\n      "status": "Working",\n      "last_activity_ms": 1700000000000\n    },\n    {\n      "pane_id": "def456",\n      "title": "Worker Alpha",\n      "role": "Worker",\n      "role_profile": null,\n      "status": "Working",\n      "last_activity_ms": 1700000005000,\n      "chatTail": [\n        { "id": "m1", "kind": "user", "content": "finish the task" },\n        { "id": "m2", "kind": "assistant", "content": "working on it\u2026" }\n      ]\n    }\n  ],\n  "reports": [\n    {\n      "id": "r1",\n      "from_pane_id": "def456",\n      "from_title": "Worker Alpha",\n      "message": "Completed step 1",\n      "timestamp": 1700000006000,\n      "status": "Done"\n    }\n  ]\n}\n```\n\nFields you care about on each pane:\n\n| Field | Meaning |\n|---|---|\n| `pane_id` | Target for nudge actions |\n| `title` | Human label |\n| `role` | `Orchestrator`, `Manager`, or `Worker` (may be absent) |\n| `role_profile` | Manager specialization (`planner`, `watcher`, \u2026) or null |\n| `status` | `Working`, `Waiting`, `Idle`, `Dead`, or `Unknown` |\n| `last_activity_ms` | Host clock when the pane last did something meaningful |\n| `chatTail` | Optional: last N parsed chat messages as `{id, kind, content}` objects |\n\nTop-level `orchestrator_id` identifies the orchestrator; the orchestrator also appears as a row in `panes[]`. `reports` is optional (when observation config enables it).\n\n## Progressing vs stalled\n\n**Progressing (`status: "ok"`)** \u2014 recent activity and forward motion:\n\n- `last_activity_ms` on key panes is within ~3 minutes of `nowMs`, **or**\n- worker/manager `status` values are advancing (e.g. `Waiting` \u2192 `Working`, `Working` with fresh `chatTail`), **or**\n- new agent reports arrive at the orchestrator with concrete progress.\n\n**Attention (`status: "attention"`)** \u2014 ambiguous or early warning:\n\n- activity is slowing but not clearly stuck yet, **or**\n- you lack enough data to judge (empty snapshot, missing tails).\n\n**Stalled (`status: "stalled"`)** \u2014 the group needs a kick:\n\n- no meaningful activity on workers for ~5+ minutes while tasks should be active, **or**\n- a worker sits on the same status with no `chatTail` movement, **or**\n- the orchestrator is `Idle` while workers are `Waiting`/`Idle` with no progress, **or**\n- unread reports pile up at the orchestrator with no follow-up.\n\nWhen stalled, emit **at most one nudge** to the most stuck pane. Nudges must be:\n\n- **Short** (1\u20132 sentences)\n- **Evidence-based** (cite what you saw: idle time, status, last `chatTail` line)\n- **Addressed to that pane** (use its `pane_id` in the action)\n\nDo not nudge watchers or the orchestrator unless the orchestrator itself is clearly idle with pending work.\n\n## State\n\nUse `state` to remember lightweight notes across ticks (e.g. `{ "last_nudged": { "def456": 1700000000000 } }`). Keep it small.\n\n## Worked example 1 \u2014 progressing (ok)\n\nObservation (abbreviated):\n\n```json\n{\n  "tick": 2,\n  "nowMs": 1700000120000,\n  "observations": {\n    "orchestrator_id": "o1",\n    "panes": [\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000110000 },\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "role_profile": null, "status": "Working", "last_activity_ms": 1700000118000 }\n    ],\n    "reports": [\n      { "id": "r1", "from_pane_id": "w1", "from_title": "Worker", "message": "Implemented tests", "timestamp": 1700000119000, "status": "Partial" }\n    ]\n  }\n}\n```\n\nYour verdict:\n\n```json\n{"status":"ok","summary":"Worker active in last minute with a progress report.","state":{"seen_ticks":2},"actions":[]}\n```\n\n## Worked example 2 \u2014 stalled worker (one nudge)\n\nObservation (abbreviated):\n\n```json\n{\n  "tick": 5,\n  "nowMs": 1700000420000,\n  "observations": {\n    "orchestrator_id": "o1",\n    "panes": [\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Idle", "last_activity_ms": 1700000200000 },\n      {\n        "pane_id": "w1",\n        "title": "Worker",\n        "role": "Worker",\n        "role_profile": null,\n        "status": "Waiting",\n        "last_activity_ms": 1700000000000,\n        "chatTail": [\n          { "id": "m1", "kind": "user", "content": "run the tests" },\n          { "id": "m2", "kind": "assistant", "content": "I\'ll get to it\u2026" }\n        ]\n      }\n    ]\n  }\n}\n```\n\nWorker `w1` has been silent ~7 minutes (`nowMs - last_activity_ms` = 420000 ms) with `status: Waiting` and no new `chatTail`.\n\nYour verdict:\n\n```json\n{"status":"stalled","summary":"Worker w1 Waiting with no activity for 7+ minutes.","state":{"seen_ticks":5,"last_nudged":{"w1":1700000420000}},"actions":[{"kind":"nudge","pane":"w1","message":"Stalled ~7m on \'run the tests\' \u2014 status Waiting, no new chat since \'I\'ll get to it\u2026\'. Please run tests and report STATUS."}]}\n```\n\n## Worked example 3 \u2014 investigate with a codeterm tool, then verdict\n\nObservation (abbreviated):\n\n```json\n{\n  "tick": 8,\n  "nowMs": 1700000600000,\n  "observations": {\n    "orchestrator_id": "o1",\n    "panes": [\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000580000 },\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "status": "Unknown", "last_activity_ms": 1700000200000 }\n    ]\n  }\n}\n```\n\nThe worker looks stale, but `status: Unknown` and missing `chatTail` are insufficient evidence. First check the pane:\n\n```codeterm-tool\n{"tool":"codeterm","args":{"args":"tab status --tab w1"}}\n```\n\nTool result (abbreviated): `{"status":"Working","last_activity_ms":1700000590000,"prompt":"running focused tests"}`\n\nYour final message:\n\n```json\n{"status":"ok","summary":"Worker w1 is active after status check and is running focused tests.","state":{"seen_ticks":8},"actions":[]}\n```\n';
 
 // lmstudio/src/router/config.ts
 var LMSTUDIO_PROVIDER_ID = "lmstudio";
@@ -1039,36 +1066,36 @@ function resolveProviders(settings2, state) {
   const issues = [];
   const providers = [];
   const declared = Array.isArray(settings2.providers) ? settings2.providers : [];
-  const declaresLmStudio = declared.some((p) => p && str(p.id).toLowerCase() === LMSTUDIO_PROVIDER_ID);
+  const declaresLmStudio = declared.some((p2) => p2 && str(p2.id).toLowerCase() === LMSTUDIO_PROVIDER_ID);
   if (!declaresLmStudio) providers.push(builtinLmStudio(settings2));
   const add = (input, source) => {
-    const result = validateProvider(input, providers.map((p) => p.id), source);
+    const result = validateProvider(input, providers.map((p2) => p2.id), source);
     if (result.ok) providers.push(result.value);
     else issues.push(`provider ${str(input && input.id) || "?"}: ${result.errors.map((e) => e.message).join(" ")}`);
   };
   for (const input of declared) add(input, "config");
   for (const input of state.providers) add(input, "user");
-  for (const p of providers) if (state.disabled.includes(p.id)) p.enabled = false;
+  for (const p2 of providers) if (state.disabled.includes(p2.id)) p2.enabled = false;
   return { providers, issues };
 }
 function resolvePresets(settings2, state) {
   const presets2 = [];
   const add = (input, source) => {
-    const result = validatePreset(input, presets2.map((p) => p.id), source);
+    const result = validatePreset(input, presets2.map((p2) => p2.id), source);
     if (result.ok) presets2.push(result.value);
   };
   if (Array.isArray(settings2.presets)) {
-    for (const p of settings2.presets) if (p) add(p, "config");
+    for (const p2 of settings2.presets) if (p2) add(p2, "config");
   }
-  for (const p of state.presets) add(p, "user");
+  for (const p2 of state.presets) add(p2, "user");
   return presets2;
 }
 function defaultProviderId(settings2, state, providers) {
   const wanted = [state.defaultProvider, str(settings2.defaultProvider), LMSTUDIO_PROVIDER_ID];
   for (const id of wanted) {
-    if (id && providers.some((p) => p.id === id && p.enabled)) return id;
+    if (id && providers.some((p2) => p2.id === id && p2.enabled)) return id;
   }
-  const first = providers.find((p) => p.enabled);
+  const first = providers.find((p2) => p2.enabled);
   return first ? first.id : LMSTUDIO_PROVIDER_ID;
 }
 function keyRequired(provider) {
@@ -1076,6 +1103,119 @@ function keyRequired(provider) {
   if (provider.kind === "lmstudio") return false;
   const host2 = hostOf(provider.baseUrl).replace(/:\d+$/, "");
   return !(host2 === "localhost" || host2 === "127.0.0.1" || host2 === "[::1]" || /\.(local|ts\.net)$/.test(host2) || /^(10|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(host2));
+}
+
+// lmstudio/src/router/toolspec.ts
+var p = (name, description, required = true) => ({ name, description, required });
+var TOOL_SPECS = [
+  { name: "exec", description: "Run a shell command and return its exit code, stdout and stderr.", params: [p("cmd", "Shell command line."), p("cwd", "Working directory.", false)] },
+  { name: "codeterm", description: "Run the Domios CLI: `codeterm <args>`.", params: [p("args", "Arguments after `codeterm`, e.g. `tab list`.")] },
+  { name: "read_file", description: "Read a text file.", params: [p("path", "File path.")] },
+  { name: "write_file", description: "Write a text file, replacing its content.", params: [p("path", "File path."), p("content", "Full file content.")] },
+  { name: "mem_search", description: "Search Domios memory.", params: [p("query", "Search query.")] },
+  { name: "spawn_agent", description: "Spawn an agent tab with a task.", params: [p("provider", "Agent provider id."), p("task", "Task text."), p("workspace", "Workspace id.", false)] }
+];
+function toolSpec(name) {
+  return TOOL_SPECS.find((t) => t.name === name);
+}
+function jsonSchema(spec) {
+  const properties = {};
+  for (const param of spec.params) properties[param.name] = { type: "string", description: param.description };
+  return { type: "object", properties, required: spec.params.filter((x) => x.required).map((x) => x.name) };
+}
+function openAiTools() {
+  return TOOL_SPECS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: jsonSchema(t) } }));
+}
+function anthropicTools() {
+  return TOOL_SPECS.map((t) => ({ name: t.name, description: t.description, input_schema: jsonSchema(t) }));
+}
+function checkToolArgs(name, raw) {
+  const spec = toolSpec(name);
+  if (!spec) return { ok: false, error: `unknown tool: ${name}. Declared tools: ${TOOL_SPECS.map((t) => t.name).join(", ")}` };
+  const input = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const args = {};
+  for (const param of spec.params) {
+    const value = input[param.name];
+    if (typeof value === "string") args[param.name] = value;
+    else if (typeof value === "number" || typeof value === "boolean") args[param.name] = String(value);
+  }
+  const missing = spec.params.filter((x) => x.required && !args[x.name]).map((x) => x.name);
+  if (missing.length) return { ok: false, error: `${name} requires ${missing.join(", ")}` };
+  return { ok: true, args };
+}
+
+// lmstudio/src/router/toolwire.ts
+function pairToolCalls(turns) {
+  const answered = /* @__PURE__ */ new Set();
+  for (const t of turns) if (t.role === "tool" && t.toolCallId) answered.add(t.toolCallId);
+  const out = [];
+  let open = /* @__PURE__ */ new Set();
+  for (const t of turns) {
+    if (t.role === "tool") {
+      if (t.toolCallId && open.has(t.toolCallId)) out.push({ ...t });
+      continue;
+    }
+    if (t.role === "assistant" && t.toolCalls && t.toolCalls.length) {
+      const kept = t.toolCalls.filter((c) => answered.has(c.id));
+      open = new Set(kept.map((c) => c.id));
+      const turn = { role: "assistant", content: t.content };
+      if (kept.length) turn.toolCalls = kept;
+      out.push(turn);
+      continue;
+    }
+    if (t.role === "user") open = /* @__PURE__ */ new Set();
+    out.push({ ...t });
+  }
+  return out;
+}
+function mergeToolParts(into, parts) {
+  for (const part of parts) {
+    const slot = into.find((x) => x.index === part.index);
+    if (!slot) {
+      into.push({ ...part });
+      continue;
+    }
+    if (part.id) slot.id = part.id;
+    if (part.name) slot.name = part.name;
+    slot.args += part.args;
+  }
+}
+function finishToolCalls(parts) {
+  return parts.filter((x) => x.name).sort((a, b) => a.index - b.index).map((x) => ({ id: x.id || `call_${x.index}`, name: x.name, arguments: x.args.trim() || "{}" }));
+}
+function openAiMessage(t) {
+  if (t.role === "tool") return { role: "tool", tool_call_id: t.toolCallId, content: t.content };
+  if (t.role === "assistant" && t.toolCalls && t.toolCalls.length) {
+    return {
+      role: "assistant",
+      content: t.content || null,
+      tool_calls: t.toolCalls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.arguments } }))
+    };
+  }
+  return { role: t.role, content: t.content };
+}
+function parsedInput(raw) {
+  try {
+    const value = JSON.parse(raw);
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch {
+    return {};
+  }
+}
+function anthropicMessages(turns) {
+  const out = [];
+  for (const t of turns) {
+    const role = t.role === "assistant" ? "assistant" : "user";
+    const blocks = [];
+    if (t.role === "tool") blocks.push({ type: "tool_result", tool_use_id: t.toolCallId, content: t.content });
+    else if (t.content) blocks.push({ type: "text", text: t.content });
+    for (const c of t.toolCalls || []) blocks.push({ type: "tool_use", id: c.id, name: c.name, input: parsedInput(c.arguments) });
+    if (!blocks.length) continue;
+    const last = out[out.length - 1];
+    if (last && last.role === role) last.content.push(...blocks);
+    else out.push({ role, content: blocks });
+  }
+  return out;
 }
 
 // lmstudio/src/router/adapters.ts
@@ -1102,13 +1242,21 @@ function modelsRequests(provider, key) {
 }
 function normalizeTurns(turns) {
   const out = [];
-  for (const t of turns) {
-    if (!t.content) continue;
+  for (const t of pairToolCalls(turns)) {
+    const calls = t.toolCalls && t.toolCalls.length ? t.toolCalls : void 0;
+    if (!t.content && !calls && t.role !== "tool") continue;
     const last = out[out.length - 1];
-    if (last && last.role === t.role) last.content = `${last.content}
+    if (last && last.role === t.role && t.role !== "tool" && !last.toolCalls) {
+      last.content = last.content && t.content ? `${last.content}
 
-${t.content}`;
-    else out.push({ role: t.role, content: t.content });
+${t.content}` : last.content || t.content;
+      if (calls) last.toolCalls = calls;
+    } else {
+      const turn = { role: t.role, content: t.content };
+      if (calls) turn.toolCalls = calls;
+      if (t.toolCallId) turn.toolCallId = t.toolCallId;
+      out.push(turn);
+    }
   }
   while (out.length && out[0].role !== "user") out.shift();
   return out;
@@ -1125,12 +1273,13 @@ function cacheBreakpoints(hasSystem, turns) {
 }
 var EPHEMERAL = { type: "ephemeral" };
 function anthropicBody(req) {
-  const turns = normalizeTurns(req.turns);
-  const plan = cacheBreakpoints(!!req.system, turns);
-  const messages2 = turns.map((t, i) => ({
-    role: t.role,
-    content: [i === plan.messageIndex ? { type: "text", text: t.content, cache_control: EPHEMERAL } : { type: "text", text: t.content }]
-  }));
+  const messages2 = anthropicMessages(normalizeTurns(req.turns));
+  const plan = cacheBreakpoints(!!req.system, messages2);
+  const marked = messages2[plan.messageIndex];
+  if (marked) {
+    const blocks = marked.content;
+    blocks[blocks.length - 1] = { ...blocks[blocks.length - 1], cache_control: EPHEMERAL };
+  }
   const { max_tokens: maxTokens2, ...rest } = req.params;
   const body = {
     ...rest,
@@ -1140,19 +1289,28 @@ function anthropicBody(req) {
     stream: true
   };
   if (req.system) body.system = [{ type: "text", text: req.system, cache_control: EPHEMERAL }];
+  if (req.tools) {
+    body.tools = anthropicTools();
+    body.tool_choice = { type: "auto" };
+  }
   return body;
 }
 function openAiBody(req) {
   const messages2 = [];
   if (req.system) messages2.push({ role: "system", content: req.system });
-  for (const t of normalizeTurns(req.turns)) messages2.push({ role: t.role, content: t.content });
-  return {
+  for (const t of normalizeTurns(req.turns)) messages2.push(openAiMessage(t));
+  const body = {
     ...req.params,
     model: req.model,
     messages: messages2,
     stream: true,
     stream_options: { include_usage: true }
   };
+  if (req.tools) {
+    body.tools = openAiTools();
+    body.tool_choice = "auto";
+  }
+  return body;
 }
 function chatRequest(provider, key, req) {
   const root = apiRoot(provider);
@@ -1186,7 +1344,7 @@ function n(v) {
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
 }
 function emptyDelta() {
-  return { content: "", reasoning: "", usage: null, responseId: null, error: null };
+  return { content: "", reasoning: "", usage: null, responseId: null, error: null, toolParts: [] };
 }
 function openAiUsage(raw) {
   if (!raw || typeof raw !== "object") return null;
@@ -1228,6 +1386,21 @@ function errorMessage(raw) {
   }
   return null;
 }
+function openAiToolParts(calls) {
+  return calls.map((call, i) => {
+    const fn = call && typeof call.function === "object" && call.function ? call.function : {};
+    const part = { index: typeof call.index === "number" ? call.index : i, args: "" };
+    if (typeof call.id === "string" && call.id) part.id = call.id;
+    if (typeof fn.name === "string" && fn.name) part.name = fn.name;
+    if (typeof fn.arguments === "string") part.args = fn.arguments;
+    else if (fn.arguments && typeof fn.arguments === "object") part.args = JSON.stringify(fn.arguments);
+    return part;
+  });
+}
+function anthropicToolPart(index, block) {
+  const input = block.input && typeof block.input === "object" && Object.keys(block.input).length ? JSON.stringify(block.input) : "";
+  return { index, id: String(block.id || ""), name: String(block.name || ""), args: input };
+}
 function applyOpenAiEvent(acc, ev) {
   if (!ev.data || ev.data === "[DONE]") return;
   let data;
@@ -1247,6 +1420,7 @@ function applyOpenAiEvent(acc, ev) {
     if (typeof delta.content === "string") acc.content += delta.content;
     const reasoning = typeof delta.reasoning_content === "string" ? delta.reasoning_content : typeof delta.reasoning === "string" ? delta.reasoning : "";
     if (reasoning) acc.reasoning += reasoning;
+    if (Array.isArray(delta.tool_calls)) acc.toolParts.push(...openAiToolParts(delta.tool_calls));
   }
   acc.usage = mergeUsage(acc.usage, openAiUsage(data.usage));
 }
@@ -1265,10 +1439,14 @@ function applyAnthropicEvent(acc, ev) {
     const message = data.message;
     if (typeof message.id === "string") acc.responseId = message.id;
     acc.usage = mergeUsage(acc.usage, anthropicUsage(message.usage));
+  } else if (type === "content_block_start" && data.content_block && typeof data.content_block === "object") {
+    const block = data.content_block;
+    if (block.type === "tool_use") acc.toolParts.push(anthropicToolPart(Number(data.index) || 0, block));
   } else if (type === "content_block_delta" && data.delta && typeof data.delta === "object") {
     const delta = data.delta;
     if (typeof delta.text === "string") acc.content += delta.text;
     else if (typeof delta.thinking === "string") acc.reasoning += delta.thinking;
+    else if (typeof delta.partial_json === "string") acc.toolParts.push({ index: Number(data.index) || 0, args: delta.partial_json });
   } else if (type === "message_delta" && data.usage && typeof data.usage === "object") {
     const u = data.usage;
     const prev = acc.usage || { input: 0, cachedInput: 0, cacheWrite: 0, output: 0 };
@@ -1287,10 +1465,11 @@ function applyWholeBody(kind, acc, body) {
   }
   if (!data || typeof data !== "object") return false;
   if (kind === "anthropic" && Array.isArray(data.content)) {
-    for (const block of data.content) {
+    data.content.forEach((block, i) => {
       if (block && block.type === "text" && typeof block.text === "string") acc.content += block.text;
       if (block && block.type === "thinking" && typeof block.thinking === "string") acc.reasoning += block.thinking;
-    }
+      if (block && block.type === "tool_use") acc.toolParts.push(anthropicToolPart(i, block));
+    });
     if (typeof data.id === "string") acc.responseId = data.id;
     acc.usage = anthropicUsage(data.usage) || acc.usage;
     return true;
@@ -1454,18 +1633,18 @@ function splitModelId(raw) {
   return { providerId: value.slice(0, at).toLowerCase(), model: value.slice(at + MODEL_SEPARATOR.length) };
 }
 function bareProvider(providers, defaultProvider) {
-  return providers.find((p) => p.id === LMSTUDIO_PROVIDER_ID && p.enabled) || providers.find((p) => p.id === defaultProvider && p.enabled) || providers.find((p) => p.enabled) || null;
+  return providers.find((p2) => p2.id === LMSTUDIO_PROVIDER_ID && p2.enabled) || providers.find((p2) => p2.id === defaultProvider && p2.enabled) || providers.find((p2) => p2.enabled) || null;
 }
 function resolveModelTarget(raw, providers, defaultProvider, presetProvider) {
   const { providerId, model } = splitModelId(raw);
   if (providerId) {
-    const provider2 = providers.find((p) => p.id === providerId) || null;
+    const provider2 = providers.find((p2) => p2.id === providerId) || null;
     if (!provider2) return { provider: null, model, error: `unknown provider "${providerId}"` };
     if (!provider2.enabled) return { provider: null, model, error: `provider "${providerId}" is disabled` };
     return { provider: provider2, model };
   }
   if (presetProvider) {
-    const provider2 = providers.find((p) => p.id === presetProvider) || null;
+    const provider2 = providers.find((p2) => p2.id === presetProvider) || null;
     if (!provider2) return { provider: null, model, error: `unknown provider "${presetProvider}"` };
     if (!provider2.enabled) return { provider: null, model, error: `provider "${presetProvider}" is disabled` };
     return { provider: provider2, model };
@@ -1486,10 +1665,61 @@ function presetParams(preset) {
   if (preset.maxTokens !== void 0) params.max_tokens = preset.maxTokens;
   return params;
 }
+function reroute(req, current, providers, defaultProvider) {
+  const target = resolveModelTarget(req.raw, providers, defaultProvider, req.raw ? void 0 : req.presetProvider);
+  if (!target.provider || target.model) return target;
+  return { provider: target.provider, model: current.providerId === target.provider.id ? current.model : "" };
+}
+
+// lmstudio/src/router/datafiles.ts
+var DATA_DIR_REL = ".codeterm/plugin-data/lmstudio";
+var LEGACY_DIR_REL = ".codeterm/plugins/lmstudio";
+function homePath(rel) {
+  try {
+    const viaFs = host.fs && typeof host.fs.expandHome === "function" ? host.fs.expandHome(`~/${rel}`) : null;
+    if (viaFs) return viaFs;
+    const viaHost = typeof host.expandHome === "function" ? host.expandHome(`~/${rel}`) : null;
+    if (viaHost) return viaHost;
+    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
+    return home ? `${home.replace(/\/+$/, "")}/${rel}` : null;
+  } catch {
+    return null;
+  }
+}
+function dataFilePath(name) {
+  return homePath(`${DATA_DIR_REL}/${name}`);
+}
+function readText(path) {
+  if (!path) return null;
+  try {
+    const text = host.readFile(path);
+    return text ? text : null;
+  } catch {
+    return null;
+  }
+}
+function writeDataFile(name, text) {
+  const path = dataFilePath(name);
+  if (!path) return false;
+  try {
+    const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
+    return typeof host.writeFileAtomic === "function" ? host.writeFileAtomic(path, text) : host.writeFile(path, text);
+  } catch {
+    return false;
+  }
+}
+function readDataFile(name) {
+  const current = readText(dataFilePath(name));
+  if (current) return current;
+  const legacy = readText(homePath(`${LEGACY_DIR_REL}/${name}`));
+  if (legacy) writeDataFile(name, legacy);
+  return legacy;
+}
 
 // lmstudio/src/router/store.ts
-var STATE_REL = ".codeterm/plugins/lmstudio/router.json";
-var MODEL_CACHE_REL = ".codeterm/plugins/lmstudio/router-models.json";
+var STATE_FILE = "router.json";
+var MODEL_CACHE_FILE = "router-models.json";
 var REMOTE_MODEL_TTL_MS = 10 * 60 * 1e3;
 var LOCAL_MODEL_TTL_MS = 15 * 1e3;
 var FAILURE_TTL_MS = 60 * 1e3;
@@ -1505,48 +1735,21 @@ function parseJson(raw, fallback) {
     return fallback;
   }
 }
-function dataPath(rel) {
-  try {
-    const viaFs = host.fs && typeof host.fs.expandHome === "function" ? host.fs.expandHome(`~/${rel}`) : null;
-    if (viaFs) return viaFs;
-    const viaHost = typeof host.expandHome === "function" ? host.expandHome(`~/${rel}`) : null;
-    if (viaHost) return viaHost;
-    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
-    return home ? `${home.replace(/\/+$/, "")}/${rel}` : null;
-  } catch {
-    return null;
-  }
+function writeJsonFile(name, value) {
+  return writeDataFile(name, JSON.stringify(value, null, 2));
 }
-function writeJsonFile(rel, value) {
-  const path = dataPath(rel);
-  if (!path) return false;
-  try {
-    const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
-    const text = JSON.stringify(value, null, 2);
-    return typeof host.writeFileAtomic === "function" ? host.writeFileAtomic(path, text) : host.writeFile(path, text);
-  } catch {
-    return false;
-  }
-}
-function readJsonFile(rel) {
-  const path = dataPath(rel);
-  if (!path) return null;
-  try {
-    return parseJson(host.readFile(path), null);
-  } catch {
-    return null;
-  }
+function readJsonFile(name) {
+  return parseJson(readDataFile(name), null);
 }
 function readSettings() {
   const raw = parseJson(host.settingsJson ? host.settingsJson() : "{}", {});
   return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
 }
 function readState() {
-  return coerceState(readJsonFile(STATE_REL));
+  return coerceState(readJsonFile(STATE_FILE));
 }
 function writeState(state) {
-  return writeJsonFile(STATE_REL, state);
+  return writeJsonFile(STATE_FILE, state);
 }
 function snapshot() {
   const settings2 = readSettings();
@@ -1601,7 +1804,7 @@ function fetchSync(req) {
 }
 function cache() {
   if (!memCache) {
-    const stored = readJsonFile(MODEL_CACHE_REL);
+    const stored = readJsonFile(MODEL_CACHE_FILE);
     memCache = stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
   }
   return memCache;
@@ -1610,7 +1813,7 @@ function persistCache() {
   const entries = cache();
   const durable = {};
   for (const id of Object.keys(entries)) if (!entries[id].error) durable[id] = entries[id];
-  writeJsonFile(MODEL_CACHE_REL, durable);
+  writeJsonFile(MODEL_CACHE_FILE, durable);
 }
 function invalidateModels(providerId) {
   delete cache()[providerId];
@@ -1694,27 +1897,27 @@ function statusFromEntry(provider, entry) {
 function fail(error, fieldErrors) {
   return fieldErrors ? { ok: false, error, fieldErrors } : { ok: false, error };
 }
-function providerView(p, defaultProvider) {
+function providerView(p2, defaultProvider) {
   return {
-    id: p.id,
-    name: p.name,
-    kind: p.kind,
-    baseUrl: p.baseUrl,
-    host: hostOf(p.baseUrl),
-    apiKeySecret: p.apiKeySecret,
-    models: p.models,
-    keySlotDeclared: isDeclaredKeySlot(p.apiKeySecret),
-    hasKey: hasKey(p),
-    enabled: p.enabled,
-    source: p.source,
-    isDefault: p.id === defaultProvider,
-    status: statusFromEntry(p, cachedModels(p))
+    id: p2.id,
+    name: p2.name,
+    kind: p2.kind,
+    baseUrl: p2.baseUrl,
+    host: hostOf(p2.baseUrl),
+    apiKeySecret: p2.apiKeySecret,
+    models: p2.models,
+    keySlotDeclared: isDeclaredKeySlot(p2.apiKeySecret),
+    hasKey: hasKey(p2),
+    enabled: p2.enabled,
+    source: p2.source,
+    isDefault: p2.id === defaultProvider,
+    status: statusFromEntry(p2, cachedModels(p2))
   };
 }
 function listProviders() {
   const snap = snapshot();
   return {
-    providers: snap.providers.map((p) => providerView(p, snap.defaultProvider)),
+    providers: snap.providers.map((p2) => providerView(p2, snap.defaultProvider)),
     defaultProvider: snap.defaultProvider,
     issues: snap.issues
   };
@@ -1727,32 +1930,32 @@ function stripUserProvider(input) {
 }
 function addProvider(input) {
   const snap = snapshot();
-  const result = validateProvider(input, snap.providers.map((p2) => p2.id));
+  const result = validateProvider(input, snap.providers.map((p3) => p3.id));
   if (!result.ok) return fail(result.errors.map((e) => e.message).join(" "), result.errors);
-  const p = result.value;
-  snap.state.providers.push(stripUserProvider({ id: p.id, name: p.name, kind: p.kind, baseUrl: p.baseUrl, apiKeySecret: p.apiKeySecret, models: p.models }));
+  const p2 = result.value;
+  snap.state.providers.push(stripUserProvider({ id: p2.id, name: p2.name, kind: p2.kind, baseUrl: p2.baseUrl, apiKeySecret: p2.apiKeySecret, models: p2.models }));
   if (!writeState(snap.state)) return fail("Could not save the provider list.");
-  return { ok: true, provider: providerView(p, snap.defaultProvider) };
+  return { ok: true, provider: providerView(p2, snap.defaultProvider) };
 }
 function updateProvider(id, input) {
   const snap = snapshot();
-  const existing = snap.providers.find((p2) => p2.id === id);
+  const existing = snap.providers.find((p3) => p3.id === id);
   if (!existing) return fail(`Unknown provider ${id}.`);
   if (existing.source !== "user") return fail(`${existing.name} is defined in config.yaml; edit it there.`);
   const merged = { ...existing, ...input, id };
-  const result = validateProvider(merged, snap.providers.filter((p2) => p2.id !== id).map((p2) => p2.id));
+  const result = validateProvider(merged, snap.providers.filter((p3) => p3.id !== id).map((p3) => p3.id));
   if (!result.ok) return fail(result.errors.map((e) => e.message).join(" "), result.errors);
-  const p = result.value;
+  const p2 = result.value;
   snap.state.providers = snap.state.providers.map(
-    (raw) => String(raw.id || "").toLowerCase() === id ? stripUserProvider({ id, name: p.name, kind: p.kind, baseUrl: p.baseUrl, apiKeySecret: p.apiKeySecret, models: p.models }) : raw
+    (raw) => String(raw.id || "").toLowerCase() === id ? stripUserProvider({ id, name: p2.name, kind: p2.kind, baseUrl: p2.baseUrl, apiKeySecret: p2.apiKeySecret, models: p2.models }) : raw
   );
   if (!writeState(snap.state)) return fail("Could not save the provider list.");
   invalidateModels(id);
-  return { ok: true, provider: providerView({ ...p, enabled: existing.enabled }, snap.defaultProvider) };
+  return { ok: true, provider: providerView({ ...p2, enabled: existing.enabled }, snap.defaultProvider) };
 }
 function removeProvider(id) {
   const snap = snapshot();
-  const existing = snap.providers.find((p) => p.id === id);
+  const existing = snap.providers.find((p2) => p2.id === id);
   if (!existing) return fail(`Unknown provider ${id}.`);
   if (existing.source !== "user") return fail(`${existing.name} is ${existing.source === "builtin" ? "built in; disable it instead" : "defined in config.yaml"}.`);
   snap.state.providers = snap.state.providers.filter((raw) => String(raw.id || "").toLowerCase() !== id);
@@ -1764,42 +1967,42 @@ function removeProvider(id) {
 }
 function setProviderEnabled(id, enabled) {
   const snap = snapshot();
-  if (!snap.providers.some((p) => p.id === id)) return fail(`Unknown provider ${id}.`);
+  if (!snap.providers.some((p2) => p2.id === id)) return fail(`Unknown provider ${id}.`);
   const others = snap.state.disabled.filter((d) => d !== id);
   snap.state.disabled = enabled ? others : others.concat(id);
   return writeState(snap.state) ? { ok: true } : fail("Could not save the provider list.");
 }
 function setDefaultProvider(id) {
   const snap = snapshot();
-  if (!snap.providers.some((p) => p.id === id && p.enabled)) return fail(`Unknown or disabled provider ${id}.`);
+  if (!snap.providers.some((p2) => p2.id === id && p2.enabled)) return fail(`Unknown or disabled provider ${id}.`);
   snap.state.defaultProvider = id;
   return writeState(snap.state) ? { ok: true } : fail("Could not save the provider list.");
 }
 function setProviderKey(id, key) {
   const snap = snapshot();
-  const p = snap.providers.find((x) => x.id === id);
-  if (!p) return fail(`Unknown provider ${id}.`);
+  const p2 = snap.providers.find((x) => x.id === id);
+  if (!p2) return fail(`Unknown provider ${id}.`);
   const value = typeof key === "string" ? key.trim() : "";
   if (!value) return fail("Paste a key first.");
   if (/\s/.test(value)) return fail("A key cannot contain spaces or line breaks.");
-  if (!setKey(p.apiKeySecret, value)) return fail("The plugin secret store is unavailable (grant the secrets permission).");
-  for (const other of snap.providers) if (other.apiKeySecret === p.apiKeySecret) invalidateModels(other.id);
+  if (!setKey(p2.apiKeySecret, value)) return fail("The plugin secret store is unavailable (grant the secrets permission).");
+  for (const other of snap.providers) if (other.apiKeySecret === p2.apiKeySecret) invalidateModels(other.id);
   return { ok: true };
 }
 function clearProviderKey(id) {
   const snap = snapshot();
-  const p = snap.providers.find((x) => x.id === id);
-  if (!p) return fail(`Unknown provider ${id}.`);
-  deleteKey(p.apiKeySecret);
-  for (const other of snap.providers) if (other.apiKeySecret === p.apiKeySecret) invalidateModels(other.id);
+  const p2 = snap.providers.find((x) => x.id === id);
+  if (!p2) return fail(`Unknown provider ${id}.`);
+  deleteKey(p2.apiKeySecret);
+  for (const other of snap.providers) if (other.apiKeySecret === p2.apiKeySecret) invalidateModels(other.id);
   return { ok: true };
 }
 function testProvider(id) {
   const snap = snapshot();
-  const p = snap.providers.find((x) => x.id === id);
-  if (!p) return fail(`Unknown provider ${id}.`);
-  discoverModels(p, { force: true });
-  return { ok: true, provider: providerView(p, snap.defaultProvider) };
+  const p2 = snap.providers.find((x) => x.id === id);
+  if (!p2) return fail(`Unknown provider ${id}.`);
+  discoverModels(p2, { force: true });
+  return { ok: true, provider: providerView(p2, snap.defaultProvider) };
 }
 function modelView(m) {
   const view = {
@@ -1814,13 +2017,13 @@ function modelView(m) {
 }
 function modelSections(opts) {
   const snap = snapshot();
-  const targets = snap.providers.filter((p) => p.enabled && (!opts.provider || p.id === opts.provider));
+  const targets = snap.providers.filter((p2) => p2.enabled && (!opts.provider || p2.id === opts.provider));
   const all = [];
   const statuses = {};
-  for (const p of targets) {
-    const entry = discoverModels(p, { force: !!opts.refresh });
+  for (const p2 of targets) {
+    const entry = discoverModels(p2, { force: !!opts.refresh });
     all.push(...entry.models);
-    statuses[p.id] = statusFromEntry(p, entry);
+    statuses[p2.id] = statusFromEntry(p2, entry);
   }
   return groupAndSearch(targets, all, opts.query || "").map((s2) => ({
     providerId: s2.provider.id,
@@ -1837,14 +2040,14 @@ function listPresetViews() {
 function savePreset(input, opts) {
   const snap = snapshot();
   const id = typeof input.id === "string" ? input.id.trim() : "";
-  const existing = snap.presets.find((p) => p.id === id);
+  const existing = snap.presets.find((p2) => p2.id === id);
   if (existing && existing.source !== "user") return fail(`Preset ${id} is defined in config.yaml; edit it there.`);
   if (existing && !opts?.replace) return fail(`A preset named ${id} already exists.`, [{ field: "id", message: `A preset named ${id} already exists.` }]);
-  const taken = snap.presets.filter((p) => p.id !== id).map((p) => p.id);
+  const taken = snap.presets.filter((p2) => p2.id !== id).map((p2) => p2.id);
   const result = validatePreset(input, taken);
   if (!result.ok) return fail(result.errors.map((e) => e.message).join(" "), result.errors);
   const preset = result.value;
-  if (preset.provider && !snap.providers.some((p) => p.id === preset.provider)) {
+  if (preset.provider && !snap.providers.some((p2) => p2.id === preset.provider)) {
     return fail(`Unknown provider ${preset.provider}.`, [{ field: "provider", message: `Unknown provider ${preset.provider}.` }]);
   }
   const { source: _source, ...stored } = preset;
@@ -1855,7 +2058,7 @@ function savePreset(input, opts) {
 }
 function removePreset(id) {
   const snap = snapshot();
-  const existing = snap.presets.find((p) => p.id === id);
+  const existing = snap.presets.find((p2) => p2.id === id);
   if (!existing) return fail(`Unknown preset ${id}.`);
   if (existing.source !== "user") return fail(`Preset ${id} is defined in config.yaml.`);
   snap.state.presets = snap.state.presets.filter((raw) => raw.id !== id);
@@ -1889,8 +2092,8 @@ function parseArgs(args) {
   }
   return { positional, flags };
 }
-function flag(p, name) {
-  const v = p.flags[name];
+function flag(p2, name) {
+  const v = p2.flags[name];
   return typeof v === "string" ? v : void 0;
 }
 function keyCommand(slot) {
@@ -1899,26 +2102,26 @@ function keyCommand(slot) {
 function allowHostCommand(host2) {
   return `codeterm plugin settings ${PLUGIN_ID} --allow-host ${host2}`;
 }
-function nextSteps(p) {
+function nextSteps(p2) {
   const steps = [];
-  if (!p.hasKey && keyRequired(p)) {
+  if (!p2.hasKey && keyRequired(p2)) {
     steps.push(
-      p.keySlotDeclared ? `store the key (never in argv history): ${keyCommand(p.apiKeySecret)}` : `slot ${p.apiKeySecret} is not declared for --secret; re-add with --key-slot one of ${KEY_SLOTS.join(", ")} or paste the key in the Router view`
+      p2.keySlotDeclared ? `store the key (never in argv history): ${keyCommand(p2.apiKeySecret)}` : `slot ${p2.apiKeySecret} is not declared for --secret; re-add with --key-slot one of ${KEY_SLOTS.join(", ")} or paste the key in the Router view`
     );
   }
-  if (p.status.state !== "connected" && keyRequired(p)) steps.push(`if CodeTerm blocks the host: ${allowHostCommand(hostOf(p.baseUrl))}`);
+  if (p2.status.state !== "connected" && keyRequired(p2)) steps.push(`if CodeTerm blocks the host: ${allowHostCommand(hostOf(p2.baseUrl))}`);
   return steps;
 }
-function providerLine(p) {
-  const key = keyRequired(p) || p.hasKey ? ` key=${p.apiKeySecret}:${p.hasKey ? "set" : "unset"}` : "";
-  const flags = [p.isDefault ? "default" : "", p.enabled ? "" : "disabled", p.source !== "user" ? p.source : ""].filter(Boolean).join(",");
-  return `${p.id}	${p.kind}	${p.status.state}	${p.baseUrl}${key}${flags ? `	[${flags}]` : ""}`;
+function providerLine(p2) {
+  const key = keyRequired(p2) || p2.hasKey ? ` key=${p2.apiKeySecret}:${p2.hasKey ? "set" : "unset"}` : "";
+  const flags = [p2.isDefault ? "default" : "", p2.enabled ? "" : "disabled", p2.source !== "user" ? p2.source : ""].filter(Boolean).join(",");
+  return `${p2.id}	${p2.kind}	${p2.status.state}	${p2.baseUrl}${key}${flags ? `	[${flags}]` : ""}`;
 }
 function err(message) {
   return { error: message };
 }
 function runAgentVerb(verb, args) {
-  const p = parseArgs(args || []);
+  const p2 = parseArgs(args || []);
   switch (verb) {
     case "providers": {
       const { providers, issues } = listProviders();
@@ -1927,37 +2130,37 @@ function runAgentVerb(verb, args) {
       return { result: lines.join("\n") || "no providers" };
     }
     case "add-provider": {
-      const [id, kind, baseUrl2] = p.positional;
+      const [id, kind, baseUrl2] = p2.positional;
       if (!id || !kind || !baseUrl2) return err(`usage: ${AGENT_VERBS[1]}`);
-      const res = addProvider({ id, kind, baseUrl: baseUrl2, name: flag(p, "name") || p.positional.slice(3).join(" ") || void 0, apiKeySecret: flag(p, "key-slot"), models: flag(p, "models") });
+      const res = addProvider({ id, kind, baseUrl: baseUrl2, name: flag(p2, "name") || p2.positional.slice(3).join(" ") || void 0, apiKeySecret: flag(p2, "key-slot"), models: flag(p2, "models") });
       if (!res.ok) return err(res.error);
       return { result: [`added ${providerLine(res.provider)}`, ...nextSteps(res.provider)].join("\n") };
     }
     case "remove-provider": {
-      const id = p.positional[0];
+      const id = p2.positional[0];
       if (!id) return err("usage: remove-provider <id>");
       const res = removeProvider(id.toLowerCase());
       return res.ok ? { result: `removed ${id} (its key stays in the secret bucket until cleared)` } : err(res.error);
     }
     case "test-provider": {
-      const id = p.positional[0];
+      const id = p2.positional[0];
       if (!id) return err("usage: test-provider <id>");
       const res = testProvider(id.toLowerCase());
       if (!res.ok) return err(res.error);
       return { result: [`${res.provider.id}: ${res.provider.status.state} \u2014 ${res.provider.status.message}`, ...nextSteps(res.provider)].join("\n") };
     }
     case "set-default": {
-      const id = p.positional[0];
+      const id = p2.positional[0];
       if (!id) return err("usage: set-default <provider>");
       const res = setDefaultProvider(id.toLowerCase());
       return res.ok ? { result: `default provider: ${id}` } : err(res.error);
     }
     case "models": {
       const known = listProviders().providers.map((x) => x.id);
-      const first = (p.positional[0] || "").toLowerCase();
+      const first = (p2.positional[0] || "").toLowerCase();
       const provider = known.includes(first) ? first : void 0;
-      const query = (provider ? p.positional.slice(1) : p.positional).join(" ");
-      const sections = modelSections({ provider, query, refresh: p.flags.refresh === true });
+      const query = (provider ? p2.positional.slice(1) : p2.positional).join(" ");
+      const sections = modelSections({ provider, query, refresh: p2.flags.refresh === true });
       const lines = [];
       for (const s2 of sections) {
         lines.push(`## ${s2.providerName} (${s2.providerId}) \u2014 ${s2.models.length}/${s2.total}${s2.status.state === "connected" ? "" : ` \xB7 ${s2.status.state}: ${s2.status.message}`}`);
@@ -1974,25 +2177,25 @@ function runAgentVerb(verb, args) {
       return { result: lines.join("\n") || "no presets" };
     }
     case "add-preset": {
-      const [id, model] = p.positional;
+      const [id, model] = p2.positional;
       if (!id) return err(`usage: ${AGENT_VERBS[7]}`);
       const split = splitModelId(model || "");
       const res = savePreset(
         {
           id,
-          name: flag(p, "name"),
-          provider: split.providerId || flag(p, "provider"),
+          name: flag(p2, "name"),
+          provider: split.providerId || flag(p2, "provider"),
           model: split.model || void 0,
-          temperature: flag(p, "temperature"),
-          maxTokens: flag(p, "max-tokens"),
-          systemPrompt: flag(p, "system")
+          temperature: flag(p2, "temperature"),
+          maxTokens: flag(p2, "max-tokens"),
+          systemPrompt: flag(p2, "system")
         },
-        { replace: p.flags.replace === true }
+        { replace: p2.flags.replace === true }
       );
       return res.ok ? { result: `saved preset ${res.preset.id}` } : err(res.error);
     }
     case "remove-preset": {
-      const id = p.positional[0];
+      const id = p2.positional[0];
       if (!id) return err("usage: remove-preset <id>");
       const res = removePreset(id);
       return res.ok ? { result: `removed preset ${id}` } : err(res.error);
@@ -2019,7 +2222,7 @@ function viewCall(method, raw) {
         kinds: PROVIDER_KINDS_INFO,
         templates: PROVIDER_TEMPLATES,
         keySlots: KEY_SLOTS,
-        commands: Object.fromEntries(providers.map((p) => [p.id, { key: keyCommand(p.apiKeySecret), allowHost: allowHostCommand(p.host) }]))
+        commands: Object.fromEntries(providers.map((p2) => [p2.id, { key: keyCommand(p2.apiKeySecret), allowHost: allowHostCommand(p2.host) }]))
       };
     }
     case "models":
@@ -2049,6 +2252,214 @@ function viewCall(method, raw) {
   }
 }
 
+// lmstudio/src/router/lmstudioNative.ts
+function n2(v) {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+}
+function nested(obj, key) {
+  const v = obj[key];
+  return v && typeof v === "object" ? v : {};
+}
+function nativeStatsUsage(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const stats = raw;
+  const input = n2(stats.input_tokens) || n2(stats.prompt_tokens);
+  const output = n2(stats.total_output_tokens) || n2(stats.output_tokens) || n2(stats.completion_tokens);
+  if (!input && !output) return null;
+  const cached = n2(stats.cached_input_tokens) || n2(stats.cached_tokens) || n2(stats.cache_read_input_tokens) || n2(nested(stats, "prompt_tokens_details").cached_tokens) || n2(nested(stats, "input_tokens_details").cached_tokens);
+  return { input, cachedInput: Math.min(cached, input || cached), cacheWrite: n2(stats.cache_creation_input_tokens), output };
+}
+function applyNativeEvent(acc, ev) {
+  if (!ev.data) return;
+  let data;
+  try {
+    data = JSON.parse(ev.data);
+  } catch {
+    return;
+  }
+  if (!data || typeof data !== "object") return;
+  const type = typeof data.type === "string" ? data.type : "";
+  if (type.indexOf("message.") === 0 && typeof data.content === "string") acc.content += data.content;
+  else if (type.indexOf("reasoning.") === 0 && typeof data.content === "string") acc.reasoning += data.content;
+  else if (type === "chat.end") {
+    const result = nested(data, "result");
+    if (typeof result.response_id === "string") acc.responseId = result.response_id;
+    acc.usage = nativeStatsUsage(result.stats) || acc.usage;
+  }
+}
+
+// lmstudio/src/router/sessionstore.ts
+var SESSIONS_FILE = "sessions.json";
+function readAll() {
+  try {
+    const data = JSON.parse(readDataFile(SESSIONS_FILE) || "{}");
+    return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  } catch {
+    return {};
+  }
+}
+function savedSession(sid) {
+  const entry = readAll()[sid];
+  return entry && typeof entry.model === "string" ? entry : null;
+}
+function saveSession(sid, entry) {
+  const all = readAll();
+  all[sid] = entry;
+  writeDataFile(SESSIONS_FILE, JSON.stringify(all));
+}
+function forgetSession(sid) {
+  const all = readAll();
+  if (!(sid in all)) return;
+  delete all[sid];
+  writeDataFile(SESSIONS_FILE, JSON.stringify(all));
+}
+
+// lmstudio/src/router/textcalls.ts
+var OPEN_RE = /<tool_call\s*>/gi;
+var CLOSE_RE = /<\/tool_call\s*>/i;
+function edgeTrim(value) {
+  return value.replace(/^\r?\n/, "").replace(/\r?\n$/, "");
+}
+function firstIndex(text, from, patterns) {
+  let best = text.length;
+  for (const re of patterns) {
+    const m = re.exec(text.slice(from));
+    if (m && from + m.index < best) best = from + m.index;
+  }
+  return best;
+}
+function parseXmlBody(body) {
+  const fn = /<function=([^>\s]+)\s*>/i.exec(body);
+  if (!fn) return { error: "tool_call without <function=NAME>" };
+  const args = {};
+  const paramRe = /<parameter=([^>\s]+)\s*>/gi;
+  paramRe.lastIndex = fn.index + fn[0].length;
+  let m;
+  while ((m = paramRe.exec(body)) !== null) {
+    const start = m.index + m[0].length;
+    const end = firstIndex(body, start, [/<\/parameter\s*>/i, /<parameter=/i, /<\/function\s*>/i]);
+    args[m[1]] = edgeTrim(body.slice(start, end));
+    paramRe.lastIndex = end;
+  }
+  return { tool: fn[1], args };
+}
+function parseJsonBody(body) {
+  const end = body.lastIndexOf("}");
+  let data;
+  try {
+    data = JSON.parse(body.slice(body.indexOf("{"), end + 1));
+  } catch {
+    return { error: "tool_call JSON does not parse" };
+  }
+  const fn = data.function && typeof data.function === "object" ? data.function : data;
+  const name = typeof fn.name === "string" ? fn.name : typeof fn.tool === "string" ? fn.tool : "";
+  if (!name) return { error: "tool_call JSON has no name" };
+  let args = fn.arguments !== void 0 ? fn.arguments : fn.args;
+  if (typeof args === "string") {
+    try {
+      args = JSON.parse(args);
+    } catch {
+      return { error: `${name} arguments are not JSON` };
+    }
+  }
+  return { tool: name, args };
+}
+function parseTextToolCalls(text) {
+  const opens = [];
+  OPEN_RE.lastIndex = 0;
+  let m;
+  while ((m = OPEN_RE.exec(text)) !== null) opens.push({ start: m.index, bodyStart: m.index + m[0].length });
+  if (!opens.length) return { status: "none", calls: [], cleaned: text };
+  const calls = [];
+  const errors = [];
+  const spans = [];
+  opens.forEach((open, i) => {
+    const limit = i + 1 < opens.length ? opens[i + 1].start : text.length;
+    const segment = text.slice(open.bodyStart, limit);
+    const close = CLOSE_RE.exec(segment);
+    const body = close ? segment.slice(0, close.index) : segment;
+    spans.push([open.start, close ? open.bodyStart + close.index + close[0].length : limit]);
+    const raw = body.trim().charAt(0) === "{" ? parseJsonBody(body) : parseXmlBody(body);
+    if ("error" in raw) {
+      errors.push(raw.error);
+      return;
+    }
+    const checked = checkToolArgs(raw.tool, raw.args);
+    if (checked.ok) calls.push({ tool: raw.tool, args: checked.args });
+    else errors.push(checked.error);
+  });
+  let cleaned = "";
+  let cursor = 0;
+  for (const [start, end] of spans) {
+    cleaned += text.slice(cursor, start);
+    cursor = end;
+  }
+  cleaned = (cleaned + text.slice(cursor)).replace(/\n{3,}/g, "\n\n").trim();
+  if (errors.length) return { status: "malformed", calls: [], cleaned: text, reason: errors.join("; ") };
+  return { status: "ok", calls, cleaned };
+}
+
+// lmstudio/src/router/transcript.ts
+function transcriptTurns(rows2, skipUser) {
+  const turns = [];
+  let reply = null;
+  for (const m of rows2) {
+    if (m.type === "user") {
+      if (skipUser(m.content)) continue;
+      turns.push({ role: "user", content: m.content });
+      reply = null;
+    } else if (m.type === "assistant") {
+      const turn = { role: "assistant", content: m.content };
+      turns.push(turn);
+      reply = { id: m.id, turn };
+    } else if (m.type === "tool_call" && typeof m.callId === "string" && typeof m.toolName === "string") {
+      const call = { id: m.callId, name: m.toolName, arguments: typeof m.toolArgs === "string" ? m.toolArgs : "{}" };
+      const replyId = typeof m.replyId === "string" ? m.replyId : "";
+      if (!reply || reply.id !== replyId) {
+        const turn = { role: "assistant", content: "" };
+        turns.push(turn);
+        reply = { id: replyId, turn };
+      }
+      reply.turn.toolCalls = [...reply.turn.toolCalls || [], call];
+    } else if (m.type === "tool_result") {
+      if (typeof m.callId === "string") turns.push({ role: "tool", content: m.content, toolCallId: m.callId });
+      else {
+        turns.push({ role: "user", content: `tool_result:
+${m.content}` });
+        reply = null;
+      }
+    }
+  }
+  return turns;
+}
+
+// lmstudio/src/router/context.ts
+var DOMIOS_CONTEXT = [
+  "You run inside Domios, a terminal multiplexer where AI agents work, as the Domios Router chat agent.",
+  "Act through your tools. When you say you will check or do something, make that tool call in the same reply.",
+  "The Domios CLI is `codeterm`; call it with the `codeterm` tool (args without the leading `codeterm`) or `exec`.",
+  '- Tabs: `codeterm tab list`, `codeterm tab new --title NAME`, `codeterm send "text" --tab ID`.',
+  '- Agents: `codeterm agent spawn PROVIDER --model ID --task "..."`; providers from `codeterm agent providers`, model ids from `codeterm agent models PROVIDER`.',
+  "- Reference: `codeterm COMMAND --help` and `codeterm docs` (then `codeterm docs NAME`).",
+  'Messages from other tabs arrive as <domios from="tab" tab="ID" ...>BODY</domios>; answer with `codeterm send "reply" --tab ID` (add `--mesh PEER` when mesh="PEER").'
+].join("\n");
+function withDomiosContext(prompt) {
+  return prompt.trim() ? `${DOMIOS_CONTEXT}
+
+${prompt}` : DOMIOS_CONTEXT;
+}
+
+// lmstudio/src/router/activity.ts
+function activityOf(i) {
+  if (i.toolsRunning || i.streaming && i.answering) return "working";
+  if (i.streaming || i.queued) return "thinking";
+  return "idle";
+}
+function activityLine(model, activity) {
+  if (activity === "idle") return "";
+  return ["Domios Router", model, activity === "thinking" ? "Thinking" : "Working"].filter(Boolean).join(" \xB7 ");
+}
+
 // lmstudio/src/plugin.ts
 var CHARTER_REF_PREFIX = "charter:";
 var SHIPPED_CHARTERS = {
@@ -2069,8 +2480,8 @@ function resolveCharterRef(ref) {
   return { charter: "", error: `unknown charter id: ${id}` };
 }
 var DEFAULT_BASE_URL2 = "http://localhost:1234";
-var LAST_MODEL_PATH = ".codeterm/plugins/lmstudio/last-model.json";
-var AUTHORED_PROMPTS_PATH = ".codeterm/plugins/lmstudio/authored-prompts.json";
+var LAST_MODEL_FILE = "last-model.json";
+var AUTHORED_PROMPTS_FILE = "authored-prompts.json";
 var PROMPT_AUTHOR_WORKSPACE = "lmstudio-prompt-authoring";
 var MAX_TOOL_ROUNDS = 8;
 var MAX_MALFORMED_RETRIES = 2;
@@ -2100,72 +2511,22 @@ function readSettings2() {
 function cleanModel(model) {
   return typeof model === "string" ? model.trim() : "";
 }
-function lastModelFilePath() {
-  try {
-    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
-    if (!home) return null;
-    return `${home.replace(/\/+$/, "")}/${LAST_MODEL_PATH}`;
-  } catch {
-    return null;
-  }
-}
 function readLastModel() {
-  try {
-    const path = lastModelFilePath();
-    if (!path) return "";
-    const raw = host.readFile(path);
-    if (!raw) return "";
-    const state = JSON.parse(raw);
-    return cleanModel(state && state.lastModel);
-  } catch {
-    return "";
-  }
+  const state = parseJson2(readDataFile(LAST_MODEL_FILE) || "", null);
+  return cleanModel(state && state.lastModel);
 }
 function rememberLastModel(model) {
   const lastModel = cleanModel(model);
-  if (!lastModel) return;
-  try {
-    const path = lastModelFilePath();
-    if (!path) return;
-    const slash = path.lastIndexOf("/");
-    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
-    host.writeFile(path, JSON.stringify({ lastModel }));
-  } catch {
-  }
-}
-function authoredPromptsFilePath() {
-  try {
-    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
-    if (!home) return null;
-    return `${home.replace(/\/+$/, "")}/${AUTHORED_PROMPTS_PATH}`;
-  } catch {
-    return null;
-  }
+  if (lastModel) writeDataFile(LAST_MODEL_FILE, JSON.stringify({ lastModel }));
 }
 function readAuthoredPrompts() {
-  try {
-    const path = authoredPromptsFilePath();
-    if (!path) return {};
-    const raw = host.readFile(path);
-    if (!raw) return {};
-    const data = JSON.parse(raw);
-    if (!data || typeof data !== "object" || Array.isArray(data)) return {};
-    return data;
-  } catch {
-    return {};
-  }
+  const data = parseJson2(readDataFile(AUTHORED_PROMPTS_FILE) || "", null);
+  return data && typeof data === "object" && !Array.isArray(data) ? data : {};
 }
 function writeAuthoredPrompt(model, draft) {
-  try {
-    const path = authoredPromptsFilePath();
-    if (!path) return;
-    const current = readAuthoredPrompts();
-    current[model] = draft;
-    const slash = path.lastIndexOf("/");
-    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
-    host.writeFile(path, JSON.stringify(current));
-  } catch {
-  }
+  const current = readAuthoredPrompts();
+  current[model] = draft;
+  writeDataFile(AUTHORED_PROMPTS_FILE, JSON.stringify(current));
 }
 function applyAuthoredPrompt(s2, model, draft) {
   if (!model) return;
@@ -2203,16 +2564,16 @@ function baseUrl() {
   return url.replace(/\/+$/, "");
 }
 function presets() {
-  return snapshot().presets.map((p) => {
-    const preset = { id: p.id, name: p.name, model: presetModelId(p), params: presetParams(p) };
-    if (p.description) preset.description = p.description;
-    if (p.systemPrompt !== void 0) preset.systemPrompt = p.systemPrompt;
+  return snapshot().presets.map((p2) => {
+    const preset = { id: p2.id, name: p2.name, model: presetModelId(p2), params: presetParams(p2) };
+    if (p2.description) preset.description = p2.description;
+    if (p2.systemPrompt !== void 0) preset.systemPrompt = p2.systemPrompt;
     return preset;
   });
 }
 function presetById(all, id) {
   if (!id) return null;
-  return all.find((p) => p.id === id) || null;
+  return all.find((p2) => p2.id === id) || null;
 }
 function defaultPreset(all) {
   if (!all.length) return null;
@@ -2221,7 +2582,7 @@ function defaultPreset(all) {
 }
 function presetBoundToModel(all, modelId) {
   if (!modelId) return null;
-  return all.find((p) => typeof p.model === "string" && p.model.trim() === modelId) || null;
+  return all.find((p2) => typeof p2.model === "string" && p2.model.trim() === modelId) || null;
 }
 function resolvePreset(id, modelId) {
   const all = presets();
@@ -2229,11 +2590,14 @@ function resolvePreset(id, modelId) {
   return presetBoundToModel(all, modelId || "") || presetById(all, id) || defaultPreset(all);
 }
 function defaultSystemPrompt(all) {
-  const p = defaultPreset(all);
-  return p && typeof p.systemPrompt === "string" ? p.systemPrompt : "";
+  const p2 = defaultPreset(all);
+  return p2 && typeof p2.systemPrompt === "string" ? p2.systemPrompt : "";
+}
+function sessionEpoch() {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 function nextId(s2, prefix = "lmstudio") {
-  const id = `${prefix}-${s2.seq}`;
+  const id = `${prefix}-${s2.epoch}-${s2.seq}`;
   s2.seq += 1;
   return id;
 }
@@ -2313,9 +2677,9 @@ function errorTextFromBody(raw) {
     const error = obj.error;
     if (typeof error === "string") return error;
     if (error && typeof error === "object") {
-      const nested = error;
-      if (typeof nested.message === "string") return nested.message;
-      if (typeof nested.error === "string") return nested.error;
+      const nested2 = error;
+      if (typeof nested2.message === "string") return nested2.message;
+      if (typeof nested2.error === "string") return nested2.error;
     }
     if (typeof obj.message === "string") return obj.message;
     if (typeof obj.detail === "string") return obj.detail;
@@ -2335,29 +2699,70 @@ function pollFetchStream(jobId) {
     error: "fetchStreamPoll returned non-JSON"
   });
 }
-function emitToolCall(s2, call) {
+function emitToolCall(s2, entry) {
+  const call = entry.call;
   const toolId = nextId(s2, `lmstudio-tool-${call.tool}`);
   const toolArgs = JSON.stringify(call.args);
-  append(s2, "tool_call", toolContent(call), toolId, {
+  const extras = {
     toolName: call.tool,
     toolInput: call.args,
     toolArgs,
     toolId,
     collapsed: true,
     provider: "lmstudio"
-  });
+  };
+  if (entry.callId) Object.assign(extras, { callId: entry.callId, replyId: entry.replyId || "" });
+  append(s2, "tool_call", toolContent(call), toolId, extras);
   return toolId;
 }
-function emitToolResult(s2, call, result, toolId) {
+function emitToolResult(s2, call, result, toolId, callId) {
   const formatted = formatToolResult(call, result);
-  append(s2, "tool_result", formatted, void 0, {
-    toolId,
-    toolResult: formatted,
-    collapsed: true,
-    provider: "lmstudio"
-  });
-  s2.pendingInputs.push(`tool_result:
-${formatted}`);
+  const extras = { toolId, toolResult: formatted, collapsed: true, provider: "lmstudio" };
+  if (callId) extras.callId = callId;
+  append(s2, "tool_result", formatted, void 0, extras);
+  s2.roundResults.push(formatted);
+}
+function sessionFor(sid) {
+  const live = sessions.get(sid);
+  if (live) return live;
+  const saved = savedSession(sid);
+  if (!saved) return void 0;
+  const s2 = resolveSession({ tabId: sid, model: saved.model, preset: saved.preset });
+  if (s2.charterError) return void 0;
+  s2.cursorReset = true;
+  append(s2, "system", "Router reloaded: earlier turns of this tab are no longer in the model's context.");
+  sessions.set(sid, s2);
+  return s2;
+}
+function refreshRoute(s2) {
+  const router = snapshot();
+  const target = reroute(s2.route, { providerId: s2.provider ? s2.provider.id : null, model: s2.model }, router.providers, router.defaultProvider);
+  if (!target.provider) {
+    s2.routeError = target.error || "no enabled provider";
+    return;
+  }
+  if (!s2.provider || s2.provider.id !== target.provider.id || s2.model !== target.model) s2.previousResponseId = null;
+  s2.provider = target.provider;
+  s2.model = target.model;
+  s2.routeError = null;
+}
+function reportedModel(s2) {
+  return s2.provider ? sessionModelId(s2) : s2.route.raw;
+}
+function requestSystem(s2) {
+  if (s2.mode === "watcher" || s2.engine && s2.engine.kind === "machine") return s2.systemPrompt;
+  return withDomiosContext(s2.systemPrompt);
+}
+function routesNatively(s2) {
+  return !!s2.provider && s2.provider.kind !== "lmstudio" && s2.currentRun !== "watcher" && s2.mode !== "watcher";
+}
+function queueContinuation(s2) {
+  const results = s2.roundResults;
+  s2.roundResults = [];
+  if (!results.length) return;
+  const stateless = !!s2.provider && s2.provider.kind !== "lmstudio" && s2.currentRun !== "watcher";
+  s2.pendingInputs.push(stateless ? "" : results.map((r) => `tool_result:
+${r}`).join("\n\n"));
 }
 function promptVariantForModel(modelId, generalPrompt) {
   void modelId;
@@ -2367,43 +2772,13 @@ function systemPromptForModel(generalPrompt, modelId) {
   if (!modelId) return generalPrompt;
   return promptVariantForModel(modelId, generalPrompt);
 }
-function consumeSseEvent(stream, segment) {
-  if (!segment) return;
-  let dataStr = "";
-  for (const line of segment.split(/\r?\n/)) {
-    if (line.indexOf("data:") !== 0) continue;
-    let value = line.slice(5);
-    if (value.charAt(0) === " ") value = value.slice(1);
-    dataStr += value;
-  }
-  if (!dataStr) return;
-  const data = parseJson2(
-    dataStr,
-    null
-  );
-  if (!data || typeof data !== "object") return;
-  const type = typeof data.type === "string" ? data.type : "";
-  if (type.indexOf("message.") === 0 && typeof data.content === "string") {
-    stream.content += data.content;
-  } else if (type.indexOf("reasoning.") === 0 && typeof data.content === "string") {
-    stream.reasoning += data.content;
-  } else if (type === "chat.end") {
-    const result = data.result || {};
-    if (typeof result.response_id === "string") stream.responseId = result.response_id;
-    const stats = result.stats;
-    if (stats && typeof stats === "object") {
-      const input = typeof stats.input_tokens === "number" ? stats.input_tokens : 0;
-      const output = typeof stats.total_output_tokens === "number" ? stats.total_output_tokens : 0;
-      if (input || output) stream.usage = { input, cachedInput: 0, cacheWrite: 0, output };
-    }
-  }
-}
 function consumeRouterEvents(stream, flush) {
   const { events, rest } = splitSse(stream.buffer, flush);
   stream.buffer = rest;
   const acc = emptyDelta();
   for (const ev of events) {
     if (stream.kind === "anthropic") applyAnthropicEvent(acc, ev);
+    else if (stream.kind === "lmstudio") applyNativeEvent(acc, ev);
     else applyOpenAiEvent(acc, ev);
   }
   stream.content += acc.content;
@@ -2411,11 +2786,7 @@ function consumeRouterEvents(stream, flush) {
   if (acc.responseId && !stream.responseId) stream.responseId = acc.responseId;
   if (acc.error) stream.error = acc.error;
   stream.usage = mergeUsage(stream.usage, acc.usage);
-}
-function parseSse(stream, flush) {
-  const segments = stream.buffer.split(/\r?\n\r?\n/);
-  stream.buffer = flush ? "" : segments.pop() ?? "";
-  for (const seg of segments) consumeSseEvent(stream, seg);
+  mergeToolParts(stream.toolParts, acc.toolParts);
 }
 function assembledContext(s2) {
   const prior = [];
@@ -2458,18 +2829,7 @@ function providerLabel(s2) {
   return s2.provider && s2.provider.id !== LMSTUDIO_PROVIDER_ID ? s2.provider.name : "LM Studio";
 }
 function routerTurns(s2, input) {
-  const turns = [];
-  for (const m of s2.messages) {
-    if (m.type === "user") {
-      if (m.content.indexOf(SYSTEM_PROMPT_MARKER) === 0) continue;
-      turns.push({ role: "user", content: m.content });
-    } else if (m.type === "assistant") {
-      turns.push({ role: "assistant", content: m.content });
-    } else if (m.type === "tool_result") {
-      turns.push({ role: "user", content: `tool_result:
-${m.content}` });
-    }
-  }
+  const turns = transcriptTurns(s2.messages, (content) => content.indexOf(SYSTEM_PROMPT_MARKER) === 0);
   const last = turns[turns.length - 1];
   if (input && !(last && last.role === "user" && last.content === input)) turns.push({ role: "user", content: input });
   return turns;
@@ -2484,7 +2844,7 @@ function engineToRouter(messages2) {
   return { system: system.join("\n\n"), turns };
 }
 function startRouterCall(s2, provider, input, opts) {
-  let system = s2.systemPrompt;
+  let system = requestSystem(s2);
   let turns;
   if (opts?.messages) {
     const converted = engineToRouter(opts.messages);
@@ -2496,7 +2856,8 @@ function startRouterCall(s2, provider, input, opts) {
     turns = routerTurns(s2, input);
   }
   const key = getKey(provider);
-  const req = chatRequest(provider, key, { model: s2.model, system, turns, params: s2.params });
+  const tools = !opts?.watcher && s2.mode !== "watcher";
+  const req = chatRequest(provider, key, { model: s2.model, system, turns, params: s2.params, tools });
   const started = startFetchStream({ url: req.url, method: req.method, headers: req.headers, body: req.body || "", timeoutMs: req.timeoutMs });
   if (!started.jobId) {
     append(s2, "system", `${provider.name} stream error: ${redact(started.error || "missing jobId", key)}`);
@@ -2516,12 +2877,14 @@ function beginStream(s2, jobId, kind, watcher) {
     responseId: null,
     kind,
     usage: null,
-    error: null
+    error: null,
+    toolParts: []
   };
   s2.currentRun = watcher || s2.mode === "watcher" ? "watcher" : "interactive";
   s2.done = false;
 }
 function startLmStudioCall(s2, input, opts) {
+  refreshRoute(s2);
   if (s2.routeError) {
     append(s2, "system", `Router error: ${s2.routeError}`);
     s2.done = true;
@@ -2553,7 +2916,7 @@ function startLmStudioCall(s2, input, opts) {
   }
   const body = {
     model: s2.model,
-    system_prompt: s2.systemPrompt,
+    system_prompt: opts?.messages ? s2.systemPrompt : requestSystem(s2),
     input: requestInput,
     stream: true,
     ...s2.params
@@ -2575,7 +2938,7 @@ function startLmStudioCall(s2, input, opts) {
   beginStream(s2, started.jobId, "lmstudio", opts?.watcher);
 }
 function startNextIfIdle(s2) {
-  if (!s2.stream && s2.pendingInputs.length) {
+  if (!s2.stream && !s2.pendingExec && !s2.pendingTools && s2.pendingInputs.length) {
     const next = s2.pendingInputs.shift() || "";
     const queued = parseJson2(next, null);
     if (queued && Array.isArray(queued.watcherMessages)) {
@@ -2587,26 +2950,46 @@ function startNextIfIdle(s2) {
     }
   }
 }
-function finishAssistantMessage(s2, content, responseId, messageId) {
-  if (s2.currentRun === "watcher") {
-    finishLoopAssistantMessage(s2, content, responseId, messageId);
-    return;
-  }
-  if (responseId && !(s2.engine && s2.engine.kind === "machine")) s2.previousResponseId = responseId;
-  finishLoopAssistantMessage(s2, content, responseId, messageId);
+function finishAssistantMessage(s2, content, responseId, messageId, nativeCalls) {
+  if (s2.currentRun !== "watcher" && responseId && !(s2.engine && s2.engine.kind === "machine")) s2.previousResponseId = responseId;
+  finishLoopAssistantMessage(s2, content, responseId, messageId, nativeCalls);
 }
-function finishLoopAssistantMessage(s2, content, responseId, messageId) {
+function nativeEntry(call, replyId) {
+  let raw = {};
+  try {
+    raw = JSON.parse(call.arguments);
+  } catch {
+    return { call: { tool: call.name, args: {} }, callId: call.id, replyId, error: `${call.name} arguments are not valid JSON` };
+  }
+  const checked = checkToolArgs(call.name, raw);
+  if (checked.ok) return { call: { tool: call.name, args: checked.args }, callId: call.id, replyId };
+  const args = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  return { call: { tool: call.name, args }, callId: call.id, replyId, error: checked.error };
+}
+function toolEntries(s2, content, messageId, nativeCalls) {
+  if (nativeCalls.length) return { entries: nativeCalls.map((c) => nativeEntry(c, messageId)), cleaned: content, status: "ok", reason: void 0 };
+  const text = parseTextToolCalls(content);
+  if (text.status === "none") return parseToolEntries(content);
+  const native = routesNatively(s2);
+  const entries = text.calls.map((call) => {
+    const entry = { call: { tool: call.tool, args: call.args } };
+    if (native) Object.assign(entry, { callId: nextId(s2, "call"), replyId: messageId });
+    return entry;
+  });
+  return { entries, cleaned: text.cleaned, status: text.status, reason: text.reason };
+}
+function finishLoopAssistantMessage(s2, content, responseId, messageId, nativeCalls) {
   if (s2.currentRun === "watcher") {
     s2.watcherLastAssistant = content;
     if (responseId) s2.previousResponseId = responseId;
   }
-  const { entries, cleaned, status, reason } = parseToolEntries(content);
+  const { entries, cleaned, status, reason } = toolEntries(s2, content, messageId, nativeCalls);
   if (status === "malformed") {
     if (s2.malformedRetries < MAX_MALFORMED_RETRIES) {
       s2.malformedRetries += 1;
       s2.pendingInputs.push(
         `tool_result:
-ERROR: your codeterm-tool JSON was invalid (${reason || "unparseable tool call"}). Resend a single valid JSON tool call, or answer in plain text if no tool is needed.`
+ERROR: your tool call was invalid (${reason || "unparseable tool call"}). Resend a single valid tool call, or answer in plain text if no tool is needed.`
       );
       return;
     }
@@ -2678,6 +3061,7 @@ function advanceTools(s2) {
     if (s2.toolRounds >= MAX_TOOL_ROUNDS) {
       s2.pendingInputs = [];
       s2.pendingTools = null;
+      s2.roundResults = [];
       if (!s2.capReached) {
         append(s2, "system", `Tool round cap (${MAX_TOOL_ROUNDS}) reached; stopping this turn.`);
         s2.capReached = true;
@@ -2687,24 +3071,29 @@ function advanceTools(s2) {
       return;
     }
     s2.toolRounds += 1;
-    const toolId = emitToolCall(s2, call);
+    const toolId = emitToolCall(s2, entry);
+    if (entry.error) {
+      emitToolResult(s2, call, { error: entry.error }, toolId, entry.callId);
+      continue;
+    }
     if (call.tool === "exec" || call.tool === "codeterm") {
       const shell = execShellCmd(call);
       if (shell.error) {
-        emitToolResult(s2, call, { error: shell.error }, toolId);
+        emitToolResult(s2, call, { error: shell.error }, toolId, entry.callId);
         continue;
       }
-      const started = startExecJob(shell.shellCmd);
+      const started = startExecJob(shell.shellCmd, s2.tabId);
       if (started.jobId) {
-        s2.pendingExec = { call, jobId: started.jobId, toolId };
+        s2.pendingExec = { call, jobId: started.jobId, toolId, callId: entry.callId };
         return;
       }
-      emitToolResult(s2, call, { error: started.error || "host.exec.start failed" }, toolId);
+      emitToolResult(s2, call, { error: started.error || "host.exec.start failed" }, toolId, entry.callId);
       continue;
     }
-    emitToolResult(s2, call, executeTool(call), toolId);
+    emitToolResult(s2, call, executeTool(call), toolId, entry.callId);
   }
   s2.pendingTools = null;
+  queueContinuation(s2);
 }
 function drainExec(s2) {
   while (s2.pendingExec) {
@@ -2713,7 +3102,7 @@ function drainExec(s2) {
     const finished = s2.pendingExec;
     host.execClose(finished.jobId);
     s2.pendingExec = null;
-    emitToolResult(s2, finished.call, execResultFromPoll(poll), finished.toolId);
+    emitToolResult(s2, finished.call, execResultFromPoll(poll), finished.toolId, finished.callId);
     advanceTools(s2);
   }
 }
@@ -2777,11 +3166,8 @@ function pollStream(s2) {
     return;
   }
   const chunks = Array.isArray(poll.chunks) ? poll.chunks : [];
-  if (chunks.length) {
-    stream.buffer += chunks.join("");
-    parseSse(stream, false);
-  }
-  if (poll.done) parseSse(stream, true);
+  if (chunks.length) stream.buffer += chunks.join("");
+  consumeRouterEvents(stream, !!poll.done);
   publishStream(s2, stream, !!poll.done);
 }
 function failStream(s2, stream, message) {
@@ -2838,7 +3224,7 @@ function publishStream(s2, stream, done) {
     host.fetchStreamClose(stream.jobId);
     s2.stream = null;
     emitUsage(s2, stream.usage, stream.messageId);
-    finishAssistantMessage(s2, stream.content, stream.kind === "lmstudio" ? stream.responseId : null, stream.messageId);
+    finishAssistantMessage(s2, stream.content, stream.kind === "lmstudio" ? stream.responseId : null, stream.messageId, finishToolCalls(stream.toolParts));
   }
 }
 function resolveSession(ctx) {
@@ -2853,7 +3239,7 @@ function resolveSession(ctx) {
   const preset = boundPreset || resolvePreset(ctx.preset, chosenModel);
   const model = chosenModel || cleanModel(preset && preset.model);
   const router = snapshot();
-  const routerPreset = preset ? router.presets.find((p) => p.id === preset.id) : void 0;
+  const routerPreset = preset ? router.presets.find((p2) => p2.id === preset.id) : void 0;
   const target = resolveModelTarget(model, router.providers, router.defaultProvider, model ? void 0 : routerPreset && routerPreset.provider);
   const presetSystemPrompt = preset && typeof preset.systemPrompt === "string" ? preset.systemPrompt : "";
   const generalSystemPrompt = (boundPreset ? presetSystemPrompt || defaultSystemPrompt(allPresets) : ctx.systemPrompt || presetSystemPrompt) || defaultSystemPrompt(allPresets) || "";
@@ -2875,8 +3261,11 @@ function resolveSession(ctx) {
   }
   const effectiveSystemPrompt = mode === "watcher" ? "" : systemPrompt;
   return {
+    tabId: ctx.tabId,
     messages: [],
     seq: 0,
+    epoch: sessionEpoch(),
+    cursorReset: false,
     systemPrompt: effectiveSystemPrompt,
     mode,
     engine,
@@ -2888,6 +3277,7 @@ function resolveSession(ctx) {
     watcherLastAssistant: "",
     model: target.model,
     provider: target.provider,
+    route: { raw: model, presetProvider: model ? void 0 : routerPreset && routerPreset.provider },
     routeError: target.error || null,
     params,
     previousResponseId: null,
@@ -2899,6 +3289,7 @@ function resolveSession(ctx) {
     malformedRetries: 0,
     pendingTools: null,
     pendingExec: null,
+    roundResults: [],
     pendingAuthor: null,
     charterError
   };
@@ -2918,10 +3309,11 @@ var plugin = {
     }
     sessions.set(sid, s2);
     rememberLastModel(sessionModelId(s2));
+    if (s2.mode !== "watcher") saveSession(sid, { model: reportedModel(s2), preset: ctx.preset });
     return { sessionId: sid };
   },
   sendMessage(sid, text) {
-    const s2 = sessions.get(sid);
+    const s2 = sessionFor(sid);
     if (!s2) return;
     if (s2.mode === "watcher") {
       host.log("warn", `sendMessage ignored for watcher session ${sid}`);
@@ -2952,6 +3344,7 @@ var plugin = {
     s2.pendingInputs = [];
     s2.pendingTools = null;
     s2.pendingExec = null;
+    s2.roundResults = [];
     s2.stream = null;
     s2.toolRounds = 0;
     s2.capReached = false;
@@ -2973,7 +3366,8 @@ var plugin = {
   poll(sid, cursor) {
     const s2 = sessions.get(sid);
     if (!s2) return { messages: [], cursor: cursor ?? "0", done: true };
-    const from = Number(cursor ?? 0) || 0;
+    const from = s2.cursorReset ? 0 : Number(cursor ?? 0) || 0;
+    s2.cursorReset = false;
     let liveFrom = -1;
     if (s2.stream) {
       for (let i = 0; i < s2.messages.length; i += 1) {
@@ -2984,15 +3378,47 @@ var plugin = {
       }
     }
     const nextCursor = liveFrom >= 0 ? liveFrom : s2.messages.length;
-    return {
+    const done = s2.done && !s2.stream && !s2.pendingExec && !s2.pendingAuthor && s2.pendingInputs.length === 0;
+    const state = activityOf({
+      streaming: !!s2.stream,
+      answering: !!s2.stream && !!s2.stream.content,
+      toolsRunning: !!s2.pendingExec || !!s2.pendingTools,
+      queued: !done
+    });
+    const result = {
       messages: s2.messages.slice(from),
       cursor: String(nextCursor),
-      done: s2.done && !s2.stream && !s2.pendingExec && !s2.pendingAuthor && s2.pendingInputs.length === 0
+      done,
+      activity: { state, statusLine: activityLine(sessionModelId(s2), state) }
     };
+    return result;
+  },
+  cancel(sid) {
+    const s2 = sessions.get(sid);
+    if (!s2) return;
+    const busy = !!s2.stream || !!s2.pendingExec || !!s2.pendingTools || s2.pendingInputs.length > 0;
+    if (s2.stream) {
+      host.fetchStreamClose(s2.stream.jobId);
+      if (s2.stream.content) append(s2, "assistant", s2.stream.content, s2.stream.messageId);
+      s2.stream = null;
+    }
+    if (s2.pendingExec) {
+      host.execClose(s2.pendingExec.jobId);
+      emitToolResult(s2, s2.pendingExec.call, { error: "cancelled" }, s2.pendingExec.toolId, s2.pendingExec.callId);
+      s2.pendingExec = null;
+    }
+    s2.pendingTools = null;
+    s2.pendingInputs = [];
+    s2.roundResults = [];
+    if (busy) append(s2, "system", "Stopped.");
+    if (s2.currentRun === "watcher") completeWatcherTick(s2, null);
+    else s2.done = true;
   },
   closeSession(sid) {
+    forgetSession(sid);
     const s2 = sessions.get(sid);
     if (s2 && s2.stream) host.fetchStreamClose(s2.stream.jobId);
+    if (s2 && s2.pendingExec) host.execClose(s2.pendingExec.jobId);
     sessions.delete(sid);
   },
   listModels() {
@@ -3013,11 +3439,12 @@ var plugin = {
     return models;
   },
   listPresets() {
-    return presets().map((p) => ({ id: p.id, name: p.name, description: p.description }));
+    return presets().map((p2) => ({ id: p2.id, name: p2.name, description: p2.description }));
   },
   sessionInfo(sid) {
     const s2 = sessions.get(sid);
-    return { model: s2 ? sessionModelId(s2) || void 0 : void 0, systemPrompt: s2 ? s2.systemPrompt : void 0 };
+    if (s2) refreshRoute(s2);
+    return { model: s2 ? reportedModel(s2) || void 0 : void 0, systemPrompt: s2 ? s2.systemPrompt : void 0 };
   },
   describeModelSwitch,
   authorSystemPrompt(sid, draft) {
@@ -3078,6 +3505,8 @@ var plugin = {
       append(s2, "system", `Router error: ${target.error || `cannot route ${model}`}`);
       return;
     }
+    s2.route = { raw: model.trim() };
+    saveSession(sid, { model: model.trim() });
     if (s2.provider && s2.provider.id === target.provider.id && s2.model === target.model) return;
     s2.provider = target.provider;
     s2.model = target.model;
@@ -3098,5 +3527,6 @@ var plugin_default = {
   ...decision_default,
   viewCall,
   onAgentCommand,
-  __test_resetRouter: resetModelCache
+  __test_resetRouter: resetModelCache,
+  __test_domiosContext: DOMIOS_CONTEXT
 };
