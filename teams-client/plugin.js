@@ -171,6 +171,12 @@ function protectStorage(p) {
   storageProtectionCache[p.root] = result;
   return result;
 }
+function windowsAclCommands(root, principal) {
+  return [
+    [root, "/reset", "/T", "/C", "/Q"],
+    [root, "/inheritance:r", "/grant:r", `${principal}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "/C"]
+  ];
+}
 function applyStorageProtection(p) {
   for (const dir of [p.root, p.home, p.runtime, p.npmCache]) {
     try {
@@ -185,9 +191,10 @@ function applyStorageProtection(p) {
     const who = runProcess(names.whoami, [], env2);
     const principal = who.ok ? who.stdout.trim() : "";
     if (!principal || /[\r\n]/.test(principal)) return { error: "storage-protection-failed", message: "Could not identify the Windows account for the plugin cache ACL." };
-    const grant = `${principal}:(OI)(CI)F`;
-    const acl = runProcess(names.icacls, [nativePath(p.root), "/inheritance:r", "/grant:r", grant, "*S-1-5-18:(OI)(CI)F", "/T", "/C"], env2);
-    if (!acl.ok) return { error: "storage-protection-failed", message: "Could not restrict the plugin cache with a Windows ACL. No sign-in was started." };
+    for (const args of windowsAclCommands(nativePath(p.root), principal)) {
+      const acl = runProcess(names.icacls, args, env2);
+      if (!acl.ok) return { error: "storage-protection-failed", message: "Could not restrict the plugin cache with a Windows ACL. No sign-in was started." };
+    }
     return {};
   }
   const env = envFor(p);
@@ -1307,6 +1314,7 @@ var plugin = {
   __test_useAccount: useAccount,
   __test_agentHistory: agentHistory,
   __test_credentials: credentialPublic,
+  __test_windowsAclCommands: windowsAclCommands,
   __test_metadataReader: METADATA_READER
 };
 var plugin_default = plugin;

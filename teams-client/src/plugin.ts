@@ -160,6 +160,15 @@ function protectStorage(p: Paths): { error?: string; message?: string } {
   return result;
 }
 
+// `/inheritance:r` with `/T` strips each file's inherited ACEs while `(OI)(CI)` grants never apply to files,
+// leaving existing files with an empty ACL; reset children to inherit, then restrict only the root.
+function windowsAclCommands(root: string, principal: string): string[][] {
+  return [
+    [root, "/reset", "/T", "/C", "/Q"],
+    [root, "/inheritance:r", "/grant:r", `${principal}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "/C"],
+  ];
+}
+
 function applyStorageProtection(p: Paths): { error?: string; message?: string } {
   for (const dir of [p.root, p.home, p.runtime, p.npmCache]) {
     try { if (!host.fs.makeDirs(dir)) return { error: "storage-protection-failed", message: "Could not create the plugin-owned private runtime directory." }; }
@@ -171,9 +180,10 @@ function applyStorageProtection(p: Paths): { error?: string; message?: string } 
     const who = runProcess(names.whoami, [], env);
     const principal = who.ok ? who.stdout.trim() : "";
     if (!principal || /[\r\n]/.test(principal)) return { error: "storage-protection-failed", message: "Could not identify the Windows account for the plugin cache ACL." };
-    const grant = `${principal}:(OI)(CI)F`;
-    const acl = runProcess(names.icacls, [nativePath(p.root), "/inheritance:r", "/grant:r", grant, "*S-1-5-18:(OI)(CI)F", "/T", "/C"], env);
-    if (!acl.ok) return { error: "storage-protection-failed", message: "Could not restrict the plugin cache with a Windows ACL. No sign-in was started." };
+    for (const args of windowsAclCommands(nativePath(p.root), principal)) {
+      const acl = runProcess(names.icacls, args, env);
+      if (!acl.ok) return { error: "storage-protection-failed", message: "Could not restrict the plugin cache with a Windows ACL. No sign-in was started." };
+    }
     return {};
   }
   const env = envFor(p);
@@ -1255,6 +1265,7 @@ const plugin: PluginModule = {
   __test_useAccount: useAccount,
   __test_agentHistory: agentHistory,
   __test_credentials: credentialPublic,
+  __test_windowsAclCommands: windowsAclCommands,
   __test_metadataReader: METADATA_READER,
 };
 

@@ -409,7 +409,7 @@ test("Windows sign-in protects the plugin root using the blocking whoami result 
     assert.equal(plugin.__test_loginPoll(result.jobId).state, "logged-in");
     plugin.__test_status();
     assert.equal(env.calls.filter((call) => call.bin === "whoami.exe").length, 1, "the cached storage protection avoids another identity subprocess per status");
-    assert.equal(env.calls.filter((call) => call.bin === "icacls.exe").length, 1, "the cached storage protection avoids another ACL subprocess per status");
+    assert.equal(env.calls.filter((call) => call.bin === "icacls.exe").length, 2, "the cached storage protection avoids another ACL subprocess per status");
   } finally { env.cleanup(); }
 });
 
@@ -1100,6 +1100,14 @@ test("browser sign-in starts a detached m365 job without credentials in argv", (
       assert.equal(plugin.__test_loginPoll(started.jobId).state, "logged-in", "each platform iteration releases its detached login job");
     } finally { env.cleanup(); }
   }
+});
+
+test("Windows ACL plan restricts only the root and never strips inheritance recursively", () => {
+  const [reset, restrict] = plugin.__test_windowsAclCommands("C:\\root", "HOST\\owner");
+  assert.deepEqual(reset, ["C:\\root", "/reset", "/T", "/C", "/Q"]);
+  assert.equal(restrict[0], "C:\\root");
+  assert.ok(restrict.includes("/inheritance:r") && restrict.includes("HOST\\owner:(OI)(CI)F") && restrict.includes("*S-1-5-18:(OI)(CI)F"));
+  assert.equal(restrict.includes("/T"), false);
 });
 
 for (const [name, fn] of tests) {
