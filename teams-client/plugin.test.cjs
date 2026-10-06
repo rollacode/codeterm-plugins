@@ -10,6 +10,24 @@ process.on("exit", () => fs.rmSync(testBundle, { force: true }));
 
 const tests = [];
 function test(name, fn) { tests.push([name, fn]); }
+
+test("plugin view does not repeat the plugin name and shows status as a label, not a slug", () => {
+  const React = require("react");
+  const { renderToStaticMarkup } = require("react-dom/server");
+  const { App } = require("./ui/src/app.tsx");
+  const { StatusBar } = require("./ui/src/kit.tsx");
+  const { statusView } = require("./ui/src/status.ts");
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "plugin.json"), "utf8"));
+  const page = renderToStaticMarkup(React.createElement(App));
+  assert.equal(page.includes(manifest.displayName), false, "the host header already names the plugin");
+  assert.match(page, /<h2[^>]*>/, "the view is organized into titled sections");
+  for (const state of [undefined, "installed-not-configured", "logged-in", "brand-new_state"]) {
+    const view = statusView(state);
+    assert.doesNotMatch(view.label, /[-_]/, `${state} renders as words`);
+    const bar = renderToStaticMarkup(React.createElement(StatusBar, { ...view, busy: false, onRefresh() {} }));
+    if (state) assert.equal(bar.includes(state), false, `${state} is never shown raw`);
+  }
+});
 function assertOk(value, message) { assert.equal(!!value, true, message); }
 function normalize(value) { return path.posix.normalize(String(value).replaceAll("\\", "/")); }
 
@@ -740,12 +758,22 @@ test("view shows the resolved account, tenant, and destination before enabling t
     assert.equal(preview.sender.accountId, "identity-a");
     assert.equal(preview.tenant.id, "tenant-a");
     assert.equal(preview.destination.id, "19:chat-a@thread.v2");
-    const source = fs.readFileSync(path.join(__dirname, "ui/src/main.tsx"), "utf8");
-    assert.match(source, /Sender account:/);
-    assert.match(source, /Tenant:/);
-    assert.match(source, /immutable chat id/);
-    assert.match(source, /previewMatches && policyMatches/);
-    assert.match(source, /disabled={!sendEnabled}/);
+    const React = require("react");
+    const { renderToStaticMarkup } = require("react-dom/server");
+    const { PreviewCard } = require("./ui/src/app.tsx");
+    const { sendGate } = require("./ui/src/status.ts");
+    const health = { state: "logged-in", message: "", accountId: "identity-a", tenantId: "tenant-a" };
+    const unapproved = { configured: false, allowedDestinations: [] };
+    const approved = { configured: true, senderAccountId: "identity-a", senderTenantId: "tenant-a", allowedDestinations: [{ id: preview.destination.id, label: preview.destination.label }] };
+    const base = { preview, chatId: preview.destination.id, draft: preview.text, health, busy: false, blockedKey: "", sendResult: "" };
+    const locked = sendGate({ ...base, policy: unapproved });
+    assert.deepEqual(locked, { previewMatches: true, policyMatches: false, sendEnabled: false }, "send stays locked until this chat is approved");
+    assert.equal(sendGate({ ...base, policy: approved }).sendEnabled, true);
+    assert.equal(sendGate({ ...base, policy: approved, draft: "edited" }).sendEnabled, false, "editing the text invalidates the preview");
+    assert.equal(sendGate({ ...base, policy: { ...approved, senderTenantId: "tenant-b" } }).sendEnabled, false, "a policy for another tenant never unlocks send");
+    const markup = renderToStaticMarkup(React.createElement(PreviewCard, { preview, policy: unapproved, ...locked, busy: false, sendInProgress: false, sendResult: "", onApprove() {}, onSend() {}, onEdit() {} }));
+    for (const value of [preview.sender.accountId, preview.tenant.id, preview.destination.id, preview.text]) assert.ok(markup.includes(value), `${value} is shown before sending`);
+    assert.doesNotMatch(markup, /<button[^>]*>Send<\/button>/, "the unapproved card offers approval, not Send");
   } finally { env.cleanup(); }
 });
 
