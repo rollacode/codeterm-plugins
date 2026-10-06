@@ -47,6 +47,17 @@ export function decideSend(scope: SendScope, chatId: string, origin: SendOrigin)
   };
 }
 
+export function scopeIncludes(scope: SendScope | undefined, id: string): boolean {
+  return !!scope && scope.mode === "only" && scope.chats.some((chat) => chat.id === id);
+}
+
+export function toggleScopeChat(scope: SendScope | undefined, chat: ScopeChat): SendScope {
+  const chats = scope && scope.mode === "only" ? scope.chats : [];
+  return scopeIncludes(scope, chat.id)
+    ? { mode: "only", chats: chats.filter((item) => item.id !== chat.id) }
+    : { mode: "only", chats: chats.concat([{ id: chat.id, title: chat.title }]) };
+}
+
 export type MatchableChat = { id: string; title: string; username?: string | null };
 export type ChatMatch<T extends MatchableChat> = { match: T | null; ambiguous: boolean; candidates: T[] };
 

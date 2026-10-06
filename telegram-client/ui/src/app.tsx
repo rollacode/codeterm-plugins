@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Actions, Btn, codeBlock, Disclosure, Field, inputStyle, Notice, pageStyle, Section, StatusBar, type Tone } from "./kit";
+import { scopeIncludes, toggleScopeChat, type SendScope } from "../../../shared/src/send-scope";
 import { accountLine, isSignedIn, sendStateLabel, setupRows, statusView, viewLayout, type AccountInfo, type LoginStepInfo, type SetupInfo, type ViewHealth } from "./status";
 
 declare global {
@@ -31,7 +32,6 @@ type Preview = {
   restriction?: string | null;
 };
 export type ChatRow = { id: string; title: string; type?: string; username?: string | null };
-export type SendScope = { mode: "all" } | { mode: "only"; chats: Array<{ id: string; title: string }> };
 type ChatSearch = { query?: string; match?: ChatRow | null; ambiguous?: boolean; candidates?: ChatRow[]; chats?: ChatRow[] };
 
 export function App() {
@@ -472,16 +472,7 @@ export function LoginStepForm({ step, busy, onSubmit }: { step: LoginStepInfo; b
   );
 }
 
-export function scopeIncludes(scope: SendScope | undefined, id: string): boolean {
-  return !!scope && scope.mode === "only" && scope.chats.some((chat) => chat.id === id);
-}
-
-export function toggleScopeChat(scope: SendScope | undefined, chat: ChatRow): SendScope {
-  const chats = scope && scope.mode === "only" ? scope.chats : [];
-  return scopeIncludes(scope, chat.id)
-    ? { mode: "only", chats: chats.filter((item) => item.id !== chat.id) }
-    : { mode: "only", chats: chats.concat([{ id: chat.id, title: chat.title }]) };
-}
+export { toggleScopeChat };
 
 export function ChatResults({ chats, selectedId, scope, busy, onChoose, onScope }: {
   chats: ChatRow[]; selectedId: string; scope?: SendScope; busy: boolean; onChoose: (chat: ChatRow) => void; onScope: (scope: SendScope) => void;

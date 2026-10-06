@@ -1,5 +1,5 @@
 import { humanizeState, type Tone } from "./kit";
-import type { Health, SendPolicy, SendPreview } from "./app";
+import type { Health, SendPreview } from "./app";
 
 const STATES: Record<string, { label: string; tone: Tone }> = {
   "logged-in": { label: "Signed in", tone: "ok" },
@@ -31,22 +31,19 @@ export function isSignedIn(state: string | null | undefined): boolean {
   return state === "logged-in";
 }
 
-export function sendGate({ preview, chatId, draft, health, policy, busy, blockedKey, sendResult }: {
+export function sendGate({ preview, chatId, draft, health, busy, blockedKey, sendResult }: {
   preview: SendPreview | null;
   chatId: string;
   draft: string;
   health: Health | null;
-  policy: SendPolicy;
   busy: boolean;
   blockedKey: string;
   sendResult: string;
-}): { previewMatches: boolean; policyMatches: boolean; sendEnabled: boolean } {
+}): { previewMatches: boolean; sendEnabled: boolean } {
   const previewMatches = !!preview && preview.destination.id === chatId && preview.text === draft &&
     health?.state === "logged-in" && preview.sender.accountId === health.accountId && preview.sender.tenantId === health.tenantId;
-  const policyMatches = !!preview && policy.configured && policy.senderAccountId === preview.sender.accountId &&
-    policy.senderTenantId === preview.sender.tenantId && policy.allowedDestinations.some((item) => item.id === preview.destination.id);
-  const sendEnabled = !busy && previewMatches && policyMatches && blockedKey !== preview?.idempotencyKey && !sendResult;
-  return { previewMatches, policyMatches, sendEnabled };
+  const sendEnabled = !busy && previewMatches && blockedKey !== preview?.idempotencyKey && !sendResult;
+  return { previewMatches, sendEnabled };
 }
 
 const RUNTIME_MISSING = ["not-installed", "install-failed", "install-in-progress", "unsupported-platform"];

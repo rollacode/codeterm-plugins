@@ -131,7 +131,14 @@ function mockHost(options = {}) {
       if (args[0] === "teams" && args[1] === "chat" && args[2] === "message" && args[3] === "list") {
         return { code: 0, stdout: JSON.stringify(options.messages || [{ id: "message-1", createdDateTime: "2026-10-05T10:00:00Z", from: "Owner", content: "A recent message" }]), stderr: "" };
       }
-      if (args[0] === "teams" && args[1] === "chat" && args[2] === "message" && args[3] === "send") {
+      const requestMethod = args.includes("--method") ? args[args.indexOf("--method") + 1] : "get";
+      if (args[0] === "request" && requestMethod === "get" && /\/me\/chats\?/.test(args[args.indexOf("--url") + 1] || "")) {
+        const rows = (options.chats || [{ id: "19:chat-a@thread.v2", topic: "Project" }]).map((chat) => ({ chatType: "group", members: [], ...chat }));
+        return { code: 0, stdout: JSON.stringify({ value: rows }), stderr: "" };
+      }
+      if (args[0] === "request" && requestMethod === "post") {
+        const bodyArg = args[args.indexOf("--body") + 1] || "";
+        record.body = bodyArg.startsWith("@") ? files.get(normalize(bodyArg.slice(1))) : undefined;
         if (typeof options.onSendStart === "function") options.onSendStart(plugin.__test_paths().outbox, args, envRecord);
         if (sendMode === "timeout") return { code: 1, stdout: "", stderr: "request timed out after the Graph request was submitted" };
         if (sendMode === "rate-limited") return { code: 1, stdout: "", stderr: "HTTP 429 Too Many Requests\nRetry-After: 30" };
@@ -141,7 +148,7 @@ function mockHost(options = {}) {
         if (sendMode === "conditional-access-blocked") return { code: 1, stdout: "", stderr: "AADSTS53003 Conditional Access blocked" };
         if (sendMode === "mfa-required") return { code: 1, stdout: "", stderr: "AADSTS50076 MFA required" };
         if (sendMode === "rejected") return { code: 1, stdout: "", stderr: "HTTP 403 Forbidden" };
-        return { code: 0, stdout: options.sendOutput || "", stderr: "" };
+        return { code: 0, stdout: options.sendOutput !== undefined ? options.sendOutput : JSON.stringify({ id: "1700000000001", chatId: args[args.indexOf("--url") + 1] }), stderr: "" };
       }
       if (args[0] === "logout") {
         currentName = "";
@@ -276,17 +283,6 @@ plugin.onAgentCommand = (ctx) => drive(rawOnAgentCommand(ctx));
 const rawViewCall = plugin.viewCall.bind(plugin);
 plugin.viewCall = (...args) => drive(rawViewCall(...args));
 
-function approveSingleChat(chatId = "19:chat-a@thread.v2", text = "safe test message") {
-  const listed = command("chats");
-  assert.ok("result" in listed, listed.error || "chat list resolved");
-  const previewed = plugin.viewCall("preview", { chatId, text });
-  assert.ok("result" in previewed, previewed.error || "preview resolved");
-  const preview = JSON.parse(previewed.result);
-  const approved = plugin.viewCall("approveSendPolicy", { approveDestination: true, previewId: preview.previewId });
-  assert.ok(approved && approved.result, approved && approved.error || "single-chat policy saved");
-  return { preview, policy: JSON.parse(approved.result) };
-}
-
 test("faithful await mock returns a marker and resumes through the one-shot continuation", () => {
   const env = mockHost({ platform: "darwin" });
   try {
@@ -298,20 +294,25 @@ test("faithful await mock returns a marker and resumes through the one-shot cont
   } finally { env.cleanup(); }
 });
 
-test("agent preview cannot approve a chat; a view preview can", () => {
+test("no agent verb changes the send restriction; only the view can", () => {
   const env = mockHost({ platform: "darwin" });
   try {
-    command("chats");
-    const agentPreview = command("preview", ["19:chat-a@thread.v2", "safe test message"]);
-    const denied = plugin.viewCall("approveSendPolicy", { approveDestination: true, previewId: JSON.parse(agentPreview.result).previewId });
-    assert.match(denied.error, /only a preview created in this view/i);
-    const approved = approveSingleChat();
-    assert.equal(approved.policy.configured, true);
+    for (const verb of ["setSendScope", "restrict", "allow", "approveSendPolicy"]) {
+      const result = command(verb, ["only", "19:chat-a@thread.v2"]);
+      assert.match(result.error, /unknown Teams Client verb/i);
+    }
+    assert.equal(host.fs.fileExists(plugin.__test_paths().scope), false);
+    assert.deepEqual(plugin.viewCall("sendScope", {}), { mode: "all" });
+    const saved = plugin.viewCall("setSendScope", { mode: "only", chats: [{ id: "19:chat-a@thread.v2", title: "Project" }] });
+    assert.equal(saved.error, undefined, saved.error);
+    assert.deepEqual(plugin.__test_readSendScope(), { mode: "only", chats: [{ id: "19:chat-a@thread.v2", title: "Project" }] });
+    assert.match(plugin.viewCall("setSendScope", { mode: "only", chats: [{ id: "Display Name" }] }).error, /not changed/i);
+    assert.equal(plugin.viewCall("approveSendPolicy", { approveDestination: true }).error.includes("Unknown Teams Client view method"), true);
   } finally { env.cleanup(); }
 });
 
 function sendCalls(env) {
-  return env.calls.filter((call) => call.args[0] === "teams" && call.args[1] === "chat" && call.args[2] === "message" && call.args[3] === "send");
+  return env.calls.filter((call) => call.args[0] === "request" && call.args.includes("--method") && call.args[call.args.indexOf("--method") + 1] === "post");
 }
 
 function readOutbox(env, file = plugin.__test_paths().outbox) {
@@ -359,13 +360,13 @@ test("Darwin never becomes Windows and Windows uses its platform path", () => {
   } finally { windows.cleanup(); }
 });
 
-test("Teams outbox and policy stay inside the Teams plugin data root", () => {
+test("Teams outbox and send restriction stay inside the Teams plugin data root", () => {
   for (const platform of ["darwin", "linux", "win32"]) {
     const env = mockHost({ platform, isWindows: platform === "win32" });
     try {
       const p = plugin.__test_paths();
       assert.equal(path.posix.relative(normalize(p.root), normalize(p.outbox)), "outbox.json");
-      assert.equal(path.posix.relative(normalize(p.root), normalize(p.policy)), "send-policy.json");
+      assert.equal(path.posix.relative(normalize(p.root), normalize(p.scope)), "send-scope.json");
       assert.match(normalize(p.root), /teams-client$/);
     } finally { env.cleanup(); }
   }
@@ -536,11 +537,10 @@ test("personal account is refused for delegated chat send before an attempt is r
   });
   try {
     const p = plugin.__test_paths();
-    host.fs.writeFile(p.policy, JSON.stringify({ approved: true, mode: "single-chat", senderAccountId: "consumer-identity", senderTenantId: plugin.__test_personalTenantId, allowedDestinations: [{ id: "19:chat-a@thread.v2", label: "Project" }], approvedAt: 1 }));
     const routed = command("send", ["19:chat-a@thread.v2", "--key", "personal-case", "personal send"]);
     assert.match(routed.error, /^upstream-rejected:/i);
     assert.match(routed.error, /work or school account/i);
-    assert.equal(env.calls.some((call) => call.args.includes("send")), false);
+    assert.equal(sendCalls(env).length, 0);
     assert.equal(host.fs.fileExists(p.outbox), false);
   } finally { env.cleanup(); }
 });
@@ -617,7 +617,7 @@ test("lifecycle detection returns each installed and session state", () => {
   }
 });
 
-test("verb routing covers read, lifecycle, preview, and policy-gated send verbs", () => {
+test("verb routing covers read, lifecycle, preview, and send verbs", () => {
   const env = mockHost({ platform: "darwin" });
   try {
     for (const verb of ["accounts", "chats", "health", "logout"]) {
@@ -637,8 +637,8 @@ test("verb routing covers read, lifecycle, preview, and policy-gated send verbs"
     const preview = command("preview", ["19:chat-a@thread.v2", "exact message"]);
     assert.ok("result" in preview, preview.error || "preview resolves after chats warmed the tenant cache");
     assert.equal(env.calls.length, before, "preview does not execute m365 or fetch");
-    const refusal = command("send", ["19:chat-a@thread.v2", "exact message"]);
-    assert.match(refusal.error, /policy-not-set/i);
+    const sent = command("send", ["19:chat-a@thread.v2", "exact message"]);
+    assert.equal(JSON.parse(sent.result).status, "sent", sent.error);
   } finally { env.cleanup(); }
 });
 
@@ -659,7 +659,8 @@ test("preview returns the resolved sender, tenant, immutable destination, and ex
     assert.equal(preview.destination.id, "19:chat-a@thread.v2");
     assert.equal(preview.destination.label, "Project");
     assert.equal(preview.text, "exact payload");
-    assert.equal(preview.policy.configured, false);
+    assert.equal(preview.allowed, true);
+    assert.equal(preview.restriction, null);
     assert.equal(env.calls.length, callsBefore, "preview uses the resolved identity and chat list without another exec");
     assert.equal(env.writes.length, writesBefore, "preview writes no policy or attempt");
     assert.equal(env.files.has(normalize(plugin.__test_paths().outbox)), false);
@@ -677,9 +678,10 @@ test("preview resolves duplicate chat labels by immutable id and rejects a label
     assert.equal(JSON.parse(selected.result).destination.id, "19:chat-two@thread.v2");
     const before = env.calls.length;
     const rejected = command("preview", ["Alex", "hello"]);
-    assert.match(rejected.error, /^destination-not-permitted:/i);
+    assert.match(rejected.error, /^chat-not-found:.*chats <name>/i);
     assert.equal(rejected.result, undefined);
-    assert.equal(env.calls.length, before, "a chat label is rejected without another m365 command");
+    assert.ok(env.calls.length - before <= 2, "an unknown id costs at most one chat-list refresh");
+    assert.equal(sendCalls(env).length, 0);
   } finally { env.cleanup(); }
 });
 
@@ -722,30 +724,145 @@ test("preview refuses an account when its tenant is unresolved", () => {
   } finally { env.cleanup(); }
 });
 
-test("no policy means policy-not-set with no attempt record and no send exec", () => {
-  const env = mockHost({ platform: "darwin" });
+const sendFixtureChats = [
+  { id: "19:anna-1on1@unq.gbl.spaces", chatType: "oneOnOne", topic: null, members: [
+    { displayName: "Jordan North", userId: "identity-a", email: "jordan@north.example" },
+    { displayName: "Anna Ivanova", userId: "user-anna", email: "anna.ivanova@north.example" },
+  ] },
+  { id: "19:anna-p-1on1@unq.gbl.spaces", chatType: "oneOnOne", topic: null, members: [
+    { displayName: "Jordan North", userId: "identity-a", email: "jordan@north.example" },
+    { displayName: "Anna Petrova", userId: "user-annap", email: "anna.petrova@north.example" },
+  ] },
+  { id: "19:release@thread.v2", chatType: "group", topic: "Release crew", members: [
+    { displayName: "Jordan North", userId: "identity-a", email: "jordan@north.example" },
+    { displayName: "Sam Lee", userId: "user-sam", email: "sam@north.example" },
+  ] },
+];
+
+test("with no setup, an agent finds a 1:1 chat by the person's name, sends, and gets the Graph message id", () => {
+  const env = mockHost({ platform: "darwin", chats: sendFixtureChats });
   try {
-    const result = command("send", ["19:chat-a@thread.v2", "--key", "not-logged-in-case", "hello"]);
-    assert.match(result.error, /^policy-not-set:/i);
-    assert.equal(env.files.has(normalize(plugin.__test_paths().outbox)), false);
-    assert.equal(env.calls.length, 0, "closed policy gate issues no m365 exec");
+    const found = JSON.parse(command("chats", ["Anna", "Ivanova"]).result);
+    assert.equal(found.ambiguous, false);
+    assert.equal(found.match.id, "19:anna-1on1@unq.gbl.spaces");
+    assert.equal(found.match.title, "Anna Ivanova", "a 1:1 chat is titled by the other member, not the owner");
+    assert.deepEqual(found.match.members, ["Anna Ivanova"]);
+    const result = command("send", [found.match.id, "--key", "anna-1", "test"]);
+    assert.equal(result.error, undefined, result.error);
+    const sent = JSON.parse(result.result);
+    assert.equal(sent.status, "sent");
+    assert.equal(sent.graphMessageId, "1700000000001");
+    assert.equal(sent.destination.label, "Anna Ivanova");
+    assert.equal(sendCalls(env).length, 1);
+    assert.equal(host.fs.fileExists(plugin.__test_paths().scope), false, "the default path needs no restriction file");
+    assert.equal(JSON.parse(command("chats", ["anna.ivanova@north.example"]).result).match.id, "19:anna-1on1@unq.gbl.spaces");
+  } finally { env.cleanup(); }
+});
+
+test("a group chat resolved by topic sends without any approval step", () => {
+  const env = mockHost({ platform: "darwin", chats: sendFixtureChats });
+  try {
+    const group = JSON.parse(command("chats", ["release crew"]).result).match;
+    assert.equal(group.chatType, "group");
+    const sent = JSON.parse(command("send", [group.id, "--key", "group-1", "hi all"]).result);
+    assert.equal(sent.status, "sent");
+    assert.match(sendCalls(env)[0].args[2], /\/chats\/19:release@thread\.v2\/messages$/);
+  } finally { env.cleanup(); }
+});
+
+test("an ambiguous chat name returns candidates and no match, and nothing is sent", () => {
+  const env = mockHost({ platform: "darwin", chats: sendFixtureChats });
+  try {
+    const found = JSON.parse(command("chats", ["anna"]).result);
+    assert.equal(found.match, null);
+    assert.equal(found.ambiguous, true);
+    assert.deepEqual(found.candidates.map((chat) => chat.title), ["Anna Ivanova", "Anna Petrova"]);
+    assert.match(found.next, /ask which one/i);
+    const none = JSON.parse(command("chats", ["Nobody"]).result);
+    assert.equal(none.match, null);
+    assert.equal(none.ambiguous, false);
     assert.equal(sendCalls(env).length, 0);
   } finally { env.cleanup(); }
 });
 
-test("single-chat policy refuses other destination ids before exec", () => {
-  const env = mockHost({ platform: "darwin" });
+test("an idempotent retry with the same key returns the recorded Graph id without resending", () => {
+  const env = mockHost({ platform: "darwin", chats: sendFixtureChats });
   try {
-    const { policy } = approveSingleChat();
-    assert.equal(policy.mode, "single-chat");
-    assert.deepEqual(policy.allowedDestinations, [{ id: "19:chat-a@thread.v2", label: "Project" }]);
-    const callsBefore = env.calls.length;
-    const refused = command("send", ["19:other-chat@thread.v2", "hello"]);
-    assert.match(refused.error, /^destination-not-permitted:/i);
-    assert.equal(env.calls.length, callsBefore);
-    assert.equal(sendCalls(env).length, 0);
-    assert.equal(env.files.has(normalize(plugin.__test_paths().outbox)), false);
+    const args = ["19:anna-1on1@unq.gbl.spaces", "--key", "retry-1", "test"];
+    const first = JSON.parse(command("send", args).result);
+    const second = JSON.parse(command("send", args).result);
+    assert.deepEqual(second, first);
+    assert.equal(sendCalls(env).length, 1);
+    const rebound = command("send", ["19:release@thread.v2", "--key", "retry-1", "test"]);
+    assert.match(rebound.error, /^invalid-request:.*different chat or text/i);
+    assert.equal(sendCalls(env).length, 1);
+    const keyless = JSON.parse(command("send", ["19:anna-1on1@unq.gbl.spaces", "keyless fresh text"]).result);
+    assert.match(keyless.idempotencyKey, /^[0-9a-f]{32}$/, "a send without --key gets a fresh key to retry with");
   } finally { env.cleanup(); }
+});
+
+test("m365 success without a Graph message id is recorded as unknown, never as sent", () => {
+  const env = mockHost({ platform: "darwin", chats: sendFixtureChats, sendOutput: "" });
+  try {
+    const result = command("send", ["19:anna-1on1@unq.gbl.spaces", "--key", "no-id", "hello"]);
+    assert.match(result.error, /^unknown:.*no message id.*do not report it as delivered/i);
+    assert.equal(readOutbox(env).attempts[0].state, "unknown");
+  } finally { env.cleanup(); }
+});
+
+test("message text that m365 would read as a file path or that spans lines is sent literally", () => {
+  const env = mockHost({ platform: "win32", isWindows: true, chats: sendFixtureChats });
+  try {
+    const text = "@C:/Users/owner/secrets.txt\nsecond line & \"quoted\" %PATH%";
+    const sent = command("send", ["19:anna-1on1@unq.gbl.spaces", "--key", "literal", text]);
+    assert.equal(JSON.parse(sent.result).status, "sent", sent.error);
+    const call = sendCalls(env)[0];
+    assert.equal(call.args.some((arg) => arg.includes("secrets.txt") || arg.includes("%PATH%")), false, "the message never reaches argv");
+    assert.equal(JSON.parse(call.body).body.content, text);
+  } finally { env.cleanup(); }
+});
+
+test("an id the account has no chat for is chat-not-found before any send", () => {
+  const env = mockHost({ platform: "darwin", chats: sendFixtureChats });
+  try {
+    const result = command("send", ["19:missing@thread.v2", "--key", "missing", "hello"]);
+    assert.match(result.error, /^chat-not-found:.*chats <name>/i);
+    assert.equal(sendCalls(env).length, 0);
+    assert.equal(env.files.has(normalize(plugin.__test_paths().outbox)), false, "no attempt is recorded");
+  } finally { env.cleanup(); }
+});
+
+test("an owner restriction refuses agent sends to other chats with chat-not-allowed; view sends stay unrestricted", () => {
+  const env = mockHost({ platform: "darwin", chats: sendFixtureChats });
+  try {
+    assert.equal(plugin.viewCall("setSendScope", { mode: "only", chats: [{ id: "19:release@thread.v2", title: "Release crew" }] }).error, undefined);
+    const refused = command("send", ["19:anna-1on1@unq.gbl.spaces", "--key", "blocked", "hello"]);
+    assert.match(refused.error, /^chat-not-allowed:.*Restrict agent sends.*Release crew/);
+    assert.equal(sendCalls(env).length, 0);
+    const preview = JSON.parse(command("preview", ["19:anna-1on1@unq.gbl.spaces", "hello"]).result);
+    assert.equal(preview.allowed, false);
+    assert.match(preview.restriction, /Restrict agent sends/);
+    assert.equal(JSON.parse(command("send", ["19:release@thread.v2", "--key", "ok", "hello"]).result).status, "sent");
+    const viewPreview = JSON.parse(plugin.viewCall("preview", { chatId: "19:anna-1on1@unq.gbl.spaces", text: "from owner" }).result);
+    const viewSend = plugin.viewCall("send", { chatId: "19:anna-1on1@unq.gbl.spaces", text: "from owner", idempotencyKey: viewPreview.idempotencyKey });
+    assert.equal(JSON.parse(viewSend.result).status, "sent", viewSend.error);
+    assert.equal(sendCalls(env).length, 2);
+    assert.equal(plugin.viewCall("setSendScope", { mode: "all" }).error, undefined);
+    assert.equal(JSON.parse(command("send", ["19:anna-1on1@unq.gbl.spaces", "--key", "blocked", "hello"]).result).status, "sent");
+  } finally { env.cleanup(); }
+});
+
+test("view: Restrict agent sends defaults to all chats and lists the allowed chats when enabled", () => {
+  const React = require("react");
+  const { renderToStaticMarkup } = require("react-dom/server");
+  const { SendScopeEditor, chatLabel } = require("./ui/src/app.tsx");
+  const noop = () => {};
+  assert.match(renderToStaticMarkup(React.createElement(SendScopeEditor, { scope: { mode: "all" }, busy: false, onSave: noop })), /checked=""[^>]*\/?>\s*<span>All chats \(default\)/);
+  assert.match(renderToStaticMarkup(React.createElement(SendScopeEditor, { scope: { mode: "only", chats: [] }, busy: false, onSave: noop })), /agent cannot send anywhere/);
+  const listed = renderToStaticMarkup(React.createElement(SendScopeEditor, { scope: { mode: "only", chats: [{ id: "19:release@thread.v2", title: "Release crew" }] }, busy: false, onSave: noop }));
+  assert.match(listed, /Release crew/);
+  assert.match(listed, />Remove</);
+  assert.equal(chatLabel({ id: "19:x", title: "Anna Ivanova", chatType: "oneOnOne" }), "Anna Ivanova · 1:1");
 });
 
 test("view shows the resolved account, tenant, and destination before enabling the send control", () => {
@@ -766,17 +883,16 @@ test("view shows the resolved account, tenant, and destination before enabling t
     const { PreviewCard } = require("./ui/src/app.tsx");
     const { sendGate } = require("./ui/src/status.ts");
     const health = { state: "logged-in", message: "", accountId: "identity-a", tenantId: "tenant-a" };
-    const unapproved = { configured: false, allowedDestinations: [] };
-    const approved = { configured: true, senderAccountId: "identity-a", senderTenantId: "tenant-a", allowedDestinations: [{ id: preview.destination.id, label: preview.destination.label }] };
     const base = { preview, chatId: preview.destination.id, draft: preview.text, health, busy: false, blockedKey: "", sendResult: "" };
-    const locked = sendGate({ ...base, policy: unapproved });
-    assert.deepEqual(locked, { previewMatches: true, policyMatches: false, sendEnabled: false }, "send stays locked until this chat is approved");
-    assert.equal(sendGate({ ...base, policy: approved }).sendEnabled, true);
-    assert.equal(sendGate({ ...base, policy: approved, draft: "edited" }).sendEnabled, false, "editing the text invalidates the preview");
-    assert.equal(sendGate({ ...base, policy: { ...approved, senderTenantId: "tenant-b" } }).sendEnabled, false, "a policy for another tenant never unlocks send");
-    const markup = renderToStaticMarkup(React.createElement(PreviewCard, { preview, policy: unapproved, ...locked, busy: false, sendInProgress: false, sendResult: "", onApprove() {}, onSend() {}, onEdit() {} }));
+    const ready = sendGate(base);
+    assert.deepEqual(ready, { previewMatches: true, sendEnabled: true }, "a matching preview enables Send with no approval step");
+    assert.equal(sendGate({ ...base, draft: "edited" }).sendEnabled, false, "editing the text invalidates the preview");
+    assert.equal(sendGate({ ...base, health: { ...health, tenantId: "tenant-b" } }).sendEnabled, false, "a preview from another tenant never enables Send");
+    assert.equal(sendGate({ ...base, blockedKey: preview.idempotencyKey }).sendEnabled, false, "an unknown outcome blocks resending that key");
+    const markup = renderToStaticMarkup(React.createElement(PreviewCard, { preview, ...ready, busy: false, sendInProgress: false, sendResult: "", onSend() {}, onEdit() {} }));
     for (const value of [preview.sender.accountId, preview.tenant.id, preview.destination.id, preview.text]) assert.ok(markup.includes(value), `${value} is shown before sending`);
-    assert.doesNotMatch(markup, /<button[^>]*>Send<\/button>/, "the unapproved card offers approval, not Send");
+    assert.match(markup, /<button[^>]*>Send<\/button>/);
+    assert.doesNotMatch(markup, /Approve this chat/);
   } finally { env.cleanup(); }
 });
 
@@ -784,7 +900,6 @@ test("not-logged-in returns its named action before creating an attempt", () => 
   const env = mockHost({ platform: "darwin", status: "logged-out" });
   try {
     const p = plugin.__test_paths();
-    host.fs.writeFile(p.policy, JSON.stringify({ approved: true, mode: "single-chat", senderAccountId: "identity-a", senderTenantId: "tenant-a", allowedDestinations: [{ id: "19:chat-a@thread.v2", label: "Project" }], approvedAt: 1 }));
     const result = command("send", ["19:chat-a@thread.v2", "--key", "reauth-case", "hello"]);
     assert.match(result.error, /^not-logged-in:/i);
     assert.match(result.error, /sign in/i);
@@ -797,7 +912,6 @@ test("read-slice reauth status is returned with its cause before creating an att
   const env = mockHost({ platform: "darwin", statusError: "AADSTS50173 refresh token was revoked" });
   try {
     const p = plugin.__test_paths();
-    host.fs.writeFile(p.policy, JSON.stringify({ approved: true, mode: "single-chat", senderAccountId: "identity-a", senderTenantId: "tenant-a", allowedDestinations: [{ id: "19:chat-a@thread.v2", label: "Project" }], approvedAt: 1 }));
     const result = command("send", ["19:chat-a@thread.v2", "hello"]);
     assert.match(result.error, /^reauth-needed:/i);
     assert.match(result.error, /refresh-token-revoked/i);
@@ -817,7 +931,6 @@ test("outbox attempt is persisted as pending before the m365 send is issued", ()
     },
   });
   try {
-    approveSingleChat("19:chat-a@thread.v2", "pending order checked");
     const result = command("send", ["19:chat-a@thread.v2", "pending order", "checked"]);
     assert.ok("result" in result, result.error || "m365 returned a confirmed result");
     assert.equal(stateBeforeExec, "pending", "ledger write precedes the upstream m365 command");
@@ -831,7 +944,6 @@ test("outbox attempt is persisted as pending before the m365 send is issued", ()
 test("same idempotency key keeps one sent record and returns its recorded result", () => {
   const env = mockHost({ platform: "darwin" });
   try {
-    approveSingleChat();
     const args = ["19:chat-a@thread.v2", "--key", "sent-case", "hello safe chat"];
     const first = command("send", args);
     assert.ok("result" in first, first.error || "first send was confirmed");
@@ -846,7 +958,7 @@ test("same idempotency key keeps one sent record and returns its recorded result
     assert.equal(typeof ledger.attempts[0].createdAt, "number");
     assert.equal(typeof ledger.attempts[0].updatedAt, "number");
     assert.equal(JSON.parse(first.result).sender.tenantId, "tenant-a");
-    assert.equal(JSON.parse(first.result).graphMessageId, null, "the pinned m365 command does not expose the Graph id on success");
+    assert.equal(JSON.parse(first.result).graphMessageId, "1700000000001", "the Graph message id is returned");
     assert.match(JSON.parse(first.result).deliveryGuarantee, /not an exactly-once/i);
   } finally { env.cleanup(); }
 });
@@ -854,7 +966,6 @@ test("same idempotency key keeps one sent record and returns its recorded result
 test("sent is terminal and never resent", () => {
   const env = mockHost({ platform: "darwin" });
   try {
-    approveSingleChat();
     const args = ["19:chat-a@thread.v2", "--key", "terminal-case", "same text"];
     const first = command("send", args);
     assert.ok("result" in first);
@@ -868,7 +979,6 @@ test("sent is terminal and never resent", () => {
 test("definitive m365 rejection is recorded as failed with upstream-rejected action", () => {
   const env = mockHost({ platform: "darwin", sendMode: "rejected" });
   try {
-    approveSingleChat();
     const args = ["19:chat-a@thread.v2", "--key", "rejected-case", "hello"];
     const first = command("send", args);
     assert.match(first.error, /^upstream-rejected:/i);
@@ -894,7 +1004,6 @@ test("unknown send outcome is recorded and never automatically retried", () => {
     onSendStart(outboxPath, args, envRecord) { stateBeforeExec = readOutbox(envRecord, outboxPath).attempts[0].state; },
   });
   try {
-    approveSingleChat();
     const args = ["19:chat-a@thread.v2", "--key", "unknown-case", "hello"];
     const first = command("send", args);
     assert.equal(stateBeforeExec, "pending");
@@ -915,7 +1024,6 @@ test("unknown send outcome is recorded and never automatically retried", () => {
 test("default idempotency key uses the fresh preview nonce", () => {
   const env = mockHost({ platform: "darwin" });
   try {
-    approveSingleChat();
     const args = ["19:chat-a@thread.v2", "same derived request"];
     const preview = JSON.parse(plugin.viewCall("preview", { chatId: args[0], text: args[1] }).result);
     const first = command("send", args, "derived-key-test");
@@ -932,8 +1040,7 @@ test("m365 internal Retry-After handling leaves a throttled outcome unknown and 
   for (const mode of ["rate-limited", "service-unavailable"]) {
     const env = mockHost({ platform: "darwin", sendMode: mode });
     try {
-      approveSingleChat();
-      const args = ["19:chat-a@thread.v2", "--key", `throttle-${mode}`, "hello"];
+        const args = ["19:chat-a@thread.v2", "--key", `throttle-${mode}`, "hello"];
       const first = command("send", args);
       assert.match(first.error, /^unknown:/i);
       assert.match(first.error, /retried this throttled send internally/i);
@@ -961,8 +1068,7 @@ test("reauth failures retain the read taxonomy and never enter the rate-limit pa
   for (const [mode, cause, action] of cases) {
     const env = mockHost({ platform: "darwin" });
     try {
-      approveSingleChat();
-      env.setSendMode(mode);
+        env.setSendMode(mode);
       const result = command("send", ["19:chat-a@thread.v2", "--key", `reauth-${mode}`, "hello"]);
       assert.match(result.error, /^reauth-needed:/i, cause);
       assert.match(result.error, new RegExp(cause.replaceAll("-", "[- ]"), "i"));
@@ -977,9 +1083,9 @@ test("reauth failures retain the read taxonomy and never enter the rate-limit pa
 });
 
 test("all send failures have distinct actionable taxonomy and no generic failure text", () => {
-  const states = ["not-logged-in", "reauth-needed", "policy-not-set", "destination-not-permitted", "rate-limited", "upstream-rejected", "unknown"];
+  const states = ["invalid-request", "not-logged-in", "reauth-needed", "chat-not-found", "rate-limited", "upstream-rejected", "unknown"];
   const messages = states.map((state) => plugin.__test_failureMessage(state, state === "rate-limited" ? 123 : "fixture detail", "mfa-required"));
-  const actions = [/sign in/i, /Sign in again|MFA/i, /explicitly approve/i, /approved immutable chat/i, /inspect Teams Client status|selected chat/i, /Correct the permission|request issue/i, /inspect the selected chat/i];
+  const actions = [/send again/i, /sign in/i, /Sign in again|MFA/i, /chats <name>/i, /inspect Teams Client status|selected chat/i, /Correct the permission|request issue/i, /do not report it as delivered/i];
   assert.equal(new Set(messages).size, states.length);
   states.forEach((state, index) => {
     assert.ok(messages[index].startsWith(`${state}:`));
@@ -990,16 +1096,19 @@ test("all send failures have distinct actionable taxonomy and no generic failure
   assert.equal(source.toLowerCase().includes(["send", "failed"].join(" ")), false);
 });
 
-test("send transport follows D5 through m365 with isolated environment and no credential in argv", () => {
+test("send goes through m365 request with the text in a staged body file, isolated environment, and no credential in argv", () => {
   const env = mockHost({ platform: "darwin" });
   try {
-    approveSingleChat();
     env.calls.length = 0;
     const result = command("send", ["19:chat-a@thread.v2", "--key", "transport-case", "hello"]);
     assert.ok("result" in result, result.error || "m365 confirmed the send");
     const call = sendCalls(env)[0];
-    assert.ok(call, "the upstream call is the m365 Teams chat message send command");
-    assert.deepEqual(call.args, ["teams", "chat", "message", "send", "--chatId", "19:chat-a@thread.v2", "--message", "hello", "--output", "json"]);
+    assert.ok(call, "the upstream call is an m365 Graph POST");
+    const bodyArg = call.args[call.args.indexOf("--body") + 1];
+    assert.deepEqual(call.args, ["request", "--url", "https://graph.microsoft.com/v1.0/chats/19:chat-a@thread.v2/messages", "--method", "post", "--content-type", "application/json", "--body", bodyArg, "--output", "json"]);
+    assert.match(bodyArg, /^@.*send-body-[0-9a-f]{16}\.json$/);
+    assert.deepEqual(JSON.parse(call.body), { body: { contentType: "text", content: "hello" } });
+    assert.equal(env.files.has(normalize(bodyArg.slice(1))), false, "the staged body file is removed after the call");
     assert.equal(normalize(call.env.HOME), plugin.__test_paths().home);
     assert.equal(normalize(call.env.USERPROFILE), plugin.__test_paths().home);
     for (const value of ["fixture-access-token", "fixture-password", "fixture-client-secret"]) assert.equal(call.args.some((arg) => arg.includes(value)), false);
@@ -1031,6 +1140,7 @@ test("chats emit immutable ids only and history is bounded by count and bytes", 
     const chats = JSON.parse(listed.result).chats;
     assert.deepEqual(chats.map((chat) => chat.id), ["19:immutable-chat@thread.v2"]);
     assert.equal(chats[0].topic, "Friendly label");
+    assert.equal(chats[0].title, "Friendly label");
     const displayName = plugin.__test_agentHistory(["Friendly label"]);
     assert.ok("error" in displayName);
     assert.match(displayName.error, /immutable-chat-id|display names are not ids/i);

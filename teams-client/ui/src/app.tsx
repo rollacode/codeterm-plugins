@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Actions, Btn, codeBlock, Disclosure, Field, inputStyle, Notice, pageStyle, Section, StatusBar, type Tone } from "./kit";
+import { matchChats, scopeIncludes, toggleScopeChat, type SendScope } from "../../../shared/src/send-scope";
 import { isSignedIn, primarySection, sendGate, setupRows, statusView } from "./status";
 
 declare global {
@@ -27,16 +28,16 @@ export type Health = {
   loginJobId?: string | null;
 };
 
-type Chat = { id: string; topic?: string | null };
-export type SendPolicy = { configured: boolean; mode?: string | null; senderAccountId?: string | null; senderTenantId?: string | null; allowedDestinations: Array<{ id: string; label: string }> };
+export type Chat = { id: string; title: string; topic?: string | null; chatType?: string | null; members?: string[]; username?: string | null };
 export type SendPreview = {
   previewId: string;
   idempotencyKey: string;
   sender: { id: string; accountId: string; upn: string; tenantId: string; identityKey: string };
   tenant: { id: string };
-  destination: { id: string; label: string };
+  destination: { id: string; label: string; chatType?: string | null; members?: string[] };
   text: string;
-  policy: SendPolicy;
+  allowed?: boolean;
+  restriction?: string | null;
 };
 
 export function App() {
@@ -46,7 +47,8 @@ export function App() {
   const [chatId, setChatId] = useState("");
   const [draft, setDraft] = useState("");
   const [preview, setPreview] = useState<SendPreview | null>(null);
-  const [policy, setPolicy] = useState<SendPolicy>({ configured: false, allowedDestinations: [] });
+  const [scope, setScope] = useState<SendScope>({ mode: "all" });
+  const [chatQuery, setChatQuery] = useState("");
   const [sendResult, setSendResult] = useState("");
   const [blockedKey, setBlockedKey] = useState("");
   const [sendInProgress, setSendInProgress] = useState(false);
@@ -68,8 +70,8 @@ export function App() {
       setChats(nextChats);
       setChatId((currentId) => nextChats.some((chat) => chat.id === currentId) ? currentId : "");
       if (chatResult.error) setMessage(chatResult.error);
-      const currentPolicy = await window.ct!.invoke("policy") as SendPolicy;
-      setPolicy(currentPolicy || { configured: false, allowedDestinations: [] });
+      const currentScope = await window.ct!.invoke("sendScope") as SendScope;
+      setScope(currentScope && currentScope.mode ? currentScope : { mode: "all" });
       if (listed.error && current.state === "logged-in") setMessage(listed.error);
       else if (!chatResult.error) setMessage("");
     } catch (error) {
@@ -169,16 +171,13 @@ export function App() {
     }
   }
 
-  async function approveDestination() {
-    if (!preview) return;
+  async function saveScope(next: SendScope) {
     setBusy(true);
     setMessage("");
     try {
-      const response = await window.ct!.invoke("approveSendPolicy", { approveDestination: true, previewId: preview.previewId }) as { result?: string; error?: string };
+      const response = await window.ct!.invoke("setSendScope", next) as { result?: string; error?: string };
       if (response.error) throw new Error(response.error);
-      if (!response.result) throw new Error("Teams Client did not save the single-chat policy.");
-      setPolicy(JSON.parse(response.result) as SendPolicy);
-      setMessage("Policy saved for the sender, tenant, and one immutable chat shown in this preview.");
+      if (response.result) setScope(JSON.parse(response.result) as SendScope);
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -215,7 +214,9 @@ export function App() {
   const signedIn = isSignedIn(health?.state);
   const section = primarySection(health?.state);
   const status = statusView(health?.state);
-  const { previewMatches, policyMatches, sendEnabled } = sendGate({ preview, chatId, draft, health, policy, busy, blockedKey, sendResult });
+  const { previewMatches, sendEnabled } = sendGate({ preview, chatId, draft, health, busy, blockedKey, sendResult });
+  const shownChats = chatQuery.trim() ? matchChats(chats, chatQuery, 50).candidates : chats;
+  const selectedChat = chats.find((chat) => chat.id === chatId) || null;
 
   return (
     <main style={pageStyle}>
@@ -246,13 +247,21 @@ export function App() {
         </Section>
       )}
 
-      <Section title="Preview and send" hint={signedIn ? "Pick one chat and preview the message. Sending unlocks after you approve that exact chat." : "Sign in first to load your chats."}>
+      <Section title="Preview and send" hint={signedIn ? "Pick a chat, preview the message, then send." : "Sign in first to load your chats."}>
+        <Field label="Find chat">
+          <input value={chatQuery} autoComplete="off" placeholder="Name, topic, or email" disabled={busy || chats.length === 0} onChange={(event) => setChatQuery(event.target.value)} style={inputStyle} />
+        </Field>
         <Field label="Chat">
           <select value={chatId} disabled={busy || chats.length === 0} onChange={(event) => { setChatId(event.target.value); invalidatePreview(); }} style={inputStyle}>
-            <option value="">{chats.length === 0 ? "No chats loaded" : "Choose a chat"}</option>
-            {chats.map((chat) => <option key={chat.id} value={chat.id}>{chat.topic ? `${chat.topic} (${chat.id})` : chat.id}</option>)}
+            <option value="">{chats.length === 0 ? "No chats loaded" : shownChats.length === 0 ? "No matching chats" : "Choose a chat"}</option>
+            {shownChats.map((chat) => <option key={chat.id} value={chat.id}>{chatLabel(chat)}</option>)}
           </select>
         </Field>
+        {scope.mode === "only" && selectedChat && (
+          <Actions>
+            <Btn disabled={busy} onClick={() => void saveScope(toggleScopeChat(scope, selectedChat))}>{scopeIncludes(scope, selectedChat.id) ? "Remove from agent list" : "Allow for agent"}</Btn>
+          </Actions>
+        )}
         <Field label="Message">
           <textarea value={draft} rows={4} disabled={busy || !signedIn} onChange={(event) => { setDraft(event.target.value); invalidatePreview(); }} style={{ ...inputStyle, resize: "vertical" }} />
         </Field>
@@ -265,23 +274,24 @@ export function App() {
         {preview && (
           <PreviewCard
             preview={preview}
-            policy={policy}
             previewMatches={previewMatches}
-            policyMatches={policyMatches}
             sendEnabled={sendEnabled}
             busy={busy}
             sendInProgress={sendInProgress}
             sendResult={sendResult}
-            onApprove={() => void approveDestination()}
             onSend={() => void sendPreview()}
             onEdit={invalidatePreview}
           />
         )}
       </Section>
 
+      <Section title="Restrict agent sends" hint="Off by default: the agent can send to any chat this account can write to. Sends you make here are never restricted.">
+        <SendScopeEditor scope={scope} busy={busy} onSave={(next) => void saveScope(next)} />
+      </Section>
+
       <Disclosure summary="Security details">
         <p style={{ margin: "0 0 6px" }}>If your tenant allows user consent, approve the m365 permissions in the browser. If it restricts user consent, a tenant administrator must approve those permissions once. This plugin does not create an Entra app registration.</p>
-        <p style={{ margin: "0 0 6px" }}>The approved policy covers one sender, one tenant, and one immutable chat. The send button stays disabled until the preview shows the current account and tenant.</p>
+        <p style={{ margin: "0 0 6px" }}>Every send is recorded in a local idempotency ledger, so a repeated key is never sent twice, and a send without a Graph message id is reported as unknown rather than delivered.</p>
         <p style={{ margin: "0 0 6px" }}>m365 retries throttling internally. A surfaced 429 or 503 is recorded as unknown because the message may already have arrived.</p>
         <p style={{ margin: 0 }}>Agent verbs: accounts, use, chats, history, health, preview, send, logout.</p>
       </Disclosure>
@@ -289,16 +299,18 @@ export function App() {
   );
 }
 
-export function PreviewCard({ preview, policy, previewMatches, policyMatches, sendEnabled, busy, sendInProgress, sendResult, onApprove, onSend, onEdit }: {
+export function chatLabel(chat: Chat): string {
+  const kind = chat.chatType === "oneOnOne" ? "1:1" : chat.chatType === "group" ? "group" : chat.chatType === "meeting" ? "meeting" : "";
+  return kind ? `${chat.title} · ${kind}` : chat.title;
+}
+
+export function PreviewCard({ preview, previewMatches, sendEnabled, busy, sendInProgress, sendResult, onSend, onEdit }: {
   preview: SendPreview;
-  policy: SendPolicy;
   previewMatches: boolean;
-  policyMatches: boolean;
   sendEnabled: boolean;
   busy: boolean;
   sendInProgress: boolean;
   sendResult: string;
-  onApprove: () => void;
   onSend: () => void;
   onEdit: () => void;
 }) {
@@ -310,17 +322,44 @@ export function PreviewCard({ preview, policy, previewMatches, policyMatches, se
             <p style={{ margin: 0 }}>Sender account <code>{preview.sender.accountId}</code></p>
             <p style={{ margin: "4px 0 0" }}>Tenant <code>{preview.tenant.id}</code></p>
             <p style={{ margin: "4px 0 0" }}>Chat <code>{preview.destination.id}</code></p>
-            <p style={{ margin: "4px 0 0" }}>Policy: {policyMatches ? "approved for this account, tenant, and chat" : policy.configured ? "approved for a different sender, tenant, or chat" : "not set"}</p>
           </Disclosure>
+          {preview.allowed === false && <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--ct-warn, #e0a030)" }}>The agent may not send to this chat under Restrict agent sends; your own send from here is allowed.</p>}
           <Actions>
-            {policyMatches
-              ? <Btn kind="primary" disabled={!sendEnabled} onClick={onSend}>{sendInProgress ? "Sending…" : "Send"}</Btn>
-              : <Btn kind="primary" disabled={busy || !previewMatches} onClick={onApprove}>Approve this chat</Btn>}
+            <Btn kind="primary" disabled={!sendEnabled} onClick={onSend}>{sendInProgress ? "Sending…" : "Send"}</Btn>
             <Btn disabled={busy} onClick={onEdit}>Edit</Btn>
           </Actions>
-          {policyMatches && <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--ct-muted, #9aa)" }}>Sending can pause for 10 seconds or more while Microsoft throttles. Wait for the result.</p>}
+          {previewMatches && <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--ct-muted, #9aa)" }}>Sending can pause for 10 seconds or more while Microsoft throttles. Wait for the result.</p>}
           {sendResult && <pre role="status" style={codeBlock}>{sendResult}</pre>}
         </div>
+  );
+}
+
+export function SendScopeEditor({ scope, busy, onSave }: { scope?: SendScope; busy: boolean; onSave: (scope: SendScope) => void }) {
+  const mode = scope?.mode || "all";
+  const chats = scope && scope.mode === "only" ? scope.chats : [];
+  return (
+    <div role="radiogroup" aria-label="Agent send restriction" style={{ display: "grid", gap: 8, fontSize: 12.5 }}>
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input type="radio" name="send-scope" checked={mode === "all"} disabled={busy} onChange={() => onSave({ mode: "all" })} />
+        <span>All chats (default)</span>
+      </label>
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input type="radio" name="send-scope" checked={mode === "only"} disabled={busy} onChange={() => onSave({ mode: "only", chats })} />
+        <span>Only these chats</span>
+      </label>
+      {mode === "only" && (
+        chats.length ? (
+          <ul aria-label="Chats the agent may send to" style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}>
+            {chats.map((chat) => (
+              <li key={chat.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}><strong>{chat.title || chat.id}</strong> <span style={{ color: "var(--ct-muted, #9aa)" }}>{chat.id}</span></span>
+                <Btn disabled={busy} onClick={() => onSave({ mode: "only", chats: chats.filter((item) => item.id !== chat.id) })}>Remove</Btn>
+              </li>
+            ))}
+          </ul>
+        ) : <p style={{ margin: 0, color: "var(--ct-warn, #e0a030)" }}>No chats on the list yet, so the agent cannot send anywhere. Pick a chat above and choose Allow for agent.</p>
+      )}
+    </div>
   );
 }
 

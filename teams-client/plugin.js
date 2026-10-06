@@ -23,11 +23,115 @@ __export(plugin_exports, {
   default: () => plugin_default
 });
 module.exports = __toCommonJS(plugin_exports);
+
+// shared/src/send-scope.ts
+var ALL_CHATS = { mode: "all" };
+var MAX_SCOPE_CHATS = 200;
+function scopeChats(value, validId) {
+  if (!Array.isArray(value) || value.length > MAX_SCOPE_CHATS) return null;
+  const out = [];
+  for (const item of value) {
+    const id = item && typeof item.id === "string" ? item.id : "";
+    if (!validId(id)) return null;
+    if (out.some((chat) => chat.id === id)) continue;
+    out.push({ id, title: typeof item.title === "string" ? item.title.slice(0, 200) : "" });
+  }
+  return out;
+}
+function parseSendScope(raw, validId) {
+  if (raw === null || raw === void 0 || raw === "") return ALL_CHATS;
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return { mode: "only", chats: [] };
+  }
+  if (value && value.mode === "all") return ALL_CHATS;
+  const chats = value && value.mode === "only" ? scopeChats(value.chats, validId) : null;
+  return { mode: "only", chats: chats || [] };
+}
+function validateSendScope(value, validId) {
+  if (value && value.mode === "all") return ALL_CHATS;
+  if (!value || value.mode !== "only") return { error: "Choose a restriction mode: all or only." };
+  const chats = scopeChats(value.chats, validId);
+  if (!chats) return { error: `List up to ${MAX_SCOPE_CHATS} chats by their immutable ids.` };
+  return { mode: "only", chats };
+}
+function decideSend(scope, chatId, origin) {
+  if (origin === "view" || scope.mode === "all") return { allow: true };
+  if (scope.chats.some((chat) => chat.id === chatId)) return { allow: true };
+  const allowed = scope.chats.length ? scope.chats.map((chat) => chat.title || chat.id).join(", ") : "no chats";
+  return {
+    allow: false,
+    reason: "chat-not-allowed",
+    message: `chat-not-allowed: The owner's "Restrict agent sends" setting permits only these chats: ${allowed}. ${chatId} is not one of them. Ask the owner to add it in the plugin view (Restrict agent sends) or to switch the setting back to all chats.`
+  };
+}
+var CYRILLIC = {
+  \u0430: "a",
+  \u0431: "b",
+  \u0432: "v",
+  \u0433: "g",
+  \u0434: "d",
+  \u0435: "e",
+  \u0451: "e",
+  \u0436: "zh",
+  \u0437: "z",
+  \u0438: "i",
+  \u0439: "y",
+  \u043A: "k",
+  \u043B: "l",
+  \u043C: "m",
+  \u043D: "n",
+  \u043E: "o",
+  \u043F: "p",
+  \u0440: "r",
+  \u0441: "s",
+  \u0442: "t",
+  \u0443: "u",
+  \u0444: "f",
+  \u0445: "kh",
+  \u0446: "ts",
+  \u0447: "ch",
+  \u0448: "sh",
+  \u0449: "shch",
+  \u044A: "",
+  \u044B: "y",
+  \u044C: "",
+  \u044D: "e",
+  \u044E: "yu",
+  \u044F: "ya",
+  \u0456: "i",
+  \u0457: "yi",
+  \u0454: "ye",
+  \u0491: "g"
+};
+function words(value) {
+  const latin = Array.from(value.toLowerCase().normalize("NFC")).map((ch) => CYRILLIC[ch] ?? ch).join("");
+  return latin.normalize("NFD").replace(/[̀-ͯ]/g, "").split(/[^a-z0-9]+/).filter(Boolean);
+}
+function matchChats(chats, query, limit = 20) {
+  const raw = query.trim().toLowerCase();
+  const tokens = words(raw);
+  if (!tokens.length) return { match: null, ambiguous: false, candidates: [] };
+  const byId = chats.filter((chat) => chat.id.toLowerCase() === raw);
+  if (byId.length === 1) return { match: byId[0], ambiguous: false, candidates: byId };
+  const hits = chats.filter((chat) => {
+    const haystack = words(`${chat.title} ${chat.username || ""}`);
+    return tokens.every((token) => haystack.some((word) => word.startsWith(token)));
+  });
+  const key = tokens.join(" ");
+  const exact = hits.filter((chat) => words(chat.title).join(" ") === key || !!chat.username && words(chat.username).join(" ") === key);
+  const match = exact.length === 1 ? exact[0] : hits.length === 1 ? hits[0] : null;
+  return { match, ambiguous: !match && hits.length > 1, candidates: hits.slice(0, limit) };
+}
+
+// teams-client/src/plugin.ts
 var VERSION = "11.11.0";
 var PACKAGE = "@pnp/cli-microsoft365";
 var CLIENT_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
 var ROOT = "~/.codeterm/teams-client";
-var INITIAL_SEND_POLICY_MODE = "single-chat";
+var GRAPH = "https://graph.microsoft.com/v1.0";
 var MAX_COUNT = 50;
 var MAX_BYTES = 32 * 1024;
 var PERSONAL_TENANT_ID = "9188040d-6c67-4c5b-b112-36a304b66dad";
@@ -78,7 +182,7 @@ function paths() {
       current: joinPath(home, ".cli-m365-connection.json"),
       all: joinPath(home, ".cli-m365-all-connections.json"),
       outbox: joinPath(root, "outbox.json"),
-      policy: joinPath(root, "send-policy.json")
+      scope: joinPath(root, "send-scope.json")
     };
   } catch {
     return null;
@@ -490,25 +594,25 @@ function sha256Hex(text) {
     3329325298
   ];
   const state = [1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225];
-  const words = new Array(64);
+  const words2 = new Array(64);
   const rotate = (value, bits) => value >>> bits | value << 32 - bits;
   for (let offset = 0; offset < bytes.length; offset += 64) {
     for (let i = 0; i < 16; i++) {
       const at = offset + i * 4;
-      words[i] = (bytes[at] << 24 | bytes[at + 1] << 16 | bytes[at + 2] << 8 | bytes[at + 3]) >>> 0;
+      words2[i] = (bytes[at] << 24 | bytes[at + 1] << 16 | bytes[at + 2] << 8 | bytes[at + 3]) >>> 0;
     }
     for (let i = 16; i < 64; i++) {
-      const x = words[i - 15];
-      const y = words[i - 2];
+      const x = words2[i - 15];
+      const y = words2[i - 2];
       const s0 = rotate(x, 7) ^ rotate(x, 18) ^ x >>> 3;
       const s1 = rotate(y, 17) ^ rotate(y, 19) ^ y >>> 10;
-      words[i] = words[i - 16] + s0 + words[i - 7] + s1 >>> 0;
+      words2[i] = words2[i - 16] + s0 + words2[i - 7] + s1 >>> 0;
     }
     let [a, b, c, d, e, f, g, h] = state;
     for (let i = 0; i < 64; i++) {
       const sum1 = rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25);
       const choice = e & f ^ ~e & g;
-      const t1 = h + sum1 + choice + constants[i] + words[i] >>> 0;
+      const t1 = h + sum1 + choice + constants[i] + words2[i] >>> 0;
       const sum0 = rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22);
       const majority = a & b ^ a & c ^ b & c;
       const t2 = sum0 + majority >>> 0;
@@ -553,48 +657,53 @@ function liveSender() {
   if (["logged-out", "installed-not-configured"].includes(current.state)) return { error: "not-logged-in: Sign in to Teams Client with the intended work or school account before sending." };
   if (current.state !== "logged-in") return { error: `upstream-rejected: ${current.message} Resolve the Teams Client prerequisite, then review the preview again before sending.` };
   const sender = senderFromFields(current);
-  if (!sender) return { error: "upstream-rejected: The active account, UPN, and tenant could not all be resolved. Refresh Teams Client status before approving a send." };
+  if (!sender) return { error: "upstream-rejected: The active account, UPN, and tenant could not all be resolved. Refresh Teams Client status before sending." };
   if (sender.tenantId.toLowerCase() === PERSONAL_TENANT_ID) {
     return { error: "upstream-rejected: Delegated Teams chat send requires a work or school tenant. Sign in with the intended work or school account, then preview again." };
   }
   return { sender };
 }
-function policySummary() {
+function readSendScope() {
   const p = paths();
-  if (!p) return { configured: false, mode: null, senderAccountId: null, senderTenantId: null, allowedDestinations: [] };
-  let policy = null;
+  if (!p) return parseSendScope(null, validChatId);
+  let raw = null;
   try {
-    policy = parseJson(host.fs.readFile(p.policy) || "");
+    raw = host.fs.fileExists(p.scope) ? host.fs.readFile(p.scope) ?? "" : null;
   } catch {
-    policy = null;
+    raw = "";
   }
-  const destinations = policy && Array.isArray(policy.allowedDestinations) ? policy.allowedDestinations : [];
-  if (!policy || policy.approved !== true || policy.mode !== INITIAL_SEND_POLICY_MODE || typeof policy.senderAccountId !== "string" || !policy.senderAccountId || typeof policy.senderTenantId !== "string" || !policy.senderTenantId || destinations.length !== 1 || !destinations[0] || !validChatId(String(destinations[0].id || "")) || typeof destinations[0].label !== "string") {
-    return { configured: false, mode: null, senderAccountId: null, senderTenantId: null, allowedDestinations: [] };
+  return parseSendScope(raw, validChatId);
+}
+function setSendScope(args) {
+  const scope = validateSendScope(args, validChatId);
+  if ("error" in scope) return { error: `${scope.error} The restriction was not changed.` };
+  const p = paths();
+  if (!p) return { error: "The Teams Client data directory is unavailable; the restriction was not changed." };
+  try {
+    if (!host.fs.makeDirs(p.root) || host.fs.writeFile(p.scope, JSON.stringify(scope)) !== true) {
+      return { error: "Could not save the restriction; the previous setting still applies." };
+    }
+  } catch {
+    return { error: "Could not save the restriction; the previous setting still applies." };
   }
-  return {
-    configured: true,
-    mode: INITIAL_SEND_POLICY_MODE,
-    senderAccountId: policy.senderAccountId,
-    senderTenantId: policy.senderTenantId,
-    allowedDestinations: [{ id: String(destinations[0].id), label: String(destinations[0].label) }],
-    approvedAt: Number(policy.approvedAt) || null
-  };
+  return { result: JSON.stringify(readSendScope()) };
 }
 function resolveDestination(id, sender) {
-  if (!validChatId(id)) return { error: "destination-not-permitted: Usage: preview <immutable-chat-id> <text>. Choose an id from chats; display labels are not ids." };
-  if (!cachedChats || cachedChats.identityKey !== sender.identityKey) {
-    return { error: "upstream-rejected: Refresh chats for this account and tenant, then preview an immutable chat id." };
+  if (!validChatId(id)) return { error: failureMessage("invalid-request", "Use an immutable chat id from `chats <name>`; chat names are not ids.") };
+  let chat = cachedChats && cachedChats.identityKey === sender.identityKey ? cachedChats.chats.find((item) => item.id === id) : null;
+  if (!chat) {
+    const listed = chatList(sender);
+    if ("error" in listed) return { error: `upstream-rejected: Could not list chats to resolve ${id} (${listed.error}).` };
+    chat = listed.chats.find((item) => item.id === id);
   }
-  const chat = cachedChats.chats.find((item) => item.id === id);
-  if (!chat) return { error: `destination-not-permitted: Chat id ${id} was not in the resolved chat list for tenant ${sender.tenantId}. Refresh chats and choose a listed id.` };
-  return { destination: { id: String(chat.id), label: String(chat.topic || chat.id) } };
+  if (!chat) return { error: failureMessage("chat-not-found", id) };
+  return { destination: { id: String(chat.id), label: String(chat.title || chat.id), chatType: chat.chatType, members: chat.members } };
 }
 var previewSequence = 0;
 function previewCommand(args, origin = "agent") {
-  if (args.length < 2 || !validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> <text>. Choose an id from chats; display labels are not accepted." };
+  if (args.length < 2 || !validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> <text>. Find the id with `chats <name>`; chat names are not accepted." };
   const text = args.slice(1).join(" ");
-  if (!text.length) return { error: "upstream-rejected: Preview text must not be empty." };
+  if (!text.length) return { error: "invalid-request: Preview text must not be empty." };
   const resolved = previewSender();
   if ("error" in resolved) return resolved;
   const found = resolveDestination(args[0], resolved.sender);
@@ -602,6 +711,7 @@ function previewCommand(args, origin = "agent") {
   const previewId = sha256Hex(`preview\0${now()}\0${++previewSequence}`);
   const idempotencyKey = previewId;
   previewTokens[previewId] = { sender: resolved.sender, destination: found.destination, text, origin, previewNonce: previewId };
+  const decision = decideSend(readSendScope(), found.destination.id, origin);
   return { result: JSON.stringify({
     previewId,
     idempotencyKey,
@@ -609,35 +719,9 @@ function previewCommand(args, origin = "agent") {
     tenant: { id: resolved.sender.tenantId },
     destination: found.destination,
     text,
-    policy: policySummary()
+    allowed: decision.allow,
+    restriction: decision.allow ? null : decision.message
   }) };
-}
-function setSendPolicy(args) {
-  if (!args || args.approveDestination !== true) return { error: "No send policy was changed. Review the full sender, tenant, destination, and text preview, then explicitly approve that single chat." };
-  const preview = previewTokens[String(args.previewId || "")];
-  if (!preview || preview.origin !== "view") return { error: "Only a preview created in this view can approve a destination. Refresh chats and create a fresh view preview." };
-  const current = liveSender();
-  if ("error" in current) return { error: current.error };
-  if (current.sender.identityKey !== preview.sender.identityKey || current.sender.upn !== preview.sender.upn) {
-    return { error: "destination-not-permitted: The signed-in account or tenant changed after preview. Confirm a fresh preview before approval." };
-  }
-  const p = paths();
-  if (!p) return { error: "upstream-rejected: The Teams Client data directory is unavailable; no policy was written." };
-  try {
-    if (!host.fs.makeDirs(p.root)) return { error: "upstream-rejected: The Teams Client data directory could not be created; no policy was written." };
-    const saved = host.fs.writeFile(p.policy, JSON.stringify({
-      approved: true,
-      mode: INITIAL_SEND_POLICY_MODE,
-      senderAccountId: preview.sender.accountId,
-      senderTenantId: preview.sender.tenantId,
-      allowedDestinations: [{ id: preview.destination.id, label: preview.destination.label }],
-      approvedAt: now()
-    }));
-    if (saved !== true) return { error: "upstream-rejected: The single-chat policy could not be saved; no destination is enabled." };
-  } catch {
-    return { error: "upstream-rejected: The single-chat policy could not be saved; no destination is enabled." };
-  }
-  return { result: JSON.stringify(policySummary()) };
 }
 function metadataFromM365(p) {
   const info = runtimeInfo(p);
@@ -775,24 +859,41 @@ function useAccount(id) {
 function validChatId(value) {
   return /^[A-Za-z0-9:._@-]{1,512}$/.test(value);
 }
-function agentChats() {
-  const response = jsonCommand(["teams", "chat", "list"]);
+function chatList(sender) {
+  const response = jsonCommand(["request", "--url", `${GRAPH}/me/chats?$expand=members&$top=50`]);
   if (response.error) return { error: response.error };
-  const source = Array.isArray(response.data) ? response.data : [];
+  const source = Array.isArray(response.data?.value) ? response.data.value : Array.isArray(response.data) ? response.data : [];
+  const selfId = sender ? sender.accountId.toLowerCase() : "";
+  const selfUpn = sender ? sender.upn.toLowerCase() : "";
   const chats = source.flatMap((raw) => {
     const id = typeof raw?.id === "string" ? raw.id : "";
     if (!validChatId(id)) return [];
+    const others = (Array.isArray(raw.members) ? raw.members : []).filter((member) => member && String(member.userId || "").toLowerCase() !== selfId && String(member.email || "").toLowerCase() !== selfUpn);
+    const members = others.map((member) => String(member.displayName || member.email || "")).filter(Boolean);
+    const emails = others.map((member) => String(member.email || "")).filter(Boolean);
+    const topic = typeof raw.topic === "string" && raw.topic ? raw.topic : null;
     return [{
       id,
-      topic: typeof raw.topic === "string" ? raw.topic : null,
+      title: topic || members.join(", ") || (typeof raw.chatType === "string" ? raw.chatType : id),
+      topic,
       chatType: typeof raw.chatType === "string" ? raw.chatType : null,
-      tenantId: typeof raw.tenantId === "string" ? raw.tenantId : null,
+      members,
+      username: emails.length ? emails.join(" ") : null,
       lastUpdatedDateTime: typeof raw.lastUpdatedDateTime === "string" ? raw.lastUpdatedDateTime : null
     }];
   });
+  if (sender) cachedChats = { identityKey: sender.identityKey, chats };
+  return { chats };
+}
+function agentChats(args = []) {
   const sender = previewSender();
-  cachedChats = "sender" in sender ? { identityKey: sender.sender.identityKey, chats } : null;
-  return { result: JSON.stringify({ chats }) };
+  const listed = chatList("sender" in sender ? sender.sender : null);
+  if ("error" in listed) return { error: listed.error };
+  const query = args.join(" ").trim();
+  if (!query) return { result: JSON.stringify({ chats: listed.chats }) };
+  const found = matchChats(listed.chats, query);
+  const next = found.match ? `Send with: send ${found.match.id} --key <unique-key> <text>` : found.ambiguous ? "Several chats match. Show the candidates to the owner and ask which one, then use its id." : "No chat among the 50 listed matches. Ask the owner for a more exact name or email.";
+  return { result: JSON.stringify({ query, match: found.match, ambiguous: found.ambiguous, candidates: found.candidates, next }) };
 }
 function utf8Bytes(value) {
   let bytes = 0;
@@ -881,22 +982,25 @@ function agentHistory(args) {
   const result = boundedHistory(args[0], Array.isArray(history.data) ? history.data : [], count, configured.historyMaxBytes);
   return { result: JSON.stringify(result) };
 }
+var SEND_FAILURES = ["invalid-request", "not-logged-in", "reauth-needed", "chat-not-found", "chat-not-allowed", "rate-limited", "upstream-rejected", "unknown"];
 function failureMessage(kind, detail, cause) {
   switch (kind) {
+    case "invalid-request":
+      return `invalid-request: ${String(detail || "Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>.")} Find the chat id with \`chats <name>\`, then send again.`;
     case "not-logged-in":
       return "not-logged-in: Sign in with the intended work or school account through `codeterm plugin teams-client login` (or Sign in in the view) and confirm its tenant before sending.";
     case "reauth-needed":
       return `reauth-needed: ${String(cause || "reauth-needed")}. ${String(detail || "The Microsoft session needs a new sign-in. Sign in again and complete the tenant's required authentication step.")}`;
-    case "policy-not-set":
-      return "policy-not-set: Review the resolved account, tenant, destination, and exact text in Teams Client, then explicitly approve that single chat before sending.";
-    case "destination-not-permitted":
-      return `destination-not-permitted: Only the owner's approved immutable chat id is allowed (${String(detail || "no destination is approved")}). Select that exact chat or review a new preview before changing policy.`;
+    case "chat-not-found":
+      return `chat-not-found: No chat among this account's 50 listed chats has id ${String(detail || "unavailable")}. Look it up with \`chats <name>\` and use an id from that result.`;
+    case "chat-not-allowed":
+      return String(detail || `chat-not-allowed: The owner's "Restrict agent sends" setting does not include this chat. Ask the owner to add it in the Teams Client view.`);
     case "rate-limited":
       return `rate-limited: Microsoft 365 throttled this operation. Review Teams Client status and the selected chat before deciding what to do.`;
     case "upstream-rejected":
       return `upstream-rejected: m365 refused the operation (${String(detail || "inspect the Microsoft 365 error and correct its cause")}). Correct the permission or request issue, then invoke send again only if you still want delivery.`;
     case "unknown":
-      return `unknown: ${String(detail || "Microsoft 365 may have accepted this message but confirmation was lost.")} Do not retry this idempotency key; inspect the selected chat and decide manually.`;
+      return `unknown: ${String(detail || "Microsoft 365 may have accepted this message but confirmation was lost.")} Do not retry this idempotency key and do not report it as delivered; inspect the selected chat and decide manually.`;
   }
   const exhaustive = kind;
   return exhaustive;
@@ -931,20 +1035,19 @@ function sendFailureResult(kind, detail, cause) {
 }
 function rememberPrefixedFailure(message) {
   const state = message.slice(0, message.indexOf(":"));
-  const allowed = ["not-logged-in", "reauth-needed", "policy-not-set", "destination-not-permitted", "rate-limited", "upstream-rejected", "unknown"];
-  return allowed.includes(state) ? rememberSendFailure(state, message) : sendFailureResult("unknown", "The command result could not be classified safely. Inspect the Teams chat before retrying.");
+  return SEND_FAILURES.includes(state) ? rememberSendFailure(state, message) : sendFailureResult("unknown", "The command result could not be classified safely. Inspect the Teams chat before retrying.");
 }
 function parseSendArgs(args) {
-  if (args.length < 2 || !validChatId(args[0])) return { error: "destination-not-permitted: Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>. Choose an id from chats; labels are not ids." };
+  if (args.length < 2 || !validChatId(args[0])) return { error: failureMessage("invalid-request", "Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>; chat names are not ids.") };
   let start = 1;
   let key;
   if (args[1] === "--key") {
-    if (args.length < 4 || !/^[A-Za-z0-9._:-]{1,160}$/.test(args[2])) return { error: "upstream-rejected: --key needs a 1\u2013160 character idempotency key, followed by message text." };
+    if (args.length < 4 || !/^[A-Za-z0-9._:-]{1,160}$/.test(args[2])) return { error: failureMessage("invalid-request", "--key needs a 1\u2013160 character idempotency key ([A-Za-z0-9._:-]), followed by message text.") };
     key = args[2];
     start = 3;
   }
   const text = args.slice(start).join(" ");
-  if (!text.length) return { error: "upstream-rejected: Message text must not be empty." };
+  if (!text.length) return { error: failureMessage("invalid-request", "Message text must not be empty.") };
   return { chatId: args[0], text, key };
 }
 function failureForUpstream(message) {
@@ -982,10 +1085,10 @@ function messageIdFromOutput(output) {
   const value = parseJson(output.trim());
   const data = value && (value.data || value);
   const id = data && (data.id || data.messageId);
-  return id === void 0 || id === null ? void 0 : String(id);
+  return typeof id === "string" && id.length > 0 && id.length <= 256 ? id : typeof id === "number" && Number.isSafeInteger(id) ? String(id) : void 0;
 }
 function attemptResult(attempt) {
-  lastSendState = { state: "sent", message: "m365 confirmed the message and the sent result is recorded in the Teams Client outbox.", updatedAt: now() };
+  lastSendState = { state: "sent", message: "Microsoft Graph returned the message id and the sent result is recorded in the Teams Client outbox.", updatedAt: now() };
   return { result: JSON.stringify({
     status: "sent",
     sender: attempt.sender,
@@ -993,7 +1096,7 @@ function attemptResult(attempt) {
     destination: attempt.destination,
     idempotencyKey: attempt.idempotencyKey,
     graphMessageId: attempt.graphMessageId || null,
-    deliveryGuarantee: "The plugin returns a recorded success for a sent idempotency key and never resends that key. m365 does not surface the Graph message id on success; ambiguous outcomes remain unknown. This is not an exactly-once delivery guarantee."
+    deliveryGuarantee: "The plugin returns a recorded success for a sent idempotency key and never resends that key. A send without a Graph message id stays unknown. This is not an exactly-once delivery guarantee."
   }) };
 }
 function persistFailure(p, ledger, attempt, kind, detail, cause) {
@@ -1017,30 +1120,29 @@ function persistFailure(p, ledger, attempt, kind, detail, cause) {
   }
   return rememberSendFailure(kind, attempt.failureMessage);
 }
-function sendCommand(sessionId, args) {
+function writeSendBody(p, key, text) {
+  const file = joinPath(p.root, `send-body-${sha256Hex(key).slice(0, 16)}.json`);
+  try {
+    if (!host.fs.makeDirs(p.root)) return null;
+    return host.fs.writeFile(file, JSON.stringify({ body: { contentType: "text", content: text } })) === true ? file : null;
+  } catch {
+    return null;
+  }
+}
+function sendCommand(origin, args) {
   const parsed = parseSendArgs(args);
   if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
-  const policy = policySummary();
-  if (!policy.configured) return sendFailureResult("policy-not-set");
-  const permitted = policy.allowedDestinations.find((item) => item.id === parsed.chatId);
-  if (!permitted) return sendFailureResult("destination-not-permitted", policy.allowedDestinations[0]?.id);
-  const expectedIdentity = JSON.stringify([policy.senderAccountId, policy.senderTenantId]);
-  const matchingPreview = Object.values(previewTokens).reverse().find((token) => token.sender.identityKey === expectedIdentity && token.destination.id === parsed.chatId && token.text === parsed.text);
-  const key = parsed.key || matchingPreview?.previewNonce;
-  if (!key) {
-    const current = liveSender();
-    if ("error" in current) return rememberPrefixedFailure(current.error);
-    return sendFailureResult("upstream-rejected", "create a fresh preview before sending without an explicit idempotency key");
-  }
+  const matchingPreview = Object.values(previewTokens).reverse().find((token) => token.destination.id === parsed.chatId && token.text === parsed.text);
+  let key = parsed.key || matchingPreview?.previewNonce;
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
   const loaded = loadOutbox(p);
   if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error || "the outbox could not be read");
   const ledger = loaded.ledger;
-  let attempt = ledger.attempts.find((item) => item.idempotencyKey === key);
   const payloadHash = sha256Hex(parsed.text);
-  if (attempt && (attempt.payloadHash !== payloadHash || attempt.destination.id !== parsed.chatId || attempt.sender.identityKey !== expectedIdentity)) {
-    return sendFailureResult("upstream-rejected", "this idempotency key is already bound to another tenant, sender, destination, or payload; choose a new key only for an intentional new send");
+  let attempt = key ? ledger.attempts.find((item) => item.idempotencyKey === key) : void 0;
+  if (attempt && (attempt.payloadHash !== payloadHash || attempt.destination.id !== parsed.chatId)) {
+    return sendFailureResult("invalid-request", "This idempotency key is already bound to a different chat or text; choose a new key only for an intentional new send.");
   }
   if (attempt && attempt.state === "sent") return attemptResult(attempt);
   if (attempt && attempt.state === "unknown") return sendFailureResult("unknown");
@@ -1048,10 +1150,15 @@ function sendCommand(sessionId, args) {
   if (attempt && attempt.state === "rate_limited") return persistFailure(p, ledger, attempt, "unknown");
   const resolved = liveSender();
   if ("error" in resolved) return rememberPrefixedFailure(resolved.error);
-  if (resolved.sender.accountId !== policy.senderAccountId || resolved.sender.tenantId !== policy.senderTenantId) {
-    return sendFailureResult("destination-not-permitted", `${permitted.id} for the approved account and tenant; the active account or tenant changed`);
+  if (attempt && attempt.sender.identityKey !== resolved.sender.identityKey) {
+    return sendFailureResult("invalid-request", "This idempotency key belongs to another account or tenant; choose a new key only for an intentional new send.");
   }
-  const destination = { id: parsed.chatId, label: String(permitted.label || permitted.id) };
+  const found = resolveDestination(parsed.chatId, resolved.sender);
+  if ("error" in found) return rememberPrefixedFailure(found.error);
+  const decision = decideSend(readSendScope(), found.destination.id, origin);
+  if (!decision.allow) return sendFailureResult("chat-not-allowed", decision.message);
+  if (!key) key = sha256Hex(`send\0${now()}\0${++previewSequence}\0${parsed.chatId}`).slice(0, 32);
+  const destination = { id: found.destination.id, label: String(found.destination.label || found.destination.id) };
   if (!attempt) {
     attempt = {
       idempotencyKey: key,
@@ -1072,13 +1179,22 @@ function sendCommand(sessionId, args) {
   delete attempt.failureCause;
   delete attempt.failureMessage;
   if (!persistOutbox(p, ledger)) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; m365 was not contacted");
-  return runTeamsSend(["teams", "chat", "message", "send", "--chatId", parsed.chatId, "--message", parsed.text, "--output", "json"], (run) => {
+  const bodyFile = writeSendBody(p, key, parsed.text);
+  if (!bodyFile) return persistFailure(p, ledger, attempt, "upstream-rejected", "the message body could not be staged in the plugin data directory; m365 was not contacted");
+  const url = `${GRAPH}/chats/${parsed.chatId}/messages`;
+  return runTeamsSend(["request", "--url", url, "--method", "post", "--content-type", "application/json", "--body", `@${nativePath(bodyFile)}`, "--output", "json"], (run) => {
+    try {
+      host.fs.removeFile(bodyFile);
+    } catch {
+    }
     if (!run.ok) {
       const upstream = failureForUpstream(`${run.error}
 ${run.stderr}`);
       return persistFailure(p, ledger, attempt, upstream.kind, upstream.detail, upstream.cause);
     }
-    attempt.graphMessageId = messageIdFromOutput(run.stdout);
+    const graphMessageId = messageIdFromOutput(run.stdout);
+    if (!graphMessageId) return persistFailure(p, ledger, attempt, "unknown", "m365 exited cleanly but Microsoft Graph returned no message id, so delivery is not confirmed.");
+    attempt.graphMessageId = graphMessageId;
     attempt.state = "sent";
     attempt.updatedAt = now();
     delete attempt.failure;
@@ -1150,15 +1266,15 @@ function onAgentCommand(ctx) {
     case "use":
       return args.length === 1 ? useAccount(args[0]) : { error: "Usage: use <account-id>." };
     case "chats":
-      return agentChats();
+      return agentChats(args);
     case "history":
       return agentHistory(args);
     case "health":
-      return { result: JSON.stringify({ ...statusView(), sendPolicy: policySummary(), lastSend: lastSendState }) };
+      return { result: JSON.stringify({ ...statusView(), sendScope: readSendScope(), lastSend: lastSendState }) };
     case "logout":
       return logout();
     case "send":
-      return sendCommand(ctx.sessionId, args);
+      return sendCommand("agent", args);
     case "preview":
       return previewCommand(args, "agent");
     default:
@@ -1273,11 +1389,11 @@ function viewCall(method, args) {
   if (method === "loginPoll") return loginPoll(String(value.jobId || ""));
   if (method === "useAccount") return useAccount(String(value.id || ""));
   if (method === "logout") return logout();
-  if (method === "chats") return agentChats();
-  if (method === "policy") return policySummary();
+  if (method === "chats") return agentChats(String(value.query || "").trim() ? [String(value.query)] : []);
+  if (method === "sendScope") return readSendScope();
+  if (method === "setSendScope") return setSendScope(value);
   if (method === "preview") return previewCommand([String(value.chatId || ""), String(value.text || "")], "view");
-  if (method === "approveSendPolicy") return setSendPolicy(value);
-  if (method === "send") return sendCommand("teams-client-view", [String(value.chatId || ""), "--key", String(value.idempotencyKey || ""), String(value.text || "")]);
+  if (method === "send") return sendCommand("view", [String(value.chatId || ""), "--key", String(value.idempotencyKey || ""), String(value.text || "")]);
   return { error: `Unknown Teams Client view method: ${method}` };
 }
 function renderGlance() {
@@ -1288,8 +1404,8 @@ function renderGlance() {
   const connected = !!account.accountId;
   const nodes = [{ kind: "badge", label: connected ? "Connected" : installed ? "Sign-in needed" : "m365 not installed", tone: connected ? "ok" : installed ? "warn" : "muted" }];
   nodes.push({ kind: "text", text: connected ? `${account.upn || "Account resolved"} \xB7 ${account.tenantId || "tenant unavailable"}` : "Open Teams Client to check status or sign in.", style: { tone: "muted" } });
-  const policy = policySummary();
-  nodes.push({ kind: "text", text: policy.configured ? `Send policy: one chat \xB7 ${policy.allowedDestinations[0].id} \xB7 tenant ${policy.senderTenantId}` : "Send policy: not approved", style: { tone: policy.configured ? "warn" : "muted" } });
+  const scope = readSendScope();
+  nodes.push({ kind: "text", text: scope.mode === "all" ? "Agent sends: any chat" : `Agent sends: ${scope.chats.length} allowed chat${scope.chats.length === 1 ? "" : "s"}`, style: { tone: scope.mode === "all" ? "muted" : "warn" } });
   if (lastSendState) nodes.push({ kind: "text", text: `Last send: ${lastSendState.state} \xB7 ${lastSendState.message}`, style: { tone: lastSendState.state === "sent" ? "ok" : "warn" } });
   return { title: "Teams Client", nodes };
 }
@@ -1310,9 +1426,8 @@ var plugin = {
   __test_setClock: (clock) => {
     injectedClock = clock;
   },
-  __test_policySummary: policySummary,
+  __test_readSendScope: readSendScope,
   __test_previewCommand: previewCommand,
-  __test_setSendPolicy: setSendPolicy,
   __test_sendCommand: sendCommand,
   __test_agentChats: agentChats,
   __test_sha256Hex: sha256Hex,
