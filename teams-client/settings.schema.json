@@ -1,28 +1,6 @@
 [
   {
     "kind": "section",
-    "title": "Sign-in",
-    "fields": [
-      {
-        "kind": "select",
-        "key": "appId",
-        "label": "Sign-in app id",
-        "default": "14d82eec-204b-4c2f-b7e8-296a70dab67e",
-        "options": [
-          ["14d82eec-204b-4c2f-b7e8-296a70dab67e", "Microsoft Graph Command Line Tools (default)"],
-          ["1fec8e78-bce4-4aaf-ab1b-5451cc387264", "Microsoft Teams client (only if your tenant allows its localhost sign-in)"]
-        ]
-      },
-      {
-        "kind": "info",
-        "level": "info",
-        "title": "Sign-in app id",
-        "body": "The public client m365 signs in with. Chat.ReadWrite and ChatMessage.Send must be consented for it in your tenant; if user consent is restricted, a tenant administrator approves them once. Any other app id (a GUID) can be set as appId in config.yaml. Sign in again after changing it."
-      }
-    ]
-  },
-  {
-    "kind": "section",
     "title": "History",
     "fields": [
       {

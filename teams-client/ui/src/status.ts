@@ -5,24 +5,12 @@ const STATES: Record<string, { label: string; tone: Tone }> = {
   "logged-in": { label: "Signed in", tone: "ok" },
   "logged-out": { label: "Signed out", tone: "muted" },
   "not-logged-in": { label: "Signed out", tone: "muted" },
-  "installed-not-configured": { label: "Not set up", tone: "warn" },
-  "login-in-progress": { label: "Signing in", tone: "accent" },
-  "waiting-for-sign-in": { label: "Waiting for sign-in", tone: "accent" },
-  "sign-in-expired": { label: "Sign-in link expired", tone: "warn" },
-  "sign-in-cancelled": { label: "Sign-in replaced", tone: "muted" },
-  "sign-in-failed": { label: "Sign-in failed", tone: "danger" },
+  "awaiting-user": { label: "Waiting for you to sign in", tone: "accent" },
+  "expired": { label: "Sign in again", tone: "warn" },
+  "refused": { label: "Sign in refused", tone: "danger" },
+  "sign-in-failed": { label: "Sign in failed", tone: "danger" },
   "install-in-progress": { label: "Installing", tone: "accent" },
-  "reauth-needed": { label: "Sign in again", tone: "warn" },
-  "status-unavailable": { label: "Status unavailable", tone: "warn" },
-  "token-expired": { label: "Sign in again", tone: "warn" },
-  "refresh-token-revoked": { label: "Sign in again", tone: "warn" },
-  "mfa-required": { label: "MFA required", tone: "warn" },
-  "consent-required": { label: "Admin consent needed", tone: "warn" },
-  "wrong-client-redirect": { label: "Link refused", tone: "danger" },
-  "loopback-unavailable": { label: "Link unavailable", tone: "danger" },
-  "conditional-access-blocked": { label: "Blocked by policy", tone: "danger" },
-  "browser-open-failed": { label: "Browser did not open", tone: "danger" },
-  "not-installed": { label: "Node.js needed", tone: "warn" },
+  "not-installed": { label: "Not installed", tone: "warn" },
   "install-failed": { label: "Install failed", tone: "danger" },
   "storage-protection-failed": { label: "Storage error", tone: "danger" },
   "unsupported-platform": { label: "Unsupported system", tone: "danger" },
@@ -61,7 +49,7 @@ export function setupRows(health: Pick<Health, "state" | "upn" | "tenantId" | "e
   const runtimeReady = !!state && !RUNTIME_MISSING.includes(state);
   const signedIn = isSignedIn(state);
   return [
-    { label: "m365 runtime", value: !state ? "Checking" : runtimeReady ? "Installed" : "Not installed", tone: runtimeReady ? "ok" : "warn" },
+    { label: "exo-teams runtime", value: !state ? "Checking" : runtimeReady ? "Installed" : "Not installed", tone: runtimeReady ? "ok" : "warn" },
     { label: "Account", value: signedIn ? health?.upn || "Signed in" : "Not signed in", tone: signedIn ? "ok" : "muted" },
     { label: "Tenant", value: signedIn && health?.tenantId ? health.tenantId : signedIn ? "Not reported yet" : "—", tone: signedIn && health?.tenantId ? "ok" : "muted" },
   ];
@@ -69,5 +57,5 @@ export function setupRows(health: Pick<Health, "state" | "upn" | "tenantId" | "e
 
 export function primarySection(state: string | null | undefined): "account" | "sign-in" | "unknown" {
   if (isSignedIn(state)) return "account";
-  return state === "status-unavailable" || !state ? "unknown" : "sign-in";
+  return !state ? "unknown" : "sign-in";
 }

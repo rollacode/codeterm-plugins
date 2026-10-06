@@ -126,121 +126,103 @@ function matchChats(chats, query, limit = 20) {
   return { match, ambiguous: !match && hits.length > 1, candidates: hits.slice(0, limit) };
 }
 
-// teams-client/src/plugin.ts
-var VERSION = "11.11.0";
-var PACKAGE = "@pnp/cli-microsoft365";
-var DEFAULT_APP_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
-var APP_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// teams-client/src/constants.ts
+var EXO_MODULE = "github.com/alxxpersonal/exo-teams";
+var EXO_VERSION = "v0.0.0-20260418032231-b9ebbf5583ee";
+var EXO_MODULE_SUM = "h1:HG7rlFtgLr0oauBj4gyqfBYzhU/2JPSlp1f0JRQS51A=";
+var EXO_PACKAGE = `${EXO_MODULE}/cmd/exo-teams`;
+var GO_VERSION = "go1.26.8";
+var GO_DOWNLOAD_BASE = "https://go.dev/dl/";
+var GO_ARCHIVES = {
+  "darwin/x64": { file: "go1.26.8.darwin-amd64.tar.gz", sha256: "186be014105aa6542b767d2c6ed5cca10a0214bdff809ef1724022a8c7894150" },
+  "darwin/arm64": { file: "go1.26.8.darwin-arm64.tar.gz", sha256: "a012b25b571bd0138a03dcd25375ceba866fe5ca822f426d2c66a4de56fd3f4b" },
+  "linux/x64": { file: "go1.26.8.linux-amd64.tar.gz", sha256: "d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b" },
+  "linux/arm64": { file: "go1.26.8.linux-arm64.tar.gz", sha256: "211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0" },
+  "win32/x64": { file: "go1.26.8.windows-amd64.zip", sha256: "b92c3b2adae85a11ba71fe7216daf0d84e82af4c8ab6c5625807f28622043a59" },
+  "win32/arm64": { file: "go1.26.8.windows-arm64.zip", sha256: "4bc560ed3ccb64eec0be6180b8c29185c07f5215276820adb4303d7bf3365435" }
+};
 var ROOT = "~/.codeterm/teams-client";
-var GRAPH = "https://graph.microsoft.com/v1.0";
+var EXO_HOME_DIR = "exo-home";
+var EXO_TOKEN_DIR = ".exo-teams";
+var EXO_TOKEN_FILES = ["token-skype.jwt", "token-chatsvcagg.jwt", "token-teams.jwt", "token-graph.jwt", "token-assignments.jwt", "refresh-token.jwt"];
+var EXO_REFRESH_TOKEN_FILE = "refresh-token.jwt";
+var DEVICE_LOGIN_URL = /https:\/\/(?:(?:aka\.ms|(?:www\.)?microsoft\.com)\/devicelogin|login\.microsoft(?:online)?\.com\/(?:device|common\/oauth2\/deviceauth))(?![\w.-])[^\s<>"']*/i;
+var SIGN_IN_TTL_MS = 15 * 60 * 1e3;
+var TIMEOUTS = {
+  probe: 15e3,
+  whoami: 3e4,
+  refresh: 6e4,
+  chats: 12e4,
+  send: 12e4,
+  history: 12e4,
+  hash: 12e4,
+  download: 6e5,
+  extract: 6e5,
+  goModule: 6e5,
+  goBuild: 9e5
+};
+var CHAT_CACHE_TTL_MS = 10 * 60 * 1e3;
 var MAX_COUNT = 50;
 var MAX_BYTES = 32 * 1024;
-var PERSONAL_TENANT_ID = "9188040d-6c67-4c5b-b112-36a304b66dad";
-var SRI = "sha512-GXdN3Cw4lOEFixVfI6YZlGM9OzAlMbjGItT8yMn8FznlG6+aWGNI6xjgNJRbigykeSE6YI3KRai+fijMt24DMg==";
-var INTEGRITY_BY_TARGET = {
-  "darwin/arm64": SRI,
-  "darwin/x64": SRI,
-  "linux/arm64": SRI,
-  "linux/x64": SRI,
-  "win32/arm64": SRI,
-  "win32/x64": SRI
-};
-var METADATA_READER = "const path=require('node:path');const {pathToFileURL}=require('node:url');const authFile=path.resolve(process.env.M365_RUNTIME,'node_modules/@pnp/cli-microsoft365/dist/Auth.js');import(pathToFileURL(authFile).href).then(async m=>{const a=m.default;await a.restoreAuth();const c=a.connection||{};const expiry=c.accessTokens&&c.accessTokens['https://graph.microsoft.com']&&c.accessTokens['https://graph.microsoft.com'].expiresOn;const all=await a.getAllConnections();const project=x=>({name:x.name||null,accountId:x.identityId||x.name||null,identityId:x.identityId||null,tenantId:x.identityTenantId||null,upn:x.identityName||null});process.stdout.write(JSON.stringify({active:c.active?project(c):null,expiresOn:expiry?String(expiry):null,connections:all.map(project)}));}).catch(()=>process.stdout.write(JSON.stringify({active:null,expiresOn:null,connections:[]})));";
-var LOOPBACK_REFUSED = ["wrong-client-redirect", "loopback-unavailable"];
-var SIGN_IN_TTL_MS = 10 * 60 * 1e3;
-var SIGN_IN_MARKER = "codeterm-signin:";
-var PREPARING_SIGN_IN_MESSAGE = "The Microsoft sign-in link is being prepared. Poll login-status until it returns signInUrl.";
-var PREPARING_CODE_MESSAGE = "The Microsoft sign-in code is being prepared. Poll login-status until it returns signInUrl and deviceCode.";
-var SIGN_IN_WRAPPER = "const fs=require('node:fs');const path=require('node:path');const {pathToFileURL}=require('node:url');const [lease,nonce,ttl,...cli]=process.argv.slice(1);const say=s=>process.stderr.write('" + SIGN_IN_MARKER + " '+s+'\\n');const owned=()=>{try{return fs.readFileSync(lease,'utf8').trim()===nonce}catch{return false}};const stop=(s,c)=>{say(s);process.exit(c)};if(!owned())stop('cancelled',3);setInterval(()=>{if(!owned())stop('cancelled',3)},1000).unref();setTimeout(()=>stop('expired',4),Number(ttl)||600000).unref();process.env.CLIMICROSOFT365_NOUPDATE='1';const dist=path.resolve(process.env.M365_RUNTIME,'node_modules/@pnp/cli-microsoft365/dist');const load=f=>import(pathToFileURL(path.join(dist,f)).href);load('utils/browserUtil.js').then(async m=>{m.browserUtil.open=async url=>say('url '+url);process.argv=[process.argv[0],path.join(dist,'index.js'),...cli];await load('index.js')}).catch(e=>{process.stderr.write('Error: '+String(e&&e.message||e).split('\\n')[0]+'\\n');process.exit(1)});";
-var loginJobs = {};
-var activeLoginJobId = null;
-var runtimeInfoCache = {};
-var storageProtectionCache = {};
-var cacheProtectionCache = {};
-var previewTokens = {};
-var cachedChats = null;
-var injectedClock = null;
-var lastSendState = null;
-function clearPreviewTokens() {
-  for (const id of Object.keys(previewTokens)) delete previewTokens[id];
+
+// teams-client/src/parse.ts
+var ANSI = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+var USER_CODE = /(?:enter|use)\s+(?:the\s+)?(?:login\s+)?(?:code\s+)?([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?|[A-Z0-9]{6,12})\b/i;
+function redact(text) {
+  return String(text || "").replace(/eyJ[\w-]+\.[\w-]+(?:\.[\w-]*)?/g, "[redacted]").replace(/\b((?:code|device_code|access_token|refresh_token|id_token|client_secret|skypetoken)["']?\s*[=:]\s*["']?)[^&\s"',}]+/gi, "$1[redacted]").replace(/\b(Bearer|skypetoken=)\s*[\w.~+/=-]{16,}/gi, "$1 [redacted]");
 }
-function joinPath(...parts) {
-  return host.path.normalize(parts.join("/"));
-}
-function nativePath(path) {
-  return host.path.toNative(host.path.normalize(path));
-}
-function paths() {
-  try {
-    const expanded = host.fs.expandHome(ROOT);
-    if (!expanded) return null;
-    const root = host.path.normalize(expanded);
-    const home = joinPath(root, "m365-home");
-    const runtime = joinPath(root, "runtime/m365");
-    return {
-      root,
-      home,
-      runtime,
-      binary: joinPath(runtime, "node_modules/.bin", binaryNamesForHost().m365),
-      npmCache: joinPath(root, "npm-cache"),
-      msal: joinPath(home, ".cli-m365-msal.json"),
-      current: joinPath(home, ".cli-m365-connection.json"),
-      all: joinPath(home, ".cli-m365-all-connections.json"),
-      outbox: joinPath(root, "outbox.json"),
-      scope: joinPath(root, "send-scope.json")
-    };
-  } catch {
-    return null;
+function microsoftMessage(text) {
+  const raw = String(text || "").replace(ANSI, " ");
+  const described = raw.match(/"error_description"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (described) {
+    let value = described[1];
+    try {
+      value = JSON.parse(`"${described[1]}"`);
+    } catch {
+    }
+    return redact(value.split(/\r?\n/)[0].trim()).slice(0, 500);
   }
+  const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const aadsts = lines.find((line) => /AADSTS\d+/.test(line));
+  const errorLine = [...lines].reverse().find((line) => /^Error:/.test(line));
+  const chosen = aadsts || errorLine || lines[lines.length - 1] || "";
+  return redact(chosen.replace(/^Error:\s*/, "")).slice(0, 500);
 }
-function hostPlatform() {
-  if (host.path.isWindows) return "win32";
-  try {
-    return String(host.platform() || "").toLowerCase();
-  } catch {
-    return "";
+function quoted(text) {
+  const message = microsoftMessage(text);
+  return message ? ` Microsoft said: "${message}"` : "";
+}
+function classifyAuthFailure(text) {
+  const value = String(text || "");
+  if (/AADSTS65001|AADSTS65004|AADSTS90094|AADSTS90095|consent_required|admin(?:istrator)? (?:consent|approval)|need admin approval/i.test(value)) {
+    return { state: "refused", message: `Microsoft refused the Teams client sign-in and asked for administrator approval.${quoted(value)} This sign-in uses the Teams desktop client, so the tenant is blocking that client itself; sign-in cannot continue without the tenant's change.` };
   }
-}
-function binaryNames(platform) {
-  if (platform === "win32") return { node: "node.exe", npm: "npm.cmd", m365: "m365.cmd", icacls: "icacls.exe", whoami: "whoami.exe" };
-  return { node: "node", npm: "npm", m365: "m365", icacls: "icacls.exe", whoami: "whoami.exe" };
-}
-function binaryNamesForHost() {
-  return binaryNames(hostPlatform());
-}
-function resolveTarget(platform, arch) {
-  const key = `${platform}/${arch}`;
-  const integrity = INTEGRITY_BY_TARGET[key];
-  if (!integrity) return { error: "unsupported-platform", message: `Pinned m365 ${VERSION} does not support ${key}. Supported targets are macOS, Linux, and Windows on x64 or arm64.` };
-  const names = binaryNames(platform);
-  return { platform, arch, node: names.node, npm: names.npm, m365: names.m365, integrity };
-}
-function envFor(p) {
-  const home = nativePath(p.home);
-  return {
-    HOME: home,
-    USERPROFILE: home,
-    APPDATA: nativePath(joinPath(p.home, "AppData/Roaming")),
-    LOCALAPPDATA: nativePath(joinPath(p.home, "AppData/Local")),
-    XDG_CONFIG_HOME: nativePath(joinPath(p.home, ".config")),
-    XDG_CACHE_HOME: nativePath(joinPath(p.home, ".cache")),
-    NPM_CONFIG_CACHE: nativePath(p.npmCache),
-    M365_RUNTIME: nativePath(p.runtime)
-  };
-}
-function runProcess(bin, args, env) {
-  let result;
-  try {
-    result = parseJson(host.exec(JSON.stringify({ bin, args, env, timeoutMs: 4500 })));
-  } catch (error) {
-    return { ok: false, error: String(error), stderr: "" };
+  if (/AADSTS53003|AADSTS53000|AADSTS50105|AADSTS50020|AADSTS700016|conditional[ -]access|authorization was declined|authorization_declined|access_denied/i.test(value)) {
+    return { state: "refused", message: `Microsoft refused the sign-in.${quoted(value)}` };
   }
-  if (!result) return { ok: false, error: `${bin} returned an unreadable process result.`, stderr: "" };
-  const stdout = String(result.stdout || "");
-  const stderr = String(result.stderr || "");
-  if (result.error) return { ok: false, error: String(result.error), stderr, code: result.code };
-  if (result.code !== 0) return { ok: false, error: stderr || stdout || `${bin} exited ${result.code}.`, stderr, code: result.code };
-  return { ok: true, stdout, stderr };
+  if (/device code expired|expired_token|timed out waiting for authentication|AADSTS70020/i.test(value)) {
+    return { state: "expired", message: `The sign-in code expired before the sign-in finished.${quoted(value)} Run login again for a fresh code.` };
+  }
+  if (/invalid_grant|interaction_required|AADSTS70008|AADSTS700082|AADSTS700084|AADSTS50173|AADSTS50076|AADSTS50078|AADSTS50079|AADSTS50132|AADSTS50133|no refresh token|tokens expired and no refresh token|auto-refresh failed|refresh failed/i.test(value)) {
+    return { state: "expired", message: `The Teams session expired and could not be renewed silently.${quoted(value)} Run login to sign in again.` };
+  }
+  if (/loading tokens|reading skype token|reading chatsvcagg token|reading teams token|no such file|cannot find the (?:file|path)/i.test(value)) {
+    return { state: "logged-out", message: "Not signed in to Teams. Run login to get a sign-in code." };
+  }
+  return null;
+}
+function parseSignInLog(text) {
+  const raw = String(text || "").replace(ANSI, " ");
+  const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.some((line) => /^tokens saved to\b/i.test(line))) return { state: "signed-in" };
+  const last = lines[lines.length - 1] || "";
+  if (/^Error:/.test(last)) {
+    const known = classifyAuthFailure(raw);
+    return { state: "failed", failure: known && known.state !== "logged-out" ? known : { state: "sign-in-failed", message: `Microsoft sign-in failed.${quoted(raw)}` } };
+  }
+  const signInUrl = raw.match(DEVICE_LOGIN_URL)?.[0]?.replace(/[),.;]+$/, "");
+  const deviceCode = raw.match(USER_CODE)?.[1];
+  return signInUrl && deviceCode ? { state: "awaiting-user", signInUrl, deviceCode } : { state: "starting" };
 }
 function parseJson(value) {
   try {
@@ -249,317 +231,1091 @@ function parseJson(value) {
     return null;
   }
 }
-function runtimeInfo(p) {
-  if (runtimeInfoCache[p.root]) return runtimeInfoCache[p.root];
-  const result = computeRuntimeInfo(p);
-  runtimeInfoCache[p.root] = result;
-  return result;
+function parseWhoami(stdout) {
+  const value = parseJson(String(stdout || "").trim());
+  if (!value || !Array.isArray(value.tokens)) return null;
+  return {
+    user: String(value.user || ""),
+    email: String(value.email || ""),
+    tokens: value.tokens.filter((item) => item && typeof item.name === "string").map((item) => ({ name: item.name, valid: item.valid === true, expiry: String(item.expiry || "") }))
+  };
 }
-function computeRuntimeInfo(p) {
-  const platform = hostPlatform();
-  if (platform !== "darwin" && platform !== "linux" && platform !== "win32") {
-    return { state: "unsupported-platform", message: `No pinned m365 runtime is available for ${platform || "this operating system"}. Supported targets are macOS, Linux, and Windows on x64 or arm64.` };
+function sessionUsable(who) {
+  return ["skype", "chatsvcagg"].every((name) => who.tokens.some((token) => token.name === name && token.valid));
+}
+function sessionExpiry(who) {
+  const skype = who.tokens.find((token) => token.name === "skype");
+  return skype && skype.valid && skype.expiry ? skype.expiry : null;
+}
+function sameName(a, b) {
+  return !!a && !!b && a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+function lastActivity(raw) {
+  const message = raw && raw.lastMessage;
+  const value = message && (message.originalarrivaltime || message.composetime) || (typeof raw?.createdAt === "string" ? raw.createdAt : "");
+  return typeof value === "string" && value ? value : null;
+}
+function mapChats(source, selfName) {
+  const rows = Array.isArray(source) ? source : [];
+  const chats = rows.flatMap((raw) => {
+    const id = typeof raw?.id === "string" ? raw.id : "";
+    if (!/^[A-Za-z0-9:._@-]{1,512}$/.test(id) || raw.hidden === true) return [];
+    const members = (Array.isArray(raw.members) ? raw.members : []).map((member) => String(member && member.friendlyName || "").trim()).filter((name) => name && !sameName(name, selfName));
+    const topic = typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : null;
+    const chatType = raw.isOneOnOne === true ? "oneOnOne" : String(raw.chatType || "").toLowerCase() === "meeting" ? "meeting" : "group";
+    const title = topic || members.join(", ") || (chatType === "oneOnOne" ? "Direct chat" : "Group chat");
+    return [{ id, title, topic, chatType, members, username: null, lastActivity: lastActivity(raw) }];
+  });
+  return chats.sort((a, b) => String(b.lastActivity || "").localeCompare(String(a.lastActivity || "")));
+}
+function personQuery(query) {
+  const value = String(query || "").trim();
+  const email = value.match(/^([^@\s]+)@[^@\s]+\.[^@\s]+$/);
+  return email ? email[1].split(/[._+-]+/).filter(Boolean).join(" ") : value;
+}
+function htmlMessage(text) {
+  return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/\r\n|\r|\n/g, "<br>");
+}
+function plainText(html) {
+  return String(html || "").replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>\s*<p[^>]*>/gi, "\n").replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&");
+}
+function normalizeText(value) {
+  return value.replace(/\s+/g, " ").trim();
+}
+function arrivalMs(message) {
+  const value = Date.parse(String(message?.originalarrivaltime || message?.composetime || ""));
+  return Number.isFinite(value) ? value : NaN;
+}
+function findSentMessageId(messages, text, selfName, sentAfterMs) {
+  const wanted = normalizeText(text);
+  const rows = (Array.isArray(messages) ? messages : []).filter((message) => message && typeof message.id === "string" && message.id && normalizeText(plainText(String(message.content || ""))) === wanted && (!selfName || !message.imdisplayname || sameName(String(message.imdisplayname), selfName)) && !(arrivalMs(message) < sentAfterMs));
+  rows.sort((a, b) => (arrivalMs(b) || 0) - (arrivalMs(a) || 0));
+  return rows.length ? String(rows[0].id) : null;
+}
+function historyRows(messages) {
+  return (Array.isArray(messages) ? messages : []).filter((message) => message && /^(?:Text|RichText)/i.test(String(message.messagetype || ""))).map((message) => ({
+    id: String(message.id || ""),
+    createdDateTime: String(message.originalarrivaltime || message.composetime || ""),
+    from: String(message.imdisplayname || ""),
+    content: plainText(String(message.content || ""))
+  }));
+}
+function sendFailure(text) {
+  const value = String(text || "");
+  const auth = classifyAuthFailure(value);
+  if (auth && auth.state === "logged-out") return { kind: "not-logged-in", detail: auth.message };
+  if (auth) return { kind: "reauth-needed", detail: auth.message, cause: auth.state };
+  if (/returned status (?:429|5\d\d)|too many requests|timed out|timeout|deadline exceeded|connection reset|EOF|context canceled|executing POST/i.test(value)) {
+    return { kind: "unknown", detail: `exo-teams could not confirm delivery.${quoted(value)}` };
   }
-  const names = binaryNames(platform);
-  const probe = runProcess(names.node, ["-p", "process.platform+'/'+process.arch+'/'+process.versions.node"], envFor(p));
-  if (!probe.ok) return { state: "not-installed", message: "Install Node.js 20 or later with npm, then return and sign in again." };
-  const pieces = probe.stdout.trim().split("/");
-  if (pieces.length !== 3) return { state: "install-failed", message: "Could not read the local Node.js platform and architecture." };
-  const runtimePlatform = String(pieces[0]).toLowerCase();
-  const actualPlatform = host.path.isWindows ? "win32" : runtimePlatform;
-  const arch = String(pieces[1]).toLowerCase();
-  const version = String(pieces[2]);
-  if (runtimePlatform !== platform) return { state: "install-failed", message: `The local Node.js runtime reports ${runtimePlatform}, but CodeTerm reports ${platform}. Install a matching Node.js runtime and retry.` };
-  const target = resolveTarget(actualPlatform, arch);
-  if ("error" in target) return { state: target.error, message: target.message };
-  const major = Number(version.split(".")[0]);
-  if (!Number.isInteger(major) || major < 20) return { state: "not-installed", message: `Node.js ${version} is too old for the pinned m365 CLI. Install Node.js 20 or later and retry.` };
-  return { platform: actualPlatform, arch, version, target };
+  if (/returned status 401/.test(value)) return { kind: "reauth-needed", detail: `Teams refused the session token.${quoted(value)} Run login to sign in again.`, cause: "expired" };
+  if (/returned status (?:400|403|404|409|413)/.test(value)) {
+    return { kind: "upstream-rejected", detail: `the Teams chat service rejected the message before delivery.${quoted(value)}` };
+  }
+  return { kind: "unknown", detail: `exo-teams returned an outcome that does not prove delivery.${quoted(value)}` };
 }
-function protectStorage(p) {
-  if (storageProtectionCache[p.root]) return storageProtectionCache[p.root];
-  const result = applyStorageProtection(p);
-  storageProtectionCache[p.root] = result;
-  return result;
+function parseSha256(stdout) {
+  const line = String(stdout || "").split(/\r?\n/).map((item) => item.trim()).find((item) => /^(?:[0-9a-f]{2} ?){32}(?:\s|$)/i.test(item) || /\b[0-9a-f]{64}\b/i.test(item));
+  const match = line ? line.replace(/(?<=\b[0-9a-f]{2}) (?=[0-9a-f]{2}\b)/gi, "").match(/\b[0-9a-f]{64}\b/i) : null;
+  return match ? match[0].toLowerCase() : null;
 }
-function installedPackageVersion(p) {
-  const manifest = host.fs.readJson(joinPath(p.runtime, `node_modules/${PACKAGE}/package.json`));
-  return manifest?.name === PACKAGE ? String(manifest.version || "") : "";
+function parseGoModDownload(stdout) {
+  const value = parseJson(String(stdout || "").trim());
+  if (!value || typeof value !== "object") return null;
+  return { version: String(value.Version || ""), sum: String(value.Sum || ""), error: String(value.Error || "") };
+}
+function normalizeArch(value) {
+  const arch = String(value || "").trim().toLowerCase();
+  if (arch === "x86_64" || arch === "amd64" || arch === "x64") return "x64";
+  if (arch === "arm64" || arch === "aarch64") return "arm64";
+  return arch;
+}
+
+// teams-client/src/plugin.ts
+var installJobs = {};
+var activeInstallJobId = null;
+var storageProtectionCache = {};
+var previewTokens = {};
+var memoryChats = null;
+var injectedClock = null;
+var lastSendState = null;
+var lastStatus = null;
+function now() {
+  const value = injectedClock ? Number(injectedClock()) : Date.now();
+  return Number.isFinite(value) ? value : Date.now();
+}
+function joinPath(...parts) {
+  return host.path.normalize(parts.join("/"));
+}
+function nativePath(path) {
+  return host.path.toNative(host.path.normalize(path));
+}
+function hostPlatform() {
+  if (host.path.isWindows) return "win32";
+  let value = "";
+  try {
+    value = String(host.platform() || "").toLowerCase();
+  } catch {
+  }
+  return value === "macos" ? "darwin" : value;
+}
+function exeName(platform, name) {
+  return platform === "win32" ? `${name}.exe` : name;
+}
+function paths() {
+  try {
+    const expanded = host.fs.expandHome(ROOT);
+    if (!expanded) return null;
+    const root = host.path.normalize(expanded);
+    const home = joinPath(root, EXO_HOME_DIR);
+    const runtime = joinPath(root, "runtime");
+    const toolchain = joinPath(runtime, "toolchain");
+    const platform = hostPlatform();
+    return {
+      root,
+      home,
+      tokenDir: joinPath(home, EXO_TOKEN_DIR),
+      runtime,
+      toolchain,
+      goBinary: joinPath(toolchain, "go/bin", exeName(platform, "go")),
+      gopath: joinPath(runtime, "gopath"),
+      gocache: joinPath(runtime, "gocache"),
+      gomodcache: joinPath(runtime, "gomodcache"),
+      bin: joinPath(runtime, "bin"),
+      binary: joinPath(runtime, "bin", exeName(platform, "exo-teams")),
+      marker: joinPath(runtime, "install.json"),
+      noPath: joinPath(runtime, "no-path"),
+      loginLog: joinPath(root, "login.log"),
+      loginState: joinPath(root, "login.json"),
+      outbox: joinPath(root, "outbox.json"),
+      scope: joinPath(root, "send-scope.json"),
+      chatCache: joinPath(root, "chats.json")
+    };
+  } catch {
+    return null;
+  }
+}
+function toolsFor(platform) {
+  if (platform === "win32") return { curl: "curl.exe", tar: "tar.exe", hash: ["certutil.exe", "-hashfile", "{file}", "SHA256"], icacls: "icacls.exe", whoami: "whoami.exe", kill: ["taskkill.exe", "/PID", "{pid}", "/T", "/F"] };
+  if (platform === "darwin") return { curl: "curl", tar: "tar", hash: ["shasum", "-a", "256", "{file}"], icacls: "", whoami: "", kill: ["kill", "{pid}"] };
+  return { curl: "curl", tar: "tar", hash: ["sha256sum", "{file}"], icacls: "", whoami: "", kill: ["kill", "{pid}"] };
+}
+function resolveTarget(platform, arch) {
+  const archive = GO_ARCHIVES[`${platform}/${arch}`];
+  if (!archive) return { state: "unsupported-platform", message: `exo-teams is built here with a pinned Go toolchain, which is pinned for macOS, Linux and Windows on x64 or arm64, not ${platform || "this system"}/${arch || "unknown"}.` };
+  return { platform, arch, archive, exe: exeName(platform, "exo-teams"), tools: toolsFor(platform) };
+}
+var cachedTarget = null;
+function detectTarget(p) {
+  if (cachedTarget) return cachedTarget;
+  const platform = hostPlatform();
+  let arch = "";
+  if (platform === "win32") {
+    try {
+      arch = normalizeArch(String(host.envGet("PROCESSOR_ARCHITEW6432") || host.envGet("PROCESSOR_ARCHITECTURE") || ""));
+    } catch {
+    }
+  } else {
+    const probe = runProcess("uname", ["-m"], {}, TIMEOUTS.probe);
+    arch = probe.ok ? normalizeArch(probe.stdout) : "";
+  }
+  cachedTarget = resolveTarget(platform, arch);
+  return cachedTarget;
+}
+function runProcess(bin, args, env, timeoutMs) {
+  let result;
+  try {
+    result = parseJson(host.exec(JSON.stringify({ bin, args, env, timeoutMs })));
+  } catch (error) {
+    return { ok: false, error: String(error), stdout: "", stderr: "" };
+  }
+  if (!result) return { ok: false, error: `${bin} returned an unreadable process result.`, stdout: "", stderr: "" };
+  const stdout = String(result.stdout || "");
+  const stderr = String(result.stderr || "");
+  if (result.error) return { ok: false, error: String(result.error), stdout, stderr, code: result.code };
+  if (result.code !== 0) return { ok: false, error: stderr || stdout || `${bin} exited ${result.code}.`, stdout, stderr, code: result.code };
+  return { ok: true, stdout, stderr };
+}
+function exoEnv(p) {
+  const home = nativePath(p.home);
+  return { HOME: home, USERPROFILE: home, PATH: nativePath(p.noPath) };
+}
+function goEnv(p) {
+  const home = nativePath(p.home);
+  return {
+    HOME: home,
+    USERPROFILE: home,
+    GOPATH: nativePath(p.gopath),
+    GOCACHE: nativePath(p.gocache),
+    GOMODCACHE: nativePath(p.gomodcache),
+    GOBIN: nativePath(p.bin),
+    GOTOOLCHAIN: "local",
+    GOENV: "off",
+    GOTELEMETRY: "off",
+    GOFLAGS: "-trimpath",
+    CGO_ENABLED: "0",
+    GOPROXY: "https://proxy.golang.org",
+    GOSUMDB: "sum.golang.org",
+    GONOSUMDB: "",
+    GONOSUMCHECK: "",
+    GOPRIVATE: "",
+    GOINSECURE: ""
+  };
 }
 function windowsAclCommands(root, principal) {
   return [[root, "/inheritance:r", "/grant:r", `${principal}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "/C"]];
 }
 var ACL_MARKER = ".acl-restricted";
+function protectStorage(p) {
+  if (storageProtectionCache[p.root]) return storageProtectionCache[p.root];
+  const result = applyStorageProtection(p);
+  if (!result.error) storageProtectionCache[p.root] = result;
+  return result;
+}
 function applyStorageProtection(p) {
-  for (const dir of [p.root, p.home, p.runtime, p.npmCache]) {
+  for (const dir of [p.root, p.home, p.tokenDir, p.runtime, p.noPath]) {
     try {
-      if (!host.fs.makeDirs(dir)) return { error: "storage-protection-failed", message: "Could not create the plugin-owned private runtime directory." };
+      if (!host.fs.makeDirs(dir)) return { error: "storage-protection-failed", message: "Could not create the plugin-owned private directory." };
     } catch {
-      return { error: "storage-protection-failed", message: "Could not create the plugin-owned private runtime directory." };
+      return { error: "storage-protection-failed", message: "Could not create the plugin-owned private directory." };
     }
   }
   if (host.path.isWindows) {
     const marker = joinPath(p.root, ACL_MARKER);
     if (host.fs.fileExists(marker)) return {};
-    const names = binaryNamesForHost();
-    const env2 = envFor(p);
-    const who = runProcess(names.whoami, [], env2);
+    const tools = toolsFor("win32");
+    const who = runProcess(tools.whoami, [], {}, TIMEOUTS.probe);
     const principal = who.ok ? who.stdout.trim() : "";
-    if (!principal || /[\r\n]/.test(principal)) return { error: "storage-protection-failed", message: "Could not identify the Windows account for the plugin cache ACL." };
+    if (!principal || /[\r\n]/.test(principal)) return { error: "storage-protection-failed", message: "Could not identify the Windows account for the plugin storage ACL." };
     for (const args of windowsAclCommands(nativePath(p.root), principal)) {
-      const acl = runProcess(names.icacls, args, env2);
-      if (!acl.ok) return { error: "storage-protection-failed", message: "Could not restrict the plugin cache with a Windows ACL. No sign-in was started." };
+      const acl = runProcess(tools.icacls, args, {}, TIMEOUTS.probe);
+      if (!acl.ok) return { error: "storage-protection-failed", message: "Could not restrict the plugin storage with a Windows ACL. Nothing was started." };
     }
     host.fs.writeFile(marker, "1");
     return {};
   }
-  const env = envFor(p);
-  for (const dir of [p.root, p.home, p.runtime, p.npmCache]) {
-    const chmod = runProcess("chmod", ["700", nativePath(dir)], env);
-    if (!chmod.ok) return { error: "storage-protection-failed", message: "Could not restrict the plugin runtime directory permissions. No sign-in was started." };
+  for (const dir of [p.root, p.home, p.tokenDir]) {
+    const chmod = runProcess("chmod", ["700", nativePath(dir)], {}, TIMEOUTS.probe);
+    if (!chmod.ok) return { error: "storage-protection-failed", message: "Could not restrict the plugin storage permissions. Nothing was started." };
   }
   return {};
 }
-function protectCacheFiles(p, force = false) {
-  if (!force && cacheProtectionCache[p.root]) return cacheProtectionCache[p.root];
-  const result = applyCacheFileProtection(p);
-  cacheProtectionCache[p.root] = result;
-  return result;
-}
-function applyCacheFileProtection(p) {
-  if (host.path.isWindows) return protectStorage(p);
-  const env = envFor(p);
-  for (const file of [p.msal, p.current, p.all]) {
-    if (!host.fs.fileExists(file)) continue;
-    const chmod = runProcess("chmod", ["600", nativePath(file)], env);
-    if (!chmod.ok) return { error: "storage-protection-failed", message: "Could not restrict an m365 credential cache file." };
-  }
-  return {};
-}
-function startLoginProcess(p, target, stage, args, packagePath, authType = "browser", leaseFile, appId = configuredAppId()) {
-  let started;
-  const bin = stage === "pack" || stage === "install" ? target.npm : target.node;
-  const logFile = stage === "browser" ? joinPath(p.root, `login-${authType}.log`) : void 0;
-  if (logFile) try {
-    host.fs.removeFile(logFile);
-  } catch {
-  }
-  const detach = stage === "browser";
-  try {
-    started = host.exec.start({ bin, args, env: envFor(p), timeoutMs: 12e4, detach, ...logFile ? { logFile } : {} });
-  } catch {
-    return { error: `Could not start the m365 ${stage} step.` };
-  }
-  if (!started.jobId) return { error: started.error || `The m365 ${stage} step did not start.` };
-  loginJobs[started.jobId] = { stage, paths: p, target, packagePath, authType, appId, logFile, leaseFile, startedAt: stage === "browser" ? now() : void 0 };
-  activeLoginJobId = started.jobId;
-  return { jobId: started.jobId };
-}
-function leasePath(p) {
-  return joinPath(p.root, "login.lease");
-}
-function cancelPendingSignIn() {
-  const jobId = activeLoginJobId;
-  const login = jobId ? loginJobs[jobId] : null;
-  const p = login?.paths || paths();
-  if (p) try {
-    host.fs.removeFile(leasePath(p));
-  } catch {
-  }
-  if (!jobId || !login || login.stage !== "browser") return false;
-  try {
-    host.exec.close(jobId);
-  } catch {
-  }
-  finishLoginJob(jobId, "sign-in-cancelled");
-  return true;
-}
-function installM365(authType) {
-  const p = paths();
-  if (!p) return { state: "unsupported-platform", message: "The host home directory is unavailable." };
-  delete runtimeInfoCache[p.root];
-  const protectedState = protectStorage(p);
-  if (protectedState.error) return { state: protectedState.error, message: protectedState.message || "Could not secure plugin storage." };
-  const info = runtimeInfo(p);
-  if ("state" in info) return { state: info.state, message: info.message };
-  const npmVersion = runProcess(info.target.npm, ["--version"], envFor(p));
-  if (!npmVersion.ok) return { state: "not-installed", message: "Node.js is available, but npm is not. Install npm with Node.js 20 or later, then retry Sign in." };
-  const entries = host.fs.readDir(p.root) || [];
-  for (const entry of entries) if (/^pnp-cli-microsoft365-\d+\.\d+\.\d+\.tgz$/i.test(entry.name)) host.fs.removeFile(entry.path);
-  const packagePath = joinPath(p.root, `pnp-cli-microsoft365-${VERSION}.tgz`);
-  const started = startLoginProcess(p, info.target, "pack", ["pack", `${PACKAGE}@${VERSION}`, "--pack-destination", nativePath(p.root), "--json"], packagePath, authType);
-  if (!started.jobId) return { state: "install-failed", message: started.error || "Could not start npm pack." };
-  return { jobId: started.jobId, state: "install-in-progress", message: "The pinned m365 package is being packed for local checksum verification before installation." };
-}
-function packageFromPackResult(p, target, stdout) {
-  const packed = parseJson(stdout);
-  const packageInfo = Array.isArray(packed) ? packed[0] : null;
-  const filename = String(packageInfo?.filename || "");
-  if (packageInfo?.name !== PACKAGE || packageInfo?.version !== VERSION || !/^pnp-cli-microsoft365-\d+\.\d+\.\d+\.tgz$/.test(filename)) {
-    return { error: "npm pack returned an unexpected package result." };
-  }
-  const packagePath = joinPath(p.root, filename);
-  if (!host.fs.fileExists(packagePath)) return { error: "npm pack did not create the expected local tarball." };
-  const script = "const fs=require('node:fs');const crypto=require('node:crypto');process.stdout.write('sha512-'+crypto.createHash('sha512').update(fs.readFileSync(process.argv[1])).digest('base64'));";
-  const digest = runProcess(target.node, ["-e", script, nativePath(packagePath)], envFor(p));
-  if (!digest.ok || digest.stdout.trim() !== target.integrity) {
-    try {
-      host.fs.removeFile(packagePath);
-    } catch {
-    }
-    return { error: "The local m365 package checksum did not match the pinned SHA-512." };
-  }
-  return { path: packagePath };
-}
-function finishLoginJob(jobId, state, error) {
-  const login = loginJobs[jobId];
-  if (login?.packagePath) {
-    try {
-      host.fs.removeFile(login.packagePath);
-    } catch {
-    }
-  }
-  if (login?.logFile) {
-    try {
-      host.fs.removeFile(login.logFile);
-    } catch {
-    }
-  }
-  delete loginJobs[jobId];
-  if (activeLoginJobId === jobId) activeLoginJobId = null;
-  return { done: true, state, error, jobId };
-}
-function startBrowserLogin(p, target, authType = "browser") {
-  const lease = leasePath(p);
-  const nonce = `${now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
-  if (!host.fs.writeFile(lease, nonce)) return { error: "Could not prepare the Microsoft sign-in lease file." };
-  const appId = configuredAppId();
-  const args = ["-e", SIGN_IN_WRAPPER, nativePath(lease), nonce, String(SIGN_IN_TTL_MS), "login", "--authType", authType, "--appId", appId, "--output", "json"];
-  return startLoginProcess(p, target, "browser", args, void 0, authType, lease, appId);
-}
-function signInLogFailure(text, appId) {
-  const known = authState(text, appId);
-  if (known) return known;
-  const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const last = lines[lines.length - 1] || "";
-  return /^Error:/.test(last) ? { state: "sign-in-failed", message: `Microsoft sign-in failed: ${last.slice(6).trim()}` } : null;
-}
-var AUTHORIZE_URL = /^https:\/\/login\.(?:microsoftonline\.(?:com|us)|chinacloudapi\.cn|partner\.microsoftonline\.cn)\/[\w.-]+\/oauth2\/(?:v2\.0\/)?authorize\?\S*redirect_uri=http:\/\/localhost:\d+\S*$/;
-var DEVICE_LOGIN_URL = /https:\/\/(?:(?:aka\.ms|(?:www\.)?microsoft\.com)\/devicelogin|login\.microsoft(?:online)?\.com\/(?:device|common\/oauth2\/deviceauth))(?![\w.-])[^\s<>"']*/i;
-var USER_CODE = /^[A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?$|^[A-Z0-9]{6,12}$/i;
-function parseSignInLog(text, appId) {
-  const raw = String(text || "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, " ");
-  const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const markers = lines.filter((line) => line.startsWith(SIGN_IN_MARKER)).map((line) => line.slice(SIGN_IN_MARKER.length).trim());
-  if (markers.includes("cancelled")) return { state: "cancelled" };
-  if (markers.includes("expired")) return { state: "expired" };
-  const failure = signInLogFailure(lines.filter((line) => !line.startsWith(SIGN_IN_MARKER)).join("\n"), appId);
-  if (failure) return { state: "failed", failure };
-  const browserUrl = markers.filter((marker) => marker.startsWith("url ")).map((marker) => marker.slice(4).trim()).reverse().find((url) => AUTHORIZE_URL.test(url));
-  if (browserUrl) return { state: "awaiting-browser", signInUrl: browserUrl };
-  const parsed = parseJson(raw.trim());
-  const codeMatch = raw.match(/(?:enter|use)\s+(?:the\s+)?(?:login\s+)?(?:code\s+)?([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?|[A-Z0-9]{6,12})\b/i) || raw.match(/\b(?:device|user|sign-in|login)\s+code\s*[:=]?\s*([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?|[A-Z0-9]{6,12})\b/i);
-  const candidateUrl = String(parsed?.signInUrl || parsed?.verificationUri || parsed?.verificationUrl || "");
-  const candidateCode = String(parsed?.deviceCode || parsed?.userCode || "");
-  const signInUrl = (raw.match(DEVICE_LOGIN_URL)?.[0] || candidateUrl.match(DEVICE_LOGIN_URL)?.[0])?.replace(/[),.;]+$/, "");
-  const deviceCode = USER_CODE.test(candidateCode) ? candidateCode : codeMatch?.[1];
-  return signInUrl && deviceCode ? { state: "awaiting-device-code", signInUrl, deviceCode } : { state: "starting" };
-}
-function readSignInLog(login) {
-  return login.logFile ? parseSignInLog(String(host.fs.readFileTail(login.logFile, 8192) || ""), login.appId) : { state: "starting" };
-}
-function signInArtifacts(log) {
-  if (log.state === "awaiting-browser") return { signInUrl: log.signInUrl };
-  if (log.state === "awaiting-device-code") return { signInUrl: log.signInUrl, deviceCode: log.deviceCode };
-  return {};
-}
-function targetState() {
-  const p = paths();
-  if (!p) return { state: "unsupported-platform", message: "The host home directory is unavailable." };
-  const info = runtimeInfo(p);
-  if ("state" in info) return { state: info.state, message: info.message, paths: p };
-  return { state: "ready", message: "", paths: p, target: info.target };
-}
-function runM365(args) {
-  const target = targetState();
-  if (!target.paths) return { ok: false, error: target.message, stderr: "" };
-  if (target.state !== "ready") return { ok: false, error: target.message, stderr: "" };
-  const p = target.paths;
-  if (!host.fs.fileExists(p.binary)) return { ok: false, error: "m365 is not installed. Run `codeterm plugin teams-client login` (or Sign in in the view) to install the pinned CLI.", stderr: "" };
-  const secured = protectStorage(p);
-  if (secured.error) return { ok: false, error: secured.message || "Could not secure the m365 runtime.", stderr: "" };
-  const result = runProcess(nativePath(p.binary), args, envFor(p));
-  return result;
-}
-function upstreamLine(text, pattern) {
-  const line = String(text || "").split(/\r?\n/).map((item) => item.trim()).find((item) => pattern.test(item)) || "";
-  return line.replace(/eyJ[\w-]+\.[\w-]+(?:\.[\w-]*)?/g, "[redacted]").replace(/\b((?:code|access_token|refresh_token|id_token|client_secret)=)[^&\s"']+/gi, "$1[redacted]").replace(/^Error:\s*/, "").slice(0, 400);
-}
-function quoted(line) {
-  return line ? ` Microsoft said: "${line}"` : "";
-}
-var REDIRECT_REFUSED = /AADSTS50011|AADSTS500113|redirect_uri_mismatch|redirect URI[^\n]*does not match|reply (?:url|address)[^\n]*(?:does not match|not registered)/i;
-var CONSENT_REQUIRED = /AADSTS65001|AADSTS65004|AADSTS90094|AADSTS90095|consent_required|consent[^\n]*(?:not granted|withdrawn|revoked|removed)|(?:withdrawn|revoked|removed)[^\n]*consent|admin(?:istrator)? (?:consent|approval)|has not consented|Missing scope permissions|API requires one of/i;
-var LOOPBACK_UNAVAILABLE = /listen (?:EADDRINUSE|EACCES|EADDRNOTAVAIL)|EADDRINUSE[^\n]*(?:127\.0\.0\.1|localhost|::1)/i;
-function authState(text, appId) {
-  const value = String(text || "");
-  if (REDIRECT_REFUSED.test(value)) {
-    return { state: "wrong-client-redirect", message: `Microsoft refused the localhost sign-in link because app id ${appId || "in use"} has no http://localhost redirect registered.${quoted(upstreamLine(value, REDIRECT_REFUSED))} Run login --device-code, or set Sign-in app id to ${DEFAULT_APP_ID} (Microsoft Graph Command Line Tools) in Teams Client settings and sign in again.` };
-  }
-  if (CONSENT_REQUIRED.test(value)) {
-    return { state: "consent-required", message: `Microsoft Graph consent is missing for app id ${appId || DEFAULT_APP_ID}.${quoted(upstreamLine(value, CONSENT_REQUIRED))} A tenant administrator must approve the delegated permissions Chat.ReadWrite and ChatMessage.Send for that app once (for example Connect-MgGraph -Scopes Chat.ReadWrite,ChatMessage.Send with Consent on behalf of your organization), then sign in again.` };
-  }
-  if (LOOPBACK_UNAVAILABLE.test(value)) {
-    return { state: "loopback-unavailable", message: `m365 could not open its localhost sign-in listener.${quoted(upstreamLine(value, LOOPBACK_UNAVAILABLE))} Run login --device-code to sign in with a code instead.` };
-  }
-  if (/AADSTS53003|conditional[ -]access|blocked by (?:your )?(?:organization|tenant) policy/i.test(value)) {
-    return { state: "conditional-access-blocked", message: "Your organization's Conditional Access policy blocked this sign-in. Ask your IT administrator which browser sign-in policy applies, then sign in again." };
-  }
-  if (/AADSTS50076|AADSTS50079|multi[ -]?factor|\bMFA\b|additional authentication is required/i.test(value)) {
-    return { state: "mfa-required", message: "Complete the MFA step in the Microsoft browser sign-in, then sign in again." };
-  }
-  if (/AADSTS50173|refresh token[^\n]*(?:revoked|invalidated)|(?:revoked|invalidated)[^\n]*refresh token/i.test(value)) {
-    return { state: "refresh-token-revoked", message: "The Microsoft refresh token was revoked. Sign in again to create a new browser session." };
-  }
-  if (/AADSTS700082|AADSTS700084|login has expired|access token expired|token has expired|expired refresh token/i.test(value)) {
-    return { state: "token-expired", message: "The Microsoft token expired. Sign in again to renew the browser session." };
-  }
-  if (/can't open(?: the)? default browser|could not open.*browser|failed to (?:open|launch).*browser|browser instance/i.test(value)) {
-    return { state: "browser-open-failed", message: "m365 could not open the default browser. Set a system default browser or start CodeTerm in a desktop session, then retry Sign in." };
-  }
-  return null;
+function installedMarker(p) {
+  const marker = host.fs.readJson(p.marker);
+  return !!marker && marker.module === EXO_MODULE && marker.version === EXO_VERSION && marker.sum === EXO_MODULE_SUM && host.fs.fileExists(p.binary);
 }
 function lifecycleMessage(state, detail) {
   const messages = {
-    "not-installed": "Node.js 20 or later with npm is required, or the pinned m365 CLI is not installed. Run `codeterm plugin teams-client login` (or Sign in in the view) to install it, or install Node.js 20+ and npm first.",
-    "unsupported-platform": detail || "This operating system and architecture are not supported by the pinned m365 CLI.",
-    "install-failed": detail || "The pinned m365 CLI could not be verified or installed. Check npm access and retry Sign in.",
-    "installed-not-configured": "The pinned m365 CLI is ready. Sign in with your work or school Microsoft account in the browser.",
-    "logged-out": "You are signed out. Run `codeterm plugin teams-client login` (or Sign in in the view) to sign in.",
+    "not-installed": "The pinned exo-teams CLI is not installed yet. Run `codeterm plugin teams-client login` (or Sign in in the view): it downloads a pinned Go toolchain, verifies its SHA-256, builds exo-teams at a pinned commit verified against the Go checksum database, then shows a sign-in code.",
+    "unsupported-platform": detail || "This operating system and architecture are not supported.",
+    "install-failed": detail || "The pinned exo-teams CLI could not be downloaded, verified or built. Check network access and retry Sign in.",
+    "install-in-progress": "The pinned exo-teams CLI is being installed. Keep polling login-status; the sign-in code follows.",
+    "logged-out": "Not signed in to Teams. Run `codeterm plugin teams-client login` (or Sign in in the view) to get a sign-in code.",
     "logged-in": "Microsoft Teams is connected.",
-    "reauth-needed": "The Microsoft session needs a new sign-in. Sign in again with `codeterm plugin teams-client login` (or Sign in in the view).",
-    "status-unavailable": "m365 did not answer in time, so the sign-in state is unknown. Refresh in a moment; sign in again only if this keeps happening."
+    "awaiting-user": "Waiting for you to enter the code at the Microsoft sign-in page."
   };
   return messages[state] || detail || "Teams Client could not determine its current state.";
 }
-function credentialPublic(id, expectedFile, p) {
+function readLoginRecord(p) {
+  const value = host.fs.readJson(p.loginState);
+  return value && Number.isFinite(Number(value.startedAt)) ? value : null;
+}
+function readSignInLog(p) {
+  if (!host.fs.fileExists(p.loginLog)) return { state: "starting" };
+  return parseSignInLog(String(host.fs.readFileTail(p.loginLog, 16384) || ""));
+}
+function pendingSignIn(p) {
+  const record = readLoginRecord(p);
+  if (!record) return null;
+  const log = readSignInLog(p);
+  if (log.state === "signed-in" || log.state === "failed") return null;
+  if (now() - record.startedAt > SIGN_IN_TTL_MS + 3e4) return null;
+  return { record, log };
+}
+function endSignIn(p, kill) {
+  const record = readLoginRecord(p);
+  if (kill && record && Number.isInteger(record.pid) && Number(record.pid) > 0) {
+    const target = detectTarget(p);
+    if (!("state" in target)) {
+      const [bin, ...args] = target.tools.kill.map((part) => part === "{pid}" ? String(record.pid) : part);
+      runProcess(bin, args, {}, TIMEOUTS.probe);
+    }
+  }
   try {
-    const manifest = host.manifest();
-    const entry = manifest && Array.isArray(manifest.credentials) ? manifest.credentials.find((item) => item && item.id === id) : null;
-    if (!entry || typeof entry.file !== "string") return null;
-    const declared = host.fs.expandHome(entry.file);
-    if (!declared || !host.path.equal(declared, expectedFile)) return null;
-    return parseJson(host.credentialPublic(id) || "");
+    host.fs.removeFile(p.loginState);
   } catch {
-    return null;
   }
 }
-function currentPublic(p) {
-  return credentialPublic("teams-m365-current-connection", p.current, p);
+function tokensPresent(p) {
+  return host.fs.fileExists(joinPath(p.tokenDir, "token-skype.jwt")) && host.fs.fileExists(joinPath(p.tokenDir, "token-chatsvcagg.jwt"));
 }
-function now() {
-  const value = injectedClock ? Number(injectedClock()) : Date.now();
-  return Number.isFinite(value) ? value : Date.now();
+function runExo(p, args, timeoutMs) {
+  const target = detectTarget(p);
+  if ("state" in target) return { ok: false, error: target.message, stdout: "", stderr: "" };
+  if (!installedMarker(p)) return { ok: false, error: lifecycleMessage("not-installed"), stdout: "", stderr: "" };
+  const secured = protectStorage(p);
+  if (secured.error) return { ok: false, error: secured.message || "Could not secure plugin storage.", stdout: "", stderr: "" };
+  return runProcess(nativePath(p.binary), args, exoEnv(p), timeoutMs);
+}
+function failureText(run) {
+  return run.ok ? "" : `${run.error}
+${run.stderr}
+${run.stdout}`;
+}
+function whoami(p) {
+  const run = runExo(p, ["whoami", "--json"], TIMEOUTS.whoami);
+  if (!run.ok) return { error: failureText(run) };
+  const who = parseWhoami(run.stdout);
+  return who ? { who } : { error: "exo-teams whoami returned unreadable output." };
+}
+function loggedIn(who) {
+  const upn = who.email || who.user;
+  const expiresOn = sessionExpiry(who);
+  return {
+    state: "logged-in",
+    message: upn ? `Signed in as ${who.user ? `${who.user} (${upn})` : upn}.` : lifecycleMessage("logged-in"),
+    accountId: upn || "teams-account",
+    upn: upn || null,
+    user: who.user || null,
+    tenantId: null,
+    expiresOn,
+    accounts: [{ id: upn || "teams-account", accountId: upn || "teams-account", tenantId: null, upn, active: true, expiresOn }]
+  };
+}
+function status() {
+  const value = computeStatus();
+  lastStatus = value;
+  return value;
+}
+function computeStatus() {
+  const p = paths();
+  if (!p) return { state: "unsupported-platform", message: "The host home directory is unavailable.", accounts: [] };
+  const target = detectTarget(p);
+  if ("state" in target) return { state: target.state, message: target.message, accounts: [] };
+  if (activeInstallJobId) return { state: "install-in-progress", message: lifecycleMessage("install-in-progress"), accounts: [] };
+  if (!installedMarker(p)) return { state: "not-installed", message: lifecycleMessage("not-installed"), accounts: [] };
+  const pending = pendingSignIn(p);
+  if (pending && pending.log.state === "awaiting-user") {
+    return { state: "awaiting-user", message: `Open ${pending.log.signInUrl} and enter code ${pending.log.deviceCode}.`, signInUrl: pending.log.signInUrl, deviceCode: pending.log.deviceCode, accounts: [] };
+  }
+  if (!tokensPresent(p)) return { state: "logged-out", message: lifecycleMessage("logged-out"), accounts: [] };
+  const first = whoami(p);
+  if ("who" in first && sessionUsable(first.who)) return loggedIn(first.who);
+  if ("error" in first) {
+    const known = classifyAuthFailure(first.error);
+    if (known && known.state !== "expired") return { state: known.state, message: known.message, accounts: [] };
+  }
+  if (!host.fs.fileExists(joinPath(p.tokenDir, EXO_REFRESH_TOKEN_FILE))) {
+    return { state: "expired", message: "The Teams session expired and no refresh token is stored. Run login to sign in again.", accounts: [] };
+  }
+  const refreshed = runExo(p, ["auth", "--refresh"], TIMEOUTS.refresh);
+  if (!refreshed.ok) {
+    const known = classifyAuthFailure(failureText(refreshed));
+    if (known && known.state !== "logged-out") return { state: known.state, message: known.message, accounts: [] };
+    return { state: "expired", message: `The Teams session could not be renewed silently. Microsoft said: "${microsoftMessage(failureText(refreshed))}" Run login to sign in again.`, accounts: [] };
+  }
+  const second = whoami(p);
+  if ("who" in second && sessionUsable(second.who)) return loggedIn(second.who);
+  const detail = "error" in second ? ` ${microsoftMessage(second.error)}` : "";
+  return { state: "expired", message: `The Teams session is not usable after a refresh.${detail} Run login to sign in again.`, accounts: [] };
+}
+function senderFrom(value) {
+  const upn = String(value.upn || "");
+  if (value.state !== "logged-in" || !upn) return null;
+  return { id: upn, accountId: upn, tenantId: String(value.tenantId || ""), upn, user: String(value.user || ""), identityKey: JSON.stringify([upn.toLowerCase()]) };
+}
+function liveSender() {
+  const current = status();
+  if (current.state === "expired" || current.state === "refused") return { error: `reauth-needed: ${current.state}. ${current.message}` };
+  if (["logged-out", "awaiting-user", "not-installed"].includes(current.state)) return { error: failureMessage("not-logged-in") };
+  if (current.state !== "logged-in") return { error: `upstream-rejected: ${current.message}` };
+  const sender = senderFrom(current);
+  return sender ? { sender } : { error: "upstream-rejected: The signed-in Teams account could not be resolved. Refresh Teams Client status." };
+}
+function previewSender() {
+  const sender = lastStatus ? senderFrom(lastStatus) : null;
+  if (sender) return { sender };
+  return liveSender();
+}
+function validChatId(value) {
+  return /^[A-Za-z0-9:._@-]{1,512}$/.test(value) && value.includes(":");
+}
+function readSendScope() {
+  const p = paths();
+  if (!p) return parseSendScope(null, validChatId);
+  let raw = null;
+  try {
+    raw = host.fs.fileExists(p.scope) ? host.fs.readFile(p.scope) ?? "" : null;
+  } catch {
+    raw = "";
+  }
+  return parseSendScope(raw, validChatId);
+}
+function setSendScope(args) {
+  const scope = validateSendScope(args, validChatId);
+  if ("error" in scope) return { error: `${scope.error} The restriction was not changed.` };
+  const p = paths();
+  if (!p) return { error: "The Teams Client data directory is unavailable; the restriction was not changed." };
+  try {
+    if (!host.fs.makeDirs(p.root) || host.fs.writeFile(p.scope, JSON.stringify(scope)) !== true) {
+      return { error: "Could not save the restriction; the previous setting still applies." };
+    }
+  } catch {
+    return { error: "Could not save the restriction; the previous setting still applies." };
+  }
+  return { result: JSON.stringify(readSendScope()) };
+}
+function chatList(sender, refresh = false) {
+  const p = paths();
+  if (!p) return { error: lifecycleMessage("unsupported-platform") };
+  if (!refresh && memoryChats && memoryChats.identityKey === sender.identityKey && now() - memoryChats.at < CHAT_CACHE_TTL_MS) return { chats: memoryChats.chats };
+  if (!refresh) {
+    const cached = host.fs.readJson(p.chatCache);
+    if (cached && cached.identityKey === sender.identityKey && Array.isArray(cached.chats) && now() - Number(cached.at) < CHAT_CACHE_TTL_MS) {
+      memoryChats = { identityKey: sender.identityKey, chats: cached.chats, at: Number(cached.at) };
+      return { chats: cached.chats };
+    }
+  }
+  const run = runExo(p, ["list-chats", "--json"], TIMEOUTS.chats);
+  if (!run.ok) {
+    const known = classifyAuthFailure(failureText(run));
+    return { error: known ? `${known.state === "logged-out" ? "not-logged-in" : "reauth-needed"}: ${known.message}` : `upstream-rejected: exo-teams could not list chats. Microsoft said: "${microsoftMessage(failureText(run))}"` };
+  }
+  const source = parseJson(run.stdout.trim());
+  if (!Array.isArray(source)) return { error: "upstream-rejected: exo-teams returned an unreadable chat list." };
+  const chats = mapChats(source, sender.user);
+  memoryChats = { identityKey: sender.identityKey, chats, at: now() };
+  try {
+    host.fs.writeFile(p.chatCache, JSON.stringify({ identityKey: sender.identityKey, at: memoryChats.at, chats }));
+  } catch {
+  }
+  return { chats };
+}
+function findChats(chats, query, preferDirect) {
+  const q = personQuery(query);
+  if (preferDirect) {
+    const direct = matchChats(chats.filter((chat) => chat.chatType === "oneOnOne"), q);
+    if (direct.match || direct.ambiguous) return direct;
+  }
+  return matchChats(chats, q);
+}
+function agentChats(args, preferDirect = false) {
+  const refresh = args.includes("--refresh");
+  const query = args.filter((arg) => arg !== "--refresh").join(" ").trim();
+  const resolved = liveSender();
+  if ("error" in resolved) return resolved;
+  const listed = chatList(resolved.sender, refresh);
+  if ("error" in listed) return listed;
+  if (!query) return { result: JSON.stringify({ chats: listed.chats }) };
+  const found = findChats(listed.chats, query, preferDirect);
+  const next = found.match ? `Send with: send ${found.match.id} --key <unique-key> <text>` : found.ambiguous ? "Several chats match. Show the candidates to the owner and ask which one, then use its id." : "No chat matches. Ask the owner for a more exact name, or use send-to <full name> to start a 1:1 chat.";
+  return { result: JSON.stringify({ query, match: found.match, ambiguous: found.ambiguous, candidates: found.candidates, next }) };
+}
+function resolveDestination(id, sender) {
+  if (!validChatId(id)) return { error: failureMessage("invalid-request", "Use an immutable chat id from `chats <name>`; chat names are not ids.") };
+  let listed = chatList(sender);
+  if ("error" in listed) return { error: listed.error };
+  let chat = listed.chats.find((item) => item.id === id);
+  if (!chat) {
+    listed = chatList(sender, true);
+    if ("error" in listed) return { error: listed.error };
+    chat = listed.chats.find((item) => item.id === id);
+  }
+  if (!chat) return { error: failureMessage("chat-not-found", id) };
+  return { destination: { id: chat.id, label: chat.title || chat.id, chatType: chat.chatType, members: chat.members } };
+}
+function utf8Bytes(value) {
+  let bytes = 0;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code < 128) bytes++;
+    else if (code < 2048) bytes += 2;
+    else if (code >= 55296 && code <= 56319 && i + 1 < value.length) {
+      bytes += 4;
+      i++;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+function cutText(value, units) {
+  let end = Math.max(0, Math.min(value.length, units));
+  if (end > 0 && end < value.length) {
+    const last = value.charCodeAt(end - 1);
+    const next = value.charCodeAt(end);
+    if (last >= 55296 && last <= 56319 && next >= 56320 && next <= 57343) end--;
+  }
+  return value.slice(0, end);
+}
+function boundedHistory(chatId, source, count, maxBytes) {
+  const capCount = Math.max(1, Math.min(MAX_COUNT, Math.floor(count)));
+  const capBytes = Math.max(1024, Math.min(MAX_BYTES, Math.floor(maxBytes)));
+  const ordered = (Array.isArray(source) ? source : []).map((raw) => ({
+    id: String(raw && raw.id || ""),
+    createdDateTime: String(raw && raw.createdDateTime || ""),
+    from: String(raw && raw.from || ""),
+    content: String(raw && raw.content || ""),
+    untrusted: true
+  })).sort((a, b) => a.createdDateTime.localeCompare(b.createdDateTime)).slice(-capCount);
+  const out = { chatId, messages: [], truncated: false };
+  for (let i = ordered.length - 1; i >= 0; i--) {
+    const message = ordered[i];
+    const candidate = [message, ...out.messages];
+    if (utf8Bytes(JSON.stringify({ ...out, messages: candidate })) <= capBytes) {
+      out.messages = candidate;
+      continue;
+    }
+    out.truncated = true;
+    if (out.messages.length > 0) break;
+    let low = 0;
+    let high = message.content.length;
+    let best = "";
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const clipped2 = { ...message, content: cutText(message.content, middle) };
+      if (utf8Bytes(JSON.stringify({ ...out, messages: [clipped2] })) <= capBytes) {
+        best = clipped2.content;
+        low = middle + 1;
+      } else high = middle - 1;
+    }
+    const clipped = { ...message, content: best };
+    if (utf8Bytes(JSON.stringify({ ...out, messages: [clipped] })) <= capBytes) out.messages = [clipped];
+    break;
+  }
+  if (utf8Bytes(JSON.stringify(out)) > capBytes) return { chatId, messages: [], truncated: true };
+  return out;
+}
+function settings() {
+  const value = parseJson(host.settingsJson()) || {};
+  const count = Number(value.historyCount);
+  const bytes = Number(value.historyMaxBytes);
+  return {
+    historyCount: Number.isInteger(count) ? Math.max(1, Math.min(MAX_COUNT, count)) : 20,
+    historyMaxBytes: Number.isInteger(bytes) ? Math.max(1024, Math.min(MAX_BYTES, bytes)) : MAX_BYTES
+  };
+}
+function readMessages(p, chatId, count) {
+  const run = runExo(p, ["get-chat", chatId, "--json", "--count", String(Math.max(1, Math.min(200, count)))], TIMEOUTS.history);
+  if (!run.ok) return { error: failureText(run) };
+  const messages = parseJson(run.stdout.trim());
+  return Array.isArray(messages) ? { messages } : { error: "exo-teams returned unreadable messages." };
+}
+function agentHistory(args) {
+  if (args.length < 1 || args.length > 2 || !validChatId(args[0])) return { error: "Usage: history <immutable-chat-id> [n]. Select an id from chats; display names are not ids." };
+  const configured = settings();
+  let count = configured.historyCount;
+  if (args.length === 2) {
+    if (!/^[0-9]{1,3}$/.test(args[1]) || Number(args[1]) < 1) return { error: "History count must be an integer from 1 to 50." };
+    count = Math.min(MAX_COUNT, Number(args[1]));
+  }
+  const resolved = liveSender();
+  if ("error" in resolved) return resolved;
+  const found = resolveDestination(args[0], resolved.sender);
+  if ("error" in found) return found;
+  const p = paths();
+  const read = readMessages(p, args[0], count);
+  if ("error" in read) return { error: `upstream-rejected: exo-teams could not read that chat. Microsoft said: "${microsoftMessage(read.error)}"` };
+  return { result: JSON.stringify(boundedHistory(args[0], historyRows(read.messages), count, configured.historyMaxBytes)) };
+}
+var previewSequence = 0;
+function previewCommand(args, origin = "agent") {
+  if (args.length < 2 || !validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> <text>. Find the id with `chats <name>`; chat names are not accepted." };
+  const text = args.slice(1).join(" ");
+  if (!text.length) return { error: "invalid-request: Preview text must not be empty." };
+  const resolved = previewSender();
+  if ("error" in resolved) return resolved;
+  const found = resolveDestination(args[0], resolved.sender);
+  if ("error" in found) return found;
+  const previewId = sha256Hex(`preview\0${now()}\0${++previewSequence}`);
+  previewTokens[previewId] = { sender: resolved.sender, destination: found.destination, text, origin, previewNonce: previewId };
+  const decision = decideSend(readSendScope(), found.destination.id, origin);
+  return { result: JSON.stringify({
+    previewId,
+    idempotencyKey: previewId,
+    sender: resolved.sender,
+    tenant: { id: resolved.sender.tenantId },
+    destination: found.destination,
+    text,
+    allowed: decision.allow,
+    restriction: decision.allow ? null : decision.message
+  }) };
+}
+var SEND_FAILURES = ["invalid-request", "not-logged-in", "reauth-needed", "chat-not-found", "chat-not-allowed", "upstream-rejected", "unknown"];
+function failureMessage(kind, detail, cause) {
+  switch (kind) {
+    case "invalid-request":
+      return `invalid-request: ${String(detail || "Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>.")} Find the chat id with \`chats <name>\`, then send again.`;
+    case "not-logged-in":
+      return "not-logged-in: Sign in to Teams through `codeterm plugin teams-client login` (or Sign in in the view) before sending.";
+    case "reauth-needed":
+      return `reauth-needed: ${String(cause || "expired")}. ${String(detail || "The Teams session needs a new sign-in. Run login again.")}`;
+    case "chat-not-found":
+      return `chat-not-found: No chat of this account has id ${String(detail || "unavailable")}. Look it up with \`chats <name>\` and use an id from that result.`;
+    case "chat-not-allowed":
+      return String(detail || `chat-not-allowed: The owner's "Restrict agent sends" setting does not include this chat. Ask the owner to add it in the Teams Client view.`);
+    case "upstream-rejected":
+      return `upstream-rejected: ${String(detail || "the Teams chat service refused the operation")}. Correct the cause, then send again only if you still want delivery.`;
+    case "unknown":
+      return `unknown: ${String(detail || "Teams may have accepted this message but confirmation was lost.")} Do not retry this idempotency key and do not report it as delivered; inspect the chat and decide manually.`;
+  }
+  const exhaustive = kind;
+  return exhaustive;
+}
+function loadOutbox(p) {
+  try {
+    if (!host.fs.fileExists(p.outbox)) return { ledger: { schema: 2, attempts: [] } };
+    const value = parseJson(host.fs.readFile(p.outbox) || "");
+    if (value && value.schema === 1) return { ledger: { schema: 2, attempts: [] } };
+    if (!value || value.schema !== 2 || !Array.isArray(value.attempts)) return { error: "the existing outbox ledger is unreadable" };
+    const states = ["pending", "sent", "failed", "unknown"];
+    const valid = value.attempts.every((item) => item && typeof item.idempotencyKey === "string" && typeof item.payloadHash === "string" && /^[a-f0-9]{64}$/.test(item.payloadHash) && states.includes(item.state) && item.sender && typeof item.sender.accountId === "string" && typeof item.sender.identityKey === "string" && item.destination && validChatId(String(item.destination.id || "")) && typeof item.destination.label === "string" && Number.isFinite(Number(item.createdAt)) && Number.isFinite(Number(item.updatedAt)) && Number.isInteger(item.sendCount) && item.sendCount >= 0);
+    if (!valid) return { error: "the existing outbox ledger contains an invalid or unrecognized attempt state" };
+    return { ledger: value };
+  } catch {
+    return { error: "the existing outbox ledger could not be read" };
+  }
+}
+function persistOutbox(p, ledger) {
+  try {
+    if (!host.fs.makeDirs(p.root)) return false;
+    return host.fs.writeFile(p.outbox, JSON.stringify(ledger)) === true;
+  } catch {
+    return false;
+  }
+}
+function rememberSendFailure(kind, message) {
+  lastSendState = { state: kind, message, updatedAt: now() };
+  return { error: message };
+}
+function sendFailureResult(kind, detail, cause) {
+  return rememberSendFailure(kind, failureMessage(kind, detail, cause));
+}
+function rememberPrefixedFailure(message) {
+  const state = message.slice(0, message.indexOf(":"));
+  return SEND_FAILURES.includes(state) ? rememberSendFailure(state, message) : sendFailureResult("unknown", "The command result could not be classified safely. Inspect the Teams chat before retrying.");
+}
+function parseSendArgs(args, target, usage) {
+  if (args.length < 2 || !target(args[0])) return { error: failureMessage("invalid-request", usage) };
+  let start = 1;
+  let key;
+  if (args[1] === "--key") {
+    if (args.length < 4 || !/^[A-Za-z0-9._:-]{1,160}$/.test(args[2])) return { error: failureMessage("invalid-request", "--key needs a 1\u2013160 character idempotency key ([A-Za-z0-9._:-]), followed by message text.") };
+    key = args[2];
+    start = 3;
+  }
+  const text = args.slice(start).join(" ");
+  if (!text.trim().length) return { error: failureMessage("invalid-request", "Message text must not be empty.") };
+  return { target: args[0], text, key };
+}
+function attemptResult(attempt) {
+  lastSendState = { state: "sent", message: attempt.messageId ? `Teams accepted message ${attempt.messageId}.` : "Teams accepted the message; its id could not be read back.", updatedAt: now() };
+  return { result: JSON.stringify({
+    status: "sent",
+    sender: attempt.sender,
+    destination: attempt.destination,
+    idempotencyKey: attempt.idempotencyKey,
+    messageId: attempt.messageId || null,
+    ...attempt.messageId ? {} : { messageIdNote: "exo-teams confirmed the send, but the message id was not found when the chat was read back. Check the chat before resending." },
+    deliveryGuarantee: "A sent idempotency key is never resent. An unconfirmed send stays unknown. This is not an exactly-once delivery guarantee."
+  }) };
+}
+function persistFailure(p, ledger, attempt, kind, detail, cause) {
+  attempt.failure = kind;
+  attempt.failureCause = cause;
+  attempt.failureMessage = failureMessage(kind, detail, cause);
+  attempt.updatedAt = now();
+  attempt.state = kind === "unknown" ? "unknown" : "failed";
+  if (!persistOutbox(p, ledger)) {
+    attempt.state = "unknown";
+    attempt.failure = "unknown";
+    attempt.failureCause = void 0;
+    attempt.failureMessage = failureMessage("unknown");
+    persistOutbox(p, ledger);
+    return rememberSendFailure("unknown", attempt.failureMessage);
+  }
+  return rememberSendFailure(kind, attempt.failureMessage);
+}
+function exoFailure(p, ledger, attempt, run) {
+  const failure = sendFailure(failureText(run));
+  const kind = failure.kind === "not-logged-in" ? "not-logged-in" : failure.kind;
+  return persistFailure(p, ledger, attempt, kind, failure.detail, failure.cause);
+}
+function deliver(origin, plan, text, explicitKey) {
+  const matchingPreview = plan.kind === "chat" ? Object.values(previewTokens).reverse().find((token) => token.destination.id === plan.chatId && token.text === text) : null;
+  let key = explicitKey || matchingPreview?.previewNonce;
+  const p = paths();
+  if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
+  const loaded = loadOutbox(p);
+  if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error || "the outbox could not be read");
+  const ledger = loaded.ledger;
+  const payloadHash = sha256Hex(text);
+  const destinationKey = plan.kind === "chat" ? plan.chatId : `person:${sha256Hex(personQuery(plan.query).toLowerCase()).slice(0, 24)}`;
+  let attempt = key ? ledger.attempts.find((item) => item.idempotencyKey === key) : void 0;
+  if (attempt && (attempt.payloadHash !== payloadHash || (attempt.target || attempt.destination.id) !== destinationKey)) {
+    return sendFailureResult("invalid-request", "This idempotency key is already bound to a different chat or text; choose a new key only for an intentional new send.");
+  }
+  if (attempt && attempt.state === "sent") return attemptResult(attempt);
+  if (attempt && attempt.state === "unknown") return sendFailureResult("unknown");
+  if (attempt && attempt.state === "pending") return persistFailure(p, ledger, attempt, "unknown", "a previous invocation ended before its send result was recorded");
+  const resolved = liveSender();
+  if ("error" in resolved) return rememberPrefixedFailure(resolved.error);
+  if (attempt && attempt.sender.identityKey !== resolved.sender.identityKey) {
+    return sendFailureResult("invalid-request", "This idempotency key belongs to another account; choose a new key only for an intentional new send.");
+  }
+  let destination;
+  let newDm = false;
+  let person = "";
+  if (plan.kind === "chat") {
+    const found = resolveDestination(plan.chatId, resolved.sender);
+    if ("error" in found) return rememberPrefixedFailure(found.error);
+    destination = { id: found.destination.id, label: String(found.destination.label || found.destination.id) };
+  } else {
+    const listed = chatList(resolved.sender);
+    if ("error" in listed) return rememberPrefixedFailure(listed.error);
+    const found = findChats(listed.chats, plan.query, true);
+    if (found.ambiguous) {
+      return sendFailureResult("invalid-request", `Several chats match "${plan.query}": ${found.candidates.slice(0, 8).map((chat) => `${chat.title} (${chat.chatType}, ${chat.id})`).join("; ")}. Ask the owner which one and send to its id.`);
+    }
+    if (found.match) destination = { id: found.match.id, label: found.match.title };
+    else {
+      if (personQuery(plan.query).split(/\s+/).filter(Boolean).length < 2) {
+        return sendFailureResult("invalid-request", `No chat with "${plan.query}" exists. To start a new 1:1 chat, give the person's full name.`);
+      }
+      newDm = true;
+      person = personQuery(plan.query);
+      destination = { id: destinationKey, label: destinationKey };
+    }
+  }
+  const decision = decideSend(readSendScope(), destination.id, origin);
+  if (!decision.allow) return sendFailureResult("chat-not-allowed", decision.message);
+  if (!key) key = sha256Hex(`send\0${now()}\0${++previewSequence}\0${destination.id}`).slice(0, 32);
+  if (!attempt) {
+    attempt = { idempotencyKey: key, sender: resolved.sender, target: destinationKey, destination, payloadHash, state: "pending", createdAt: now(), updatedAt: now(), sendCount: 0 };
+    ledger.attempts.push(attempt);
+  }
+  attempt.destination = destination;
+  attempt.state = "pending";
+  attempt.updatedAt = now();
+  attempt.sendCount += 1;
+  delete attempt.failure;
+  delete attempt.failureCause;
+  delete attempt.failureMessage;
+  if (!persistOutbox(p, ledger)) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; Teams was not contacted");
+  const sentAfter = now() - 12e4;
+  const body = htmlMessage(text);
+  let chatId = destination.id;
+  if (newDm) {
+    const run = runExo(p, ["new-dm", person, body, "--json"], TIMEOUTS.send);
+    if (!run.ok) return exoFailure(p, ledger, attempt, run);
+    const created = parseJson(run.stdout.trim());
+    const createdId = created && typeof created.id === "string" ? created.id : "";
+    const resolvedName = run.stderr.match(/found user:\s*(.+?)\s*(?:\(|$)/m)?.[1] || person;
+    if (!validChatId(createdId)) return persistFailure(p, ledger, attempt, "unknown", "exo-teams reported the new chat as sent but returned no chat id.");
+    chatId = createdId;
+    attempt.destination = { id: createdId, label: resolvedName };
+    memoryChats = null;
+  } else {
+    const run = runExo(p, ["send", chatId, body, "--json"], TIMEOUTS.send);
+    if (!run.ok) return exoFailure(p, ledger, attempt, run);
+    const ok = parseJson(run.stdout.trim());
+    if (!ok || ok.ok !== true) return persistFailure(p, ledger, attempt, "unknown", "exo-teams exited cleanly but did not report the send as accepted.");
+  }
+  attempt.state = "sent";
+  attempt.updatedAt = now();
+  const read = readMessages(p, chatId, 20);
+  attempt.messageId = "messages" in read ? findSentMessageId(read.messages, text, resolved.sender.user, sentAfter) : null;
+  if (!persistOutbox(p, ledger)) return persistFailure(p, ledger, attempt, "unknown", "Teams accepted the message but the sent result could not be recorded.");
+  return attemptResult(attempt);
+}
+function sendCommand(origin, args) {
+  const parsed = parseSendArgs(args, validChatId, "Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>; chat names are not ids. Use send-to <person> for a person.");
+  if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
+  return deliver(origin, { kind: "chat", chatId: parsed.target }, parsed.text, parsed.key);
+}
+function sendToCommand(args) {
+  const separator = args.indexOf("--");
+  const rest = separator > 0 ? [args.slice(0, separator).join(" "), ...args.slice(separator + 1)] : args;
+  const parsed = parseSendArgs(rest, (value) => !!value.trim() && value.length <= 200, "Usage: send-to <person name or email> [--key <idempotency-key>] <text>. Quote a multi-word name, or put -- after it.");
+  if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
+  return deliver("agent", { kind: "person", query: parsed.target.trim() }, parsed.text, parsed.key);
+}
+function logout() {
+  const p = paths();
+  if (!p) return { error: lifecycleMessage("unsupported-platform") };
+  endSignIn(p, true);
+  for (const name of EXO_TOKEN_FILES) {
+    const file = joinPath(p.tokenDir, name);
+    if (host.fs.fileExists(file) && !host.fs.removeFile(file)) return { error: "A plugin-owned Teams token file could not be removed. Retry logout." };
+  }
+  try {
+    host.fs.removeFile(p.chatCache);
+  } catch {
+  }
+  try {
+    host.fs.removeFile(p.loginLog);
+  } catch {
+  }
+  memoryChats = null;
+  lastStatus = null;
+  clearPreviewTokens();
+  return { result: "Logged out. The plugin-owned Teams token files were removed." };
+}
+function clearPreviewTokens() {
+  for (const id of Object.keys(previewTokens)) delete previewTokens[id];
+}
+function startInstallStage(stage, p, target) {
+  const goBin = nativePath(p.goBinary);
+  const specs = {
+    download: { bin: target.tools.curl, args: ["-fsSL", "--proto", "=https", "--retry", "2", "-o", nativePath(joinPath(p.runtime, target.archive.file)), `${GO_DOWNLOAD_BASE}${target.archive.file}`], env: {}, timeoutMs: TIMEOUTS.download },
+    extract: { bin: target.tools.tar, args: ["-xf", nativePath(joinPath(p.runtime, target.archive.file)), "-C", nativePath(p.toolchain)], env: {}, timeoutMs: TIMEOUTS.extract },
+    module: { bin: goBin, args: ["mod", "download", "-json", `${EXO_MODULE}@${EXO_VERSION}`], env: goEnv(p), timeoutMs: TIMEOUTS.goModule },
+    build: { bin: goBin, args: ["install", `${EXO_PACKAGE}@${EXO_VERSION}`], env: goEnv(p), timeoutMs: TIMEOUTS.goBuild }
+  };
+  const spec = specs[stage];
+  if (stage === "extract" && !host.fs.makeDirs(p.toolchain)) return { error: "Could not create the private toolchain directory." };
+  let started;
+  try {
+    started = host.exec.start({ bin: spec.bin, args: spec.args, env: spec.env, timeoutMs: spec.timeoutMs });
+  } catch {
+    return { error: `Could not start the ${stage} step.` };
+  }
+  if (!started.jobId) return { error: started.error || `The ${stage} step did not start.` };
+  installJobs[started.jobId] = { stage, paths: p, target };
+  activeInstallJobId = started.jobId;
+  return { jobId: started.jobId };
+}
+var STAGE_MESSAGES = {
+  download: `Downloading the pinned Go toolchain ${GO_VERSION} into the plugin runtime.`,
+  extract: "The Go toolchain checksum matched; extracting it.",
+  module: "Fetching exo-teams at its pinned commit through the Go module proxy.",
+  build: "The exo-teams module matched its pinned checksum; building it."
+};
+function nextInstallStage(p, target, from) {
+  const order = ["download", "extract", "module", "build"];
+  let index = from ? order.indexOf(from) + 1 : 0;
+  if (!from && host.fs.fileExists(p.goBinary)) index = 2;
+  if (index >= order.length) return null;
+  const stage = order[index];
+  const started = startInstallStage(stage, p, target);
+  if (!started.jobId) return { done: true, state: "install-failed", error: lifecycleMessage("install-failed", started.error) };
+  return { done: false, jobId: started.jobId, state: "install-in-progress", message: STAGE_MESSAGES[stage] };
+}
+function verifyArchive(p, target) {
+  const file = nativePath(joinPath(p.runtime, target.archive.file));
+  const [bin, ...args] = target.tools.hash.map((part) => part === "{file}" ? file : part);
+  const run = runProcess(bin, args, {}, TIMEOUTS.hash);
+  const digest = run.ok ? parseSha256(run.stdout) : null;
+  if (digest === target.archive.sha256) return null;
+  try {
+    host.fs.removeFile(joinPath(p.runtime, target.archive.file));
+  } catch {
+  }
+  return `The downloaded Go toolchain ${target.archive.file} did not match its pinned SHA-256, so it was deleted and nothing was built.`;
+}
+function finishInstallStage(jobId, job, poll) {
+  delete installJobs[jobId];
+  if (activeInstallJobId === jobId) activeInstallJobId = null;
+  const { paths: p, target, stage } = job;
+  if (poll.error || poll.code !== 0) {
+    const detail = redact(String(poll.stderr || poll.error || "").trim().split(/\r?\n/).slice(-3).join(" ")).slice(0, 400);
+    return { done: true, state: "install-failed", error: lifecycleMessage("install-failed", `The ${stage} step failed${detail ? `: ${detail}` : "."} Retry Sign in.`) };
+  }
+  if (stage === "download") {
+    const mismatch = verifyArchive(p, target);
+    if (mismatch) return { done: true, state: "install-failed", error: mismatch };
+  }
+  if (stage === "extract") {
+    try {
+      host.fs.removeFile(joinPath(p.runtime, target.archive.file));
+    } catch {
+    }
+    if (!host.fs.fileExists(p.goBinary)) return { done: true, state: "install-failed", error: lifecycleMessage("install-failed", "The Go toolchain archive did not contain the expected go binary.") };
+  }
+  if (stage === "module") {
+    const module2 = parseGoModDownload(String(poll.stdout || ""));
+    if (!module2 || module2.error || module2.version !== EXO_VERSION || module2.sum !== EXO_MODULE_SUM) {
+      return { done: true, state: "install-failed", error: `The exo-teams module did not match its pinned version ${EXO_VERSION} and checksum ${EXO_MODULE_SUM}, so it was not built.` };
+    }
+  }
+  if (stage === "build") {
+    if (!host.fs.fileExists(p.binary)) return { done: true, state: "install-failed", error: lifecycleMessage("install-failed", "go install finished without producing the exo-teams binary.") };
+    host.fs.writeFile(p.marker, JSON.stringify({ module: EXO_MODULE, version: EXO_VERSION, sum: EXO_MODULE_SUM, go: GO_VERSION }));
+    return startSignIn(p);
+  }
+  return nextInstallStage(p, target, stage);
+}
+function startSignIn(p) {
+  const pending = pendingSignIn(p);
+  if (pending) return signInView(pending.log);
+  endSignIn(p, true);
+  try {
+    host.fs.removeFile(p.loginLog);
+  } catch {
+  }
+  let started;
+  try {
+    started = host.exec.start({ bin: nativePath(p.binary), args: ["auth"], env: exoEnv(p), timeoutMs: SIGN_IN_TTL_MS + 6e4, detach: true, logFile: p.loginLog });
+  } catch {
+    return { done: true, state: "sign-in-failed", error: "Could not start exo-teams sign-in." };
+  }
+  if (!started.jobId) return { done: true, state: "sign-in-failed", error: started.error || "exo-teams sign-in did not start." };
+  let pid = null;
+  try {
+    const poll = host.exec.poll(started.jobId);
+    const result = poll && typeof poll.stdout === "string" ? parseJson(poll.stdout) : null;
+    pid = Number.isInteger(poll?.pid) ? poll.pid : Number.isInteger(result?.pid) ? result.pid : null;
+    if (poll && poll.done) host.exec.close(started.jobId);
+  } catch {
+  }
+  host.fs.writeFile(p.loginState, JSON.stringify({ startedAt: now(), pid }));
+  lastStatus = null;
+  return signInView(readSignInLog(p));
+}
+function signInView(log) {
+  if (log.state === "awaiting-user") {
+    return { done: false, state: "awaiting-user", signInUrl: log.signInUrl, deviceCode: log.deviceCode, message: `Open ${log.signInUrl} in your usual browser, enter code ${log.deviceCode}, and sign in with your work account. The code expires in 15 minutes.` };
+  }
+  return { done: false, state: "awaiting-user", message: "Microsoft is issuing a sign-in code. Poll login-status until it returns signInUrl and deviceCode." };
+}
+function loginStart() {
+  const p = paths();
+  if (!p) return { done: true, state: "unsupported-platform", error: lifecycleMessage("unsupported-platform") };
+  if (activeInstallJobId) return loginPoll();
+  const target = detectTarget(p);
+  if ("state" in target) return { done: true, state: target.state, error: target.message };
+  const secured = protectStorage(p);
+  if (secured.error) return { done: true, state: secured.error, error: secured.message };
+  if (!installedMarker(p)) return nextInstallStage(p, target);
+  return startSignIn(p);
+}
+function loginPoll() {
+  const p = paths();
+  if (!p) return { done: true, state: "unsupported-platform", error: lifecycleMessage("unsupported-platform") };
+  if (activeInstallJobId) {
+    const jobId = activeInstallJobId;
+    const job = installJobs[jobId];
+    let poll;
+    try {
+      poll = host.exec.poll(jobId);
+    } catch {
+      activeInstallJobId = null;
+      return { done: true, state: "install-failed", error: "Could not read the install job." };
+    }
+    if (!poll.done) return { done: false, jobId, state: "install-in-progress", message: STAGE_MESSAGES[job.stage] };
+    try {
+      host.exec.close(jobId);
+    } catch {
+    }
+    return finishInstallStage(jobId, job, poll);
+  }
+  const record = readLoginRecord(p);
+  if (!record) {
+    const current = status();
+    return { done: true, state: current.state, message: current.message };
+  }
+  const log = readSignInLog(p);
+  if (log.state === "failed") {
+    endSignIn(p, false);
+    return { done: true, state: log.failure.state, error: log.failure.message };
+  }
+  if (log.state === "signed-in") {
+    endSignIn(p, false);
+    memoryChats = null;
+    const current = status();
+    return current.state === "logged-in" ? { done: true, state: "logged-in", message: current.message } : { done: true, state: current.state, error: current.message };
+  }
+  if (now() - record.startedAt > SIGN_IN_TTL_MS + 3e4) {
+    endSignIn(p, true);
+    return { done: true, state: "expired", error: "The sign-in code expired before the sign-in finished. Run login again for a fresh code." };
+  }
+  return signInView(log);
+}
+function agentLoginView(current) {
+  return {
+    done: current.done === true,
+    state: String(current.state || "awaiting-user"),
+    signIn: current.deviceCode ? "device-code" : void 0,
+    signInUrl: current.signInUrl,
+    deviceCode: current.deviceCode,
+    message: current.error || current.message,
+    ...current.error ? { error: current.error } : {}
+  };
+}
+function health() {
+  return {
+    ...status(),
+    cli: { module: EXO_MODULE, version: EXO_VERSION, commit: "b9ebbf5", go: GO_VERSION },
+    sendScope: readSendScope(),
+    lastSend: lastSendState
+  };
+}
+function onAgentCommand(ctx) {
+  const args = Array.isArray(ctx.args) ? ctx.args : [];
+  switch (ctx.verb) {
+    case "login": {
+      if (args.length) return { error: "Usage: login." };
+      const current = loginStart();
+      if (current.error && current.done) return { error: current.error };
+      return { result: JSON.stringify(agentLoginView(current)) };
+    }
+    case "login-status": {
+      if (args.length) return { error: "Usage: login-status." };
+      return { result: JSON.stringify(agentLoginView(loginPoll())) };
+    }
+    case "accounts": {
+      const current = status();
+      return { result: JSON.stringify({ state: current.state, accounts: current.accounts || [] }) };
+    }
+    case "use":
+      return { error: "exo-teams keeps one signed-in Teams account. Run logout, then login with the other account." };
+    case "chats":
+      return agentChats(args);
+    case "search":
+      return args.length ? agentChats(args, true) : { error: "Usage: search <person name or email>." };
+    case "history":
+      return agentHistory(args);
+    case "health":
+      return { result: JSON.stringify(health()) };
+    case "logout":
+      return logout();
+    case "send":
+      return sendCommand("agent", args);
+    case "send-to":
+      return sendToCommand(args);
+    case "preview":
+      return previewCommand(args, "agent");
+    default:
+      return { error: `Unknown Teams Client verb: ${ctx.verb}` };
+  }
+}
+function viewCall(method, args) {
+  const value = args || {};
+  if (method === "status") {
+    const current = status();
+    return { ...current, loginJobId: current.state === "awaiting-user" || activeInstallJobId ? "sign-in" : null };
+  }
+  if (method === "accounts") return { accounts: (lastStatus || status()).accounts || [] };
+  if (method === "loginStart") return loginStart();
+  if (method === "loginPoll") return loginPoll();
+  if (method === "useAccount") return { error: "exo-teams keeps one signed-in Teams account. Sign out, then sign in with the other account." };
+  if (method === "logout") return logout();
+  if (method === "chats") return agentChats(String(value.query || "").trim() ? [String(value.query)] : []);
+  if (method === "sendScope") return readSendScope();
+  if (method === "setSendScope") return setSendScope(value);
+  if (method === "preview") return previewCommand([String(value.chatId || ""), String(value.text || "")], "view");
+  if (method === "send") return sendCommand("view", [String(value.chatId || ""), "--key", String(value.idempotencyKey || ""), String(value.text || "")]);
+  return { error: `Unknown Teams Client view method: ${method}` };
+}
+function renderGlance() {
+  const p = paths();
+  const installed = !!(p && installedMarker(p));
+  const current = lastStatus;
+  const connected = current?.state === "logged-in";
+  const nodes = [{ kind: "badge", label: connected ? "Connected" : installed ? "Sign-in needed" : "exo-teams not installed", tone: connected ? "ok" : installed ? "warn" : "muted" }];
+  nodes.push({ kind: "text", text: connected ? `${current?.upn || "Account resolved"}` : "Open Teams Client to check status or sign in.", style: { tone: "muted" } });
+  const scope = readSendScope();
+  nodes.push({ kind: "text", text: scope.mode === "all" ? "Agent sends: any chat" : `Agent sends: ${scope.chats.length} allowed chat${scope.chats.length === 1 ? "" : "s"}`, style: { tone: scope.mode === "all" ? "muted" : "warn" } });
+  if (lastSendState) nodes.push({ kind: "text", text: `Last send: ${lastSendState.state} \xB7 ${lastSendState.message}`, style: { tone: lastSendState.state === "sent" ? "ok" : "warn" } });
+  return { title: "Teams Client", nodes };
 }
 function sha256Hex(text) {
   const bytes = [];
@@ -693,864 +1449,28 @@ function sha256Hex(text) {
   }
   return state.map((value) => value.toString(16).padStart(8, "0")).join("");
 }
-function senderFromFields(fields) {
-  const accountId = String(fields && fields.accountId || "");
-  const tenantId = String(fields && fields.tenantId || "");
-  const upn = String(fields && fields.upn || "");
-  if (!accountId || !tenantId || !upn) return null;
-  return { id: accountId, accountId, tenantId, upn, identityKey: JSON.stringify([accountId, tenantId]) };
-}
-function previewSender() {
-  const p = paths();
-  const sender = p ? senderFromFields(currentPublic(p)) : null;
-  if (!sender) return { error: "not-logged-in: Sign in with the intended work or school account and confirm that its tenant is available before previewing." };
-  return { sender };
-}
-function liveSender() {
-  const current = status();
-  const reauthStates = ["conditional-access-blocked", "mfa-required", "consent-required", "wrong-client-redirect", "refresh-token-revoked", "token-expired"];
-  if (reauthStates.includes(current.state)) return { error: `reauth-needed: ${current.state}. ${current.message}` };
-  if (current.state === "reauth-needed") return { error: `reauth-needed: session status needs attention. ${current.message} Review the tenant sign-in and sign in again.` };
-  if (["logged-out", "installed-not-configured"].includes(current.state)) return { error: "not-logged-in: Sign in to Teams Client with the intended work or school account before sending." };
-  if (current.state !== "logged-in") return { error: `upstream-rejected: ${current.message} Resolve the Teams Client prerequisite, then review the preview again before sending.` };
-  const sender = senderFromFields(current);
-  if (!sender) return { error: "upstream-rejected: The active account, UPN, and tenant could not all be resolved. Refresh Teams Client status before sending." };
-  if (sender.tenantId.toLowerCase() === PERSONAL_TENANT_ID) {
-    return { error: "upstream-rejected: Delegated Teams chat send requires a work or school tenant. Sign in with the intended work or school account, then preview again." };
-  }
-  return { sender };
-}
-function readSendScope() {
-  const p = paths();
-  if (!p) return parseSendScope(null, validChatId);
-  let raw = null;
-  try {
-    raw = host.fs.fileExists(p.scope) ? host.fs.readFile(p.scope) ?? "" : null;
-  } catch {
-    raw = "";
-  }
-  return parseSendScope(raw, validChatId);
-}
-function setSendScope(args) {
-  const scope = validateSendScope(args, validChatId);
-  if ("error" in scope) return { error: `${scope.error} The restriction was not changed.` };
-  const p = paths();
-  if (!p) return { error: "The Teams Client data directory is unavailable; the restriction was not changed." };
-  try {
-    if (!host.fs.makeDirs(p.root) || host.fs.writeFile(p.scope, JSON.stringify(scope)) !== true) {
-      return { error: "Could not save the restriction; the previous setting still applies." };
-    }
-  } catch {
-    return { error: "Could not save the restriction; the previous setting still applies." };
-  }
-  return { result: JSON.stringify(readSendScope()) };
-}
-function resolveDestination(id, sender) {
-  if (!validChatId(id)) return { error: failureMessage("invalid-request", "Use an immutable chat id from `chats <name>`; chat names are not ids.") };
-  let chat = cachedChats && cachedChats.identityKey === sender.identityKey ? cachedChats.chats.find((item) => item.id === id) : null;
-  if (!chat) {
-    const listed = chatList(sender);
-    if ("error" in listed) return { error: `upstream-rejected: Could not list chats to resolve ${id} (${listed.error}).` };
-    chat = listed.chats.find((item) => item.id === id);
-  }
-  if (!chat) return { error: failureMessage("chat-not-found", id) };
-  return { destination: { id: String(chat.id), label: String(chat.title || chat.id), chatType: chat.chatType, members: chat.members } };
-}
-var previewSequence = 0;
-function previewCommand(args, origin = "agent") {
-  if (args.length < 2 || !validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> <text>. Find the id with `chats <name>`; chat names are not accepted." };
-  const text = args.slice(1).join(" ");
-  if (!text.length) return { error: "invalid-request: Preview text must not be empty." };
-  const resolved = previewSender();
-  if ("error" in resolved) return resolved;
-  const found = resolveDestination(args[0], resolved.sender);
-  if ("error" in found) return found;
-  const previewId = sha256Hex(`preview\0${now()}\0${++previewSequence}`);
-  const idempotencyKey = previewId;
-  previewTokens[previewId] = { sender: resolved.sender, destination: found.destination, text, origin, previewNonce: previewId };
-  const decision = decideSend(readSendScope(), found.destination.id, origin);
-  return { result: JSON.stringify({
-    previewId,
-    idempotencyKey,
-    sender: resolved.sender,
-    tenant: { id: resolved.sender.tenantId },
-    destination: found.destination,
-    text,
-    allowed: decision.allow,
-    restriction: decision.allow ? null : decision.message
-  }) };
-}
-function metadataFromM365(p) {
-  const info = runtimeInfo(p);
-  if ("state" in info) return null;
-  const result = runProcess(info.target.node, ["-e", METADATA_READER], envFor(p));
-  if (!result.ok) return null;
-  const value = parseJson(result.stdout);
-  if (!value || !Array.isArray(value.connections)) return null;
-  return value;
-}
-function accountRows(source) {
-  const rows = Array.isArray(source) ? source : [];
-  const seen = /* @__PURE__ */ new Set();
-  return rows.flatMap((raw) => {
-    const id = String(raw && (raw.id || raw.name || raw.accountId) || "");
-    const tenantId = String(raw && raw.tenantId || "");
-    if (!id || seen.has(id)) return [];
-    seen.add(id);
-    return [{
-      id,
-      accountId: String(raw && (raw.accountId || raw.identityId) || id),
-      identityId: String(raw && raw.identityId || ""),
-      tenantId: tenantId || null,
-      upn: String(raw && (raw.upn || raw.connectedAs) || ""),
-      active: !!(raw && raw.active),
-      expiresOn: raw && typeof raw.expiresOn === "string" ? raw.expiresOn : null
-    }];
-  });
-}
-function status() {
-  const target = targetState();
-  if (target.state !== "ready" || !target.paths) return { state: target.state, message: lifecycleMessage(target.state, target.message), accounts: [] };
-  const p = target.paths;
-  if (!host.fs.fileExists(p.binary)) return { state: "not-installed", message: lifecycleMessage("not-installed"), accounts: [] };
-  const protectedState = protectStorage(p);
-  if (protectedState.error) return { state: "install-failed", message: protectedState.message || lifecycleMessage("install-failed"), accounts: [] };
-  const run = runM365(["status", "--output", "json"]);
-  if (!run.ok) {
-    const reauth = authState(`${run.error}
-${run.stderr}`, configuredAppId());
-    if (reauth) return { ...reauth, accounts: [] };
-    if (/timed out after \d+ms/i.test(run.error)) return { state: "status-unavailable", message: lifecycleMessage("status-unavailable"), accounts: [] };
-    return { state: "reauth-needed", message: lifecycleMessage("reauth-needed"), accounts: [] };
-  }
-  const value = parseJson(run.stdout.trim());
-  if (!value || !value.connectionName) {
-    const listed = runM365(["connection", "list", "--output", "json"]);
-    const connections = listed.ok ? parseJson(listed.stdout.trim()) : null;
-    return connections && connections.length > 0 ? { state: "logged-out", message: lifecycleMessage("logged-out"), accounts: accountRows(connections) } : { state: "installed-not-configured", message: lifecycleMessage("installed-not-configured"), accounts: [] };
-  }
-  const publicFields = currentPublic(p) || {};
-  const metadata = metadataFromM365(p) || {};
-  const active = metadata.active || {};
-  const expiry = typeof metadata.expiresOn === "string" ? metadata.expiresOn : null;
-  const accountId = String(publicFields.accountId || active.accountId || value.connectionName);
-  const tenantId = String(publicFields.tenantId || active.tenantId || "");
-  const upn = String(publicFields.upn || active.upn || value.connectedAs || "");
-  return {
-    state: "logged-in",
-    message: lifecycleMessage("logged-in"),
-    accountId,
-    upn,
-    tenantId: tenantId || null,
-    expiresOn: expiry,
-    accounts: [{ id: accountId, accountId, tenantId: tenantId || null, upn, active: true, expiresOn: expiry }]
-  };
-}
-function statusView() {
-  const value = status();
-  if (value.state === "logged-in" && value.upn && value.tenantId && value.expiresOn) {
-    return { ...value, message: `Signed in as ${value.upn} in tenant ${value.tenantId}. Token expires ${value.expiresOn}.` };
-  }
-  if (value.state === "logged-in" && value.upn && value.tenantId) {
-    return { ...value, message: `Signed in as ${value.upn} in tenant ${value.tenantId}. Token expiry is not available yet.` };
-  }
-  return value;
-}
-function jsonCommand(args, appId = configuredAppId()) {
-  const run = runM365(args.concat(["--output", "json"]));
-  if (!run.ok) {
-    const auth = authState(`${run.error}
-${run.stderr}`, appId);
-    return { error: auth ? auth.message : "The m365 command failed. Refresh status and try again.", reauth: auth || void 0 };
-  }
-  const data = parseJson(run.stdout.trim());
-  if (data === null) return { error: "m365 returned an unreadable JSON response." };
-  return { data };
-}
-function agentAccounts() {
-  const check = status();
-  if (!["logged-in", "logged-out", "installed-not-configured"].includes(check.state)) return { error: check.message };
-  const listed = jsonCommand(["connection", "list"]);
-  if (listed.error) return { error: listed.error };
-  const source = Array.isArray(listed.data) ? listed.data : [];
-  const p = paths();
-  const metadata = p ? metadataFromM365(p) : null;
-  const connections = metadata && Array.isArray(metadata.connections) ? metadata.connections : [];
-  const rows = source.flatMap((raw) => {
-    if (!raw || typeof raw.name !== "string") return [];
-    const detail = connections.find((item) => item && item.name === raw.name) || {};
-    const accountId = String(detail.accountId || raw.name);
-    return [{
-      id: accountId,
-      accountId,
-      identityId: String(detail.identityId || ""),
-      tenantId: detail.tenantId ? String(detail.tenantId) : null,
-      upn: String(detail.upn || raw.connectedAs || ""),
-      active: !!raw.active,
-      expiresOn: raw.active && metadata && typeof metadata.expiresOn === "string" ? metadata.expiresOn : null
-    }];
-  });
-  return { result: JSON.stringify({ accounts: accountRows(rows) }) };
-}
-function useAccount(id) {
-  if (!id || id.length > 256 || /[\r\n\0]/.test(id)) return { error: "Usage: use <account-id>. Select an id from accounts; UPNs are not account ids." };
-  const p = paths();
-  if (!p) return { error: lifecycleMessage("unsupported-platform") };
-  const listed = jsonCommand(["connection", "list"]);
-  if (listed.error) return { error: listed.error };
-  const source = Array.isArray(listed.data) ? listed.data : [];
-  const metadata = metadataFromM365(p);
-  const details = metadata && Array.isArray(metadata.connections) ? metadata.connections : [];
-  const detail = details.find((raw) => raw && (raw.accountId === id || raw.identityId === id || raw.name === id));
-  const selected = source.find((raw) => raw && raw.name === (detail && detail.name || id));
-  if (!selected) return { error: "That account id is not configured. Select an id from accounts." };
-  const result = jsonCommand(["connection", "use", "--name", selected.name]);
-  if (result.error) return result.reauth ? { error: result.reauth.message } : { error: result.error };
-  const current = currentPublic(p) || {};
-  const refreshed = metadataFromM365(p) || {};
-  const active = refreshed.active || {};
-  cachedChats = null;
-  clearPreviewTokens();
-  return { result: JSON.stringify({ accountId: String(current.accountId || active.accountId || selected.name), tenantId: String(current.tenantId || active.tenantId || ""), upn: String(current.upn || active.upn || selected.connectedAs || "") }) };
-}
-function validChatId(value) {
-  return /^[A-Za-z0-9:._@-]{1,512}$/.test(value);
-}
-function chatList(sender) {
-  const response = jsonCommand(["request", "--url", `${GRAPH}/me/chats?$expand=members&$top=50`]);
-  if (response.error) return { error: response.error };
-  const source = Array.isArray(response.data?.value) ? response.data.value : Array.isArray(response.data) ? response.data : [];
-  const selfId = sender ? sender.accountId.toLowerCase() : "";
-  const selfUpn = sender ? sender.upn.toLowerCase() : "";
-  const chats = source.flatMap((raw) => {
-    const id = typeof raw?.id === "string" ? raw.id : "";
-    if (!validChatId(id)) return [];
-    const others = (Array.isArray(raw.members) ? raw.members : []).filter((member) => member && String(member.userId || "").toLowerCase() !== selfId && String(member.email || "").toLowerCase() !== selfUpn);
-    const members = others.map((member) => String(member.displayName || member.email || "")).filter(Boolean);
-    const emails = others.map((member) => String(member.email || "")).filter(Boolean);
-    const topic = typeof raw.topic === "string" && raw.topic ? raw.topic : null;
-    return [{
-      id,
-      title: topic || members.join(", ") || (typeof raw.chatType === "string" ? raw.chatType : id),
-      topic,
-      chatType: typeof raw.chatType === "string" ? raw.chatType : null,
-      members,
-      username: emails.length ? emails.join(" ") : null,
-      lastUpdatedDateTime: typeof raw.lastUpdatedDateTime === "string" ? raw.lastUpdatedDateTime : null
-    }];
-  });
-  if (sender) cachedChats = { identityKey: sender.identityKey, chats };
-  return { chats };
-}
-function agentChats(args = []) {
-  const sender = previewSender();
-  const listed = chatList("sender" in sender ? sender.sender : null);
-  if ("error" in listed) return { error: listed.error };
-  const query = args.join(" ").trim();
-  if (!query) return { result: JSON.stringify({ chats: listed.chats }) };
-  const found = matchChats(listed.chats, query);
-  const next = found.match ? `Send with: send ${found.match.id} --key <unique-key> <text>` : found.ambiguous ? "Several chats match. Show the candidates to the owner and ask which one, then use its id." : "No chat among the 50 listed matches. Ask the owner for a more exact name or email.";
-  return { result: JSON.stringify({ query, match: found.match, ambiguous: found.ambiguous, candidates: found.candidates, next }) };
-}
-function utf8Bytes(value) {
-  let bytes = 0;
-  for (let i = 0; i < value.length; i++) {
-    const code = value.charCodeAt(i);
-    if (code < 128) bytes++;
-    else if (code < 2048) bytes += 2;
-    else if (code >= 55296 && code <= 56319 && i + 1 < value.length) {
-      bytes += 4;
-      i++;
-    } else bytes += 3;
-  }
-  return bytes;
-}
-function cutText(value, units) {
-  let end = Math.max(0, Math.min(value.length, units));
-  if (end > 0 && end < value.length) {
-    const last = value.charCodeAt(end - 1);
-    const next = value.charCodeAt(end);
-    if (last >= 55296 && last <= 56319 && next >= 56320 && next <= 57343) end--;
-  }
-  return value.slice(0, end);
-}
-function boundedHistory(chatId, source, count, maxBytes) {
-  const capCount = Math.max(1, Math.min(MAX_COUNT, Math.floor(count)));
-  const capBytes = Math.max(1024, Math.min(MAX_BYTES, Math.floor(maxBytes)));
-  const ordered = (Array.isArray(source) ? source : []).map((raw) => ({
-    id: String(raw && raw.id || ""),
-    createdDateTime: String(raw && raw.createdDateTime || ""),
-    from: String(raw && (raw.from || raw.sender) || ""),
-    content: String(raw && (raw.content || raw.body?.content) || ""),
-    untrusted: true
-  })).sort((a, b) => a.createdDateTime.localeCompare(b.createdDateTime)).slice(-capCount);
-  const out = { chatId, messages: [], truncated: false };
-  for (let i = ordered.length - 1; i >= 0; i--) {
-    const message = ordered[i];
-    const candidate = [message, ...out.messages];
-    if (utf8Bytes(JSON.stringify({ ...out, messages: candidate })) <= capBytes) {
-      out.messages = candidate;
-      continue;
-    }
-    out.truncated = true;
-    if (out.messages.length > 0) break;
-    let low = 0;
-    let high = message.content.length;
-    let best = "";
-    while (low <= high) {
-      const middle = Math.floor((low + high) / 2);
-      const clipped2 = { ...message, content: cutText(message.content, middle) };
-      if (utf8Bytes(JSON.stringify({ ...out, messages: [clipped2] })) <= capBytes) {
-        best = clipped2.content;
-        low = middle + 1;
-      } else high = middle - 1;
-    }
-    const clipped = { ...message, content: best };
-    if (utf8Bytes(JSON.stringify({ ...out, messages: [clipped] })) <= capBytes) out.messages = [clipped];
-    break;
-  }
-  if (utf8Bytes(JSON.stringify(out)) > capBytes) return { chatId, messages: [], truncated: true };
-  return out;
-}
-function settings() {
-  const value = parseJson(host.settingsJson()) || {};
-  const count = Number(value.historyCount);
-  const bytes = Number(value.historyMaxBytes);
-  const appId = String(value.appId || "").trim();
-  return {
-    historyCount: Number.isInteger(count) ? Math.max(1, Math.min(MAX_COUNT, count)) : 20,
-    historyMaxBytes: Number.isInteger(bytes) ? Math.max(1024, Math.min(MAX_BYTES, bytes)) : MAX_BYTES,
-    appId: APP_ID_PATTERN.test(appId) ? appId.toLowerCase() : DEFAULT_APP_ID
-  };
-}
-function configuredAppId() {
-  try {
-    return settings().appId;
-  } catch {
-    return DEFAULT_APP_ID;
-  }
-}
-function agentHistory(args) {
-  if (args.length < 1 || args.length > 2 || !validChatId(args[0])) return { error: "Usage: history <immutable-chat-id> [n]. Select an id from chats; display names are not ids." };
-  const configured = settings();
-  let count = configured.historyCount;
-  if (args.length === 2) {
-    if (!/^[0-9]{1,3}$/.test(args[1]) || Number(args[1]) < 1) return { error: "History count must be an integer from 1 to 50." };
-    count = Math.min(MAX_COUNT, Number(args[1]));
-  }
-  const listed = jsonCommand(["teams", "chat", "list"]);
-  if (listed.error) return { error: listed.error };
-  const chats = Array.isArray(listed.data) ? listed.data : [];
-  if (!chats.some((chat) => chat && chat.id === args[0])) return { error: "That chat id is not in the current chat list. Use an immutable id returned by chats, not a display name." };
-  const query = `sort_by(@, &createdDateTime)[-${count}:].{id:id,createdDateTime:createdDateTime,from:from.user.displayName,content:body.content}`;
-  const history = jsonCommand(["teams", "chat", "message", "list", "--chatId", args[0], "--query", query]);
-  if (history.error) return { error: history.error };
-  const result = boundedHistory(args[0], Array.isArray(history.data) ? history.data : [], count, configured.historyMaxBytes);
-  return { result: JSON.stringify(result) };
-}
-var SEND_FAILURES = ["invalid-request", "not-logged-in", "reauth-needed", "chat-not-found", "chat-not-allowed", "rate-limited", "upstream-rejected", "unknown"];
-function failureMessage(kind, detail, cause) {
-  switch (kind) {
-    case "invalid-request":
-      return `invalid-request: ${String(detail || "Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>.")} Find the chat id with \`chats <name>\`, then send again.`;
-    case "not-logged-in":
-      return "not-logged-in: Sign in with the intended work or school account through `codeterm plugin teams-client login` (or Sign in in the view) and confirm its tenant before sending.";
-    case "reauth-needed":
-      return `reauth-needed: ${String(cause || "reauth-needed")}. ${String(detail || "The Microsoft session needs a new sign-in. Sign in again and complete the tenant's required authentication step.")}`;
-    case "chat-not-found":
-      return `chat-not-found: No chat among this account's 50 listed chats has id ${String(detail || "unavailable")}. Look it up with \`chats <name>\` and use an id from that result.`;
-    case "chat-not-allowed":
-      return String(detail || `chat-not-allowed: The owner's "Restrict agent sends" setting does not include this chat. Ask the owner to add it in the Teams Client view.`);
-    case "rate-limited":
-      return `rate-limited: Microsoft 365 throttled this operation. Review Teams Client status and the selected chat before deciding what to do.`;
-    case "upstream-rejected":
-      return `upstream-rejected: m365 refused the operation (${String(detail || "inspect the Microsoft 365 error and correct its cause")}). Correct the permission or request issue, then invoke send again only if you still want delivery.`;
-    case "unknown":
-      return `unknown: ${String(detail || "Microsoft 365 may have accepted this message but confirmation was lost.")} Do not retry this idempotency key and do not report it as delivered; inspect the selected chat and decide manually.`;
-  }
-  const exhaustive = kind;
-  return exhaustive;
-}
-function loadOutbox(p) {
-  try {
-    if (!host.fs.fileExists(p.outbox)) return { ledger: { schema: 1, attempts: [] } };
-    const value = parseJson(host.fs.readFile(p.outbox) || "");
-    if (!value || value.schema !== 1 || !Array.isArray(value.attempts)) return { error: "the existing outbox ledger is unreadable" };
-    const states = ["pending", "sent", "rate_limited", "failed", "unknown"];
-    const valid = value.attempts.every((item) => item && typeof item.idempotencyKey === "string" && typeof item.payloadHash === "string" && /^[a-f0-9]{64}$/.test(item.payloadHash) && states.includes(item.state) && item.sender && typeof item.sender.accountId === "string" && typeof item.sender.tenantId === "string" && typeof item.sender.identityKey === "string" && item.destination && validChatId(String(item.destination.id || "")) && typeof item.destination.label === "string" && Number.isFinite(Number(item.createdAt)) && Number.isFinite(Number(item.updatedAt)) && Number.isInteger(item.sendCount) && item.sendCount >= 0);
-    if (!valid) return { error: "the existing outbox ledger contains an invalid or unrecognized attempt state" };
-    return { ledger: value };
-  } catch {
-    return { error: "the existing outbox ledger could not be read" };
-  }
-}
-function persistOutbox(p, ledger) {
-  try {
-    if (!host.fs.makeDirs(p.root)) return false;
-    return host.fs.writeFile(p.outbox, JSON.stringify(ledger)) === true;
-  } catch {
-    return false;
-  }
-}
-function rememberSendFailure(kind, message) {
-  lastSendState = { state: kind, message, updatedAt: now() };
-  return { error: message };
-}
-function sendFailureResult(kind, detail, cause) {
-  return rememberSendFailure(kind, failureMessage(kind, detail, cause));
-}
-function rememberPrefixedFailure(message) {
-  const state = message.slice(0, message.indexOf(":"));
-  return SEND_FAILURES.includes(state) ? rememberSendFailure(state, message) : sendFailureResult("unknown", "The command result could not be classified safely. Inspect the Teams chat before retrying.");
-}
-function parseSendArgs(args) {
-  if (args.length < 2 || !validChatId(args[0])) return { error: failureMessage("invalid-request", "Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>; chat names are not ids.") };
-  let start = 1;
-  let key;
-  if (args[1] === "--key") {
-    if (args.length < 4 || !/^[A-Za-z0-9._:-]{1,160}$/.test(args[2])) return { error: failureMessage("invalid-request", "--key needs a 1\u2013160 character idempotency key ([A-Za-z0-9._:-]), followed by message text.") };
-    key = args[2];
-    start = 3;
-  }
-  const text = args.slice(start).join(" ");
-  if (!text.length) return { error: failureMessage("invalid-request", "Message text must not be empty.") };
-  return { chatId: args[0], text, key };
-}
-function failureForUpstream(message) {
-  const auth = authState(message, configuredAppId());
-  if (auth) return { kind: "reauth-needed", detail: auth.message, cause: auth.state };
-  if (/not signed in|not logged in|no active connection|logged out|run m365 login/i.test(message)) return { kind: "not-logged-in" };
-  if (/\b429\b|\b503\b|too many requests|throttl|service unavailable/i.test(message)) {
-    return { kind: "unknown", detail: "m365 may have retried this throttled send internally and may have delivered the message." };
-  }
-  if (/timeout|timed out|deadline exceeded|connection reset|connection closed|unexpected EOF|\bEOF\b|broken pipe|lost response|context cancel+ed|terminated|signal|killed|did not finish|could not confirm|unconfirmed/i.test(message)) return { kind: "unknown" };
-  if (/\bHTTP\s+(?:400|401|403|404|413)\b/i.test(message)) return { kind: "upstream-rejected", detail: "Microsoft Graph definitively rejected this request before delivery" };
-  if (/exec denied|spawn .*?(?:ENOENT|EACCES)|binary .*?not found|not installed|node .*?missing/i.test(message)) {
-    return { kind: "upstream-rejected", detail: "the local send prerequisite failed before m365 could run" };
-  }
-  return { kind: "unknown", detail: "m365 returned an outcome that cannot prove whether the message was delivered." };
-}
-function runTeamsSend(args, then) {
-  const target = targetState();
-  if (!target.paths) return then({ ok: false, error: target.message, stderr: "" });
-  if (target.state !== "ready") return then({ ok: false, error: target.message, stderr: "" });
-  const p = target.paths;
-  if (!host.fs.fileExists(p.binary)) return then({ ok: false, error: "m365 is not installed. Run `codeterm plugin teams-client login` (or Sign in in the view) to install the pinned CLI.", stderr: "" });
-  const secured = protectStorage(p);
-  if (secured.error) return then({ ok: false, error: secured.message || "Could not secure the m365 runtime.", stderr: "" });
-  return host.exec.async({ bin: nativePath(p.binary), args, env: envFor(p), timeoutMs: 5e3 }, (result) => {
-    const stdout = String(result.stdout || "");
-    const stderr = String(result.stderr || "");
-    if (result.error) return then({ ok: false, error: `m365 send process returned an unconfirmed result: ${String(result.error)}`, stderr, code: result.code });
-    if (result.done !== true || typeof result.code !== "number") return then({ ok: false, error: "m365 send process outcome is unknown.", stderr });
-    if (result.code !== 0) return then({ ok: false, error: stderr || stdout || `m365 exited ${result.code}`, stderr, code: result.code });
-    return then({ ok: true, stdout, stderr });
-  });
-}
-function messageIdFromOutput(output) {
-  const value = parseJson(output.trim());
-  const data = value && (value.data || value);
-  const id = data && (data.id || data.messageId);
-  return typeof id === "string" && id.length > 0 && id.length <= 256 ? id : typeof id === "number" && Number.isSafeInteger(id) ? String(id) : void 0;
-}
-function attemptResult(attempt) {
-  lastSendState = { state: "sent", message: "Microsoft Graph returned the message id and the sent result is recorded in the Teams Client outbox.", updatedAt: now() };
-  return { result: JSON.stringify({
-    status: "sent",
-    sender: attempt.sender,
-    tenant: { id: attempt.sender.tenantId },
-    destination: attempt.destination,
-    idempotencyKey: attempt.idempotencyKey,
-    graphMessageId: attempt.graphMessageId || null,
-    deliveryGuarantee: "The plugin returns a recorded success for a sent idempotency key and never resends that key. A send without a Graph message id stays unknown. This is not an exactly-once delivery guarantee."
-  }) };
-}
-function persistFailure(p, ledger, attempt, kind, detail, cause) {
-  attempt.failure = kind;
-  attempt.failureCause = cause;
-  attempt.failureMessage = failureMessage(kind, detail, cause);
-  attempt.updatedAt = now();
-  delete attempt.retryAfter;
-  if (kind === "unknown") {
-    attempt.state = "unknown";
-  } else {
-    attempt.state = "failed";
-  }
-  if (!persistOutbox(p, ledger)) {
-    attempt.state = "unknown";
-    attempt.failure = "unknown";
-    attempt.failureCause = void 0;
-    attempt.failureMessage = failureMessage("unknown");
-    persistOutbox(p, ledger);
-    return rememberSendFailure("unknown", attempt.failureMessage);
-  }
-  return rememberSendFailure(kind, attempt.failureMessage);
-}
-function writeSendBody(p, key, text) {
-  const file = joinPath(p.root, `send-body-${sha256Hex(key).slice(0, 16)}.json`);
-  try {
-    if (!host.fs.makeDirs(p.root)) return null;
-    return host.fs.writeFile(file, JSON.stringify({ body: { contentType: "text", content: text } })) === true ? file : null;
-  } catch {
-    return null;
-  }
-}
-function sendCommand(origin, args) {
-  const parsed = parseSendArgs(args);
-  if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
-  const matchingPreview = Object.values(previewTokens).reverse().find((token) => token.destination.id === parsed.chatId && token.text === parsed.text);
-  let key = parsed.key || matchingPreview?.previewNonce;
-  const p = paths();
-  if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
-  const loaded = loadOutbox(p);
-  if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error || "the outbox could not be read");
-  const ledger = loaded.ledger;
-  const payloadHash = sha256Hex(parsed.text);
-  let attempt = key ? ledger.attempts.find((item) => item.idempotencyKey === key) : void 0;
-  if (attempt && (attempt.payloadHash !== payloadHash || attempt.destination.id !== parsed.chatId)) {
-    return sendFailureResult("invalid-request", "This idempotency key is already bound to a different chat or text; choose a new key only for an intentional new send.");
-  }
-  if (attempt && attempt.state === "sent") return attemptResult(attempt);
-  if (attempt && attempt.state === "unknown") return sendFailureResult("unknown");
-  if (attempt && attempt.state === "pending") return persistFailure(p, ledger, attempt, "unknown", "a previous invocation ended before its send result was recorded");
-  if (attempt && attempt.state === "rate_limited") return persistFailure(p, ledger, attempt, "unknown");
-  const resolved = liveSender();
-  if ("error" in resolved) return rememberPrefixedFailure(resolved.error);
-  if (attempt && attempt.sender.identityKey !== resolved.sender.identityKey) {
-    return sendFailureResult("invalid-request", "This idempotency key belongs to another account or tenant; choose a new key only for an intentional new send.");
-  }
-  const found = resolveDestination(parsed.chatId, resolved.sender);
-  if ("error" in found) return rememberPrefixedFailure(found.error);
-  const decision = decideSend(readSendScope(), found.destination.id, origin);
-  if (!decision.allow) return sendFailureResult("chat-not-allowed", decision.message);
-  if (!key) key = sha256Hex(`send\0${now()}\0${++previewSequence}\0${parsed.chatId}`).slice(0, 32);
-  const destination = { id: found.destination.id, label: String(found.destination.label || found.destination.id) };
-  if (!attempt) {
-    attempt = {
-      idempotencyKey: key,
-      sender: resolved.sender,
-      destination,
-      payloadHash,
-      state: "pending",
-      createdAt: now(),
-      updatedAt: now(),
-      sendCount: 0
-    };
-    ledger.attempts.push(attempt);
-  }
-  attempt.state = "pending";
-  attempt.updatedAt = now();
-  attempt.sendCount += 1;
-  delete attempt.failure;
-  delete attempt.failureCause;
-  delete attempt.failureMessage;
-  if (!persistOutbox(p, ledger)) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; m365 was not contacted");
-  const bodyFile = writeSendBody(p, key, parsed.text);
-  if (!bodyFile) return persistFailure(p, ledger, attempt, "upstream-rejected", "the message body could not be staged in the plugin data directory; m365 was not contacted");
-  const url = `${GRAPH}/chats/${parsed.chatId}/messages`;
-  return runTeamsSend(["request", "--url", url, "--method", "post", "--content-type", "application/json", "--body", `@${nativePath(bodyFile)}`, "--output", "json"], (run) => {
-    try {
-      host.fs.removeFile(bodyFile);
-    } catch {
-    }
-    if (!run.ok) {
-      const upstream = failureForUpstream(`${run.error}
-${run.stderr}`);
-      return persistFailure(p, ledger, attempt, upstream.kind, upstream.detail, upstream.cause);
-    }
-    const graphMessageId = messageIdFromOutput(run.stdout);
-    if (!graphMessageId) return persistFailure(p, ledger, attempt, "unknown", "m365 exited cleanly but Microsoft Graph returned no message id, so delivery is not confirmed.");
-    attempt.graphMessageId = graphMessageId;
-    attempt.state = "sent";
-    attempt.updatedAt = now();
-    delete attempt.failure;
-    delete attempt.failureCause;
-    delete attempt.failureMessage;
-    if (!persistOutbox(p, ledger)) return persistFailure(p, ledger, attempt, "unknown");
-    return attemptResult(attempt);
-  });
-}
-function logout() {
-  const target = targetState();
-  if (target.state !== "ready") return { error: lifecycleMessage(target.state, target.message) };
-  const p = target.paths;
-  cancelPendingSignIn();
-  if (!host.fs.fileExists(p.binary)) {
-    cachedChats = null;
-    clearPreviewTokens();
-    return { result: "Logged out. No m365 runtime is installed." };
-  }
-  const run = runM365(["logout"]);
-  if (!run.ok) {
-    const reauth = authState(`${run.error}
-${run.stderr}`, configuredAppId());
-    if (reauth) return { error: reauth.message };
-    return { error: "m365 could not clear its plugin-owned session files. The files were kept so logout can be retried." };
-  }
-  for (const file of [p.msal, p.current, p.all]) {
-    if (host.fs.fileExists(file) && !host.fs.removeFile(file)) return { error: "m365 logged out, but a plugin-owned cache file could not be removed. Retry logout." };
-  }
-  cachedChats = null;
-  clearPreviewTokens();
-  return { result: "Logged out. The plugin-owned m365 token and connection files were removed." };
-}
-function onAgentCommand(ctx) {
-  const args = Array.isArray(ctx.args) ? ctx.args : [];
-  switch (ctx.verb) {
-    case "login": {
-      if (args.length > 1 || args.length === 1 && args[0] !== "--device-code") return { error: "Usage: login [--device-code]." };
-      const started = loginStart(args.length ? "deviceCode" : "browser");
-      if (started.error) return { error: started.error };
-      const current = loginPoll(started.jobId);
-      if (current.error && !current.done) return { error: current.error };
-      return { result: JSON.stringify(agentLoginView(current, started.jobId)) };
-    }
-    case "login-status": {
-      if (args.length) return { error: "Usage: login-status." };
-      if (!activeLoginJobId) return { result: JSON.stringify({ state: statusView().state, done: true }) };
-      const jobId = activeLoginJobId;
-      const current = loginPoll(jobId);
-      if (current.error && !current.done) return { error: current.error };
-      return { result: JSON.stringify(agentLoginView(current, jobId)) };
-    }
-    case "accounts":
-      return agentAccounts();
-    case "use":
-      return args.length === 1 ? useAccount(args[0]) : { error: "Usage: use <account-id>." };
-    case "chats":
-      return agentChats(args);
-    case "history":
-      return agentHistory(args);
-    case "health":
-      return { result: JSON.stringify({ ...statusView(), appId: configuredAppId(), sendScope: readSendScope(), lastSend: lastSendState }) };
-    case "logout":
-      return logout();
-    case "send":
-      return sendCommand("agent", args);
-    case "preview":
-      return previewCommand(args, "agent");
-    default:
-      return { error: `Unknown Teams Client verb: ${ctx.verb}` };
-  }
-}
-function agentLoginView(current, fallbackJobId) {
-  const signIn = current.deviceCode ? "device-code" : current.signInUrl ? "link" : void 0;
-  return {
-    done: current.done === true,
-    state: String(current.state || "login-in-progress"),
-    jobId: current.jobId || fallbackJobId,
-    appId: current.appId || configuredAppId(),
-    signIn,
-    signInUrl: current.signInUrl,
-    deviceCode: current.deviceCode,
-    message: current.error || current.message,
-    ...current.fallbackFrom ? { fallbackFrom: current.fallbackFrom } : {},
-    ...current.error ? { error: current.error } : {}
-  };
-}
-function loginStart(authType = "browser") {
-  const running = activeLoginJobId ? loginJobs[activeLoginJobId] : null;
-  if (activeLoginJobId && running && running.stage !== "browser") {
-    return { jobId: activeLoginJobId, state: "install-in-progress", message: "The pinned m365 runtime is still installing. Poll login-status; the sign-in link follows when it is ready." };
-  }
-  const p = paths();
-  if (!p) return { error: lifecycleMessage("unsupported-platform") };
-  const protectedState = protectStorage(p);
-  if (protectedState.error) return { error: protectedState.message || lifecycleMessage("install-failed") };
-  cancelPendingSignIn();
-  if (!host.fs.fileExists(p.binary)) {
-    const installed = installM365(authType);
-    return installed.jobId ? { jobId: installed.jobId, state: installed.state, message: installed.message } : { error: lifecycleMessage(installed.state, installed.message), state: installed.state };
-  }
-  const target = targetState();
-  if (target.state !== "ready" || !target.paths) return { error: lifecycleMessage(target.state, target.message) };
-  const started = startBrowserLogin(target.paths, target.target, authType);
-  if (!started.jobId) return { error: started.error || "m365 browser sign-in did not start.", state: "install-failed" };
-  return { jobId: started.jobId, state: "login-in-progress", message: PREPARING_SIGN_IN_MESSAGE };
-}
-function signInPending(jobId, log, login) {
-  const artifacts = signInArtifacts(log);
-  const context = { appId: login?.appId, ...login?.fallbackFrom ? { fallbackFrom: login.fallbackFrom } : {} };
-  const fallback = login?.fallbackFrom ? "The localhost link was refused, so this sign-in uses a code instead. " : "";
-  if (artifacts.deviceCode) return { done: false, jobId, state: "waiting-for-sign-in", ...context, ...artifacts, message: `${fallback}Open ${artifacts.signInUrl} and enter code ${artifacts.deviceCode}.` };
-  if (artifacts.signInUrl) return { done: false, jobId, state: "waiting-for-sign-in", ...context, ...artifacts, message: "Open the sign-in link in your usual browser on this computer and sign in with your Microsoft 365 work or school account. The link expires in 10 minutes; run login again for a fresh one." };
-  return { done: false, jobId, state: "login-in-progress", ...context, message: login?.authType === "deviceCode" ? `${fallback}${PREPARING_CODE_MESSAGE}` : PREPARING_SIGN_IN_MESSAGE };
-}
-function fallBackToDeviceCode(jobId, login, failure) {
-  try {
-    host.exec.close(jobId);
-  } catch {
-  }
-  finishLoginJob(jobId, failure.state);
-  const started = startBrowserLogin(login.paths, login.target, "deviceCode");
-  if (!started.jobId) return { done: true, state: failure.state, error: failure.message };
-  const next = loginJobs[started.jobId];
-  next.fallbackFrom = failure.state;
-  return signInPending(started.jobId, { state: "starting" }, next);
-}
-function missingChatConsent(login) {
-  const probe = jsonCommand(["request", "--url", `${GRAPH}/me/chats?$top=1`], login.appId);
-  return probe.reauth?.state === "consent-required" ? probe.reauth : null;
-}
-function pollSignIn(jobId, login) {
-  const log = readSignInLog(login);
-  if (log.state === "failed") {
-    if (login.authType === "browser" && LOOPBACK_REFUSED.includes(log.failure.state)) return fallBackToDeviceCode(jobId, login, log.failure);
-    return finishLoginJob(jobId, log.failure.state, log.failure.message);
-  }
-  const current = statusView();
-  if (current.state === "logged-in" && log.state !== "cancelled") {
-    const secured = protectCacheFiles(login.paths, true);
-    if (secured.error) return finishLoginJob(jobId, "install-failed", secured.message || lifecycleMessage("install-failed"));
-    const consent = missingChatConsent(login);
-    if (consent) return finishLoginJob(jobId, consent.state, consent.message);
-    return finishLoginJob(jobId, "logged-in");
-  }
-  if (log.state === "cancelled") return finishLoginJob(jobId, "sign-in-cancelled", "This sign-in was replaced or cancelled. Run login again for a fresh link.");
-  if (log.state === "expired" || now() - (login.startedAt || 0) > SIGN_IN_TTL_MS + 3e4) {
-    if (login.leaseFile) try {
-      host.fs.removeFile(login.leaseFile);
-    } catch {
-    }
-    return finishLoginJob(jobId, "sign-in-expired", "The sign-in link expired. Run login again for a fresh link.");
-  }
-  return signInPending(jobId, log, login);
-}
-function loginPoll(jobId) {
-  const login = jobId ? loginJobs[jobId] : null;
-  if (!login) return { error: "Unknown Microsoft sign-in job." };
-  if (login.stage === "browser" && login.launchComplete) return pollSignIn(jobId, login);
-  let poll;
-  try {
-    poll = host.exec.poll(jobId);
-  } catch {
-    return { error: "Could not read the Microsoft sign-in job." };
-  }
-  if (!poll.done) return login.stage === "browser" ? signInPending(jobId, readSignInLog(login), login) : { done: false, jobId, state: "install-in-progress", message: "The pinned m365 package setup is still running." };
-  try {
-    host.exec.close(jobId);
-  } catch {
-  }
-  if (poll.error || poll.code !== 0) {
-    const reason = `${poll.error || ""}
-${poll.stderr || ""}
-${poll.stdout || ""}`;
-    const auth = authState(reason, login.appId);
-    return finishLoginJob(jobId, auth ? auth.state : "install-failed", auth ? auth.message : lifecycleMessage("install-failed"));
-  }
-  if (login.stage === "pack") {
-    const packed = packageFromPackResult(login.paths, login.target, String(poll.stdout || ""));
-    if (!packed.path) return finishLoginJob(jobId, "install-failed", packed.error || lifecycleMessage("install-failed"));
-    delete loginJobs[jobId];
-    if (activeLoginJobId === jobId) activeLoginJobId = null;
-    const install = startLoginProcess(login.paths, login.target, "install", [
-      "install",
-      nativePath(packed.path),
-      "--prefix",
-      nativePath(login.paths.runtime),
-      "--ignore-scripts",
-      "--no-audit",
-      "--no-fund",
-      "--save-exact"
-    ], packed.path, login.authType);
-    if (!install.jobId) {
-      try {
-        host.fs.removeFile(packed.path);
-      } catch {
-      }
-      return { done: true, state: "install-failed", error: install.error || lifecycleMessage("install-failed") };
-    }
-    return { done: false, jobId: install.jobId, state: "install-in-progress", message: "The local package checksum passed; npm is installing the verified tarball." };
-  }
-  if (login.stage === "install") {
-    if (installedPackageVersion(login.paths) !== VERSION) {
-      return finishLoginJob(jobId, "install-failed", lifecycleMessage("install-failed", "The installed m365 CLI version did not match the pinned release."));
-    }
-    if (login.packagePath) {
-      try {
-        host.fs.removeFile(login.packagePath);
-      } catch {
-      }
-    }
-    delete loginJobs[jobId];
-    if (activeLoginJobId === jobId) activeLoginJobId = null;
-    const browser = startBrowserLogin(login.paths, login.target, login.authType);
-    if (!browser.jobId) return { done: true, state: "install-failed", error: browser.error || "m365 browser sign-in did not start." };
-    return { done: false, jobId: browser.jobId, state: "login-in-progress", message: PREPARING_SIGN_IN_MESSAGE };
-  }
-  login.launchComplete = true;
-  return pollSignIn(jobId, login);
-}
-function viewCall(method, args) {
-  const value = args || {};
-  if (method === "status") return { ...statusView(), appId: configuredAppId(), loginJobId: activeLoginJobId };
-  if (method === "loginStart") return loginStart(value.authType === "deviceCode" ? "deviceCode" : "browser");
-  if (method === "loginPoll") return loginPoll(String(value.jobId || ""));
-  if (method === "useAccount") return useAccount(String(value.id || ""));
-  if (method === "logout") return logout();
-  if (method === "chats") return agentChats(String(value.query || "").trim() ? [String(value.query)] : []);
-  if (method === "sendScope") return readSendScope();
-  if (method === "setSendScope") return setSendScope(value);
-  if (method === "preview") return previewCommand([String(value.chatId || ""), String(value.text || "")], "view");
-  if (method === "send") return sendCommand("view", [String(value.chatId || ""), "--key", String(value.idempotencyKey || ""), String(value.text || "")]);
-  return { error: `Unknown Teams Client view method: ${method}` };
-}
-function renderGlance() {
-  const p = paths();
-  const current = p ? currentPublic(p) : null;
-  const account = current || {};
-  const installed = !!(p && host.fs.fileExists(p.binary));
-  const connected = !!account.accountId;
-  const nodes = [{ kind: "badge", label: connected ? "Connected" : installed ? "Sign-in needed" : "m365 not installed", tone: connected ? "ok" : installed ? "warn" : "muted" }];
-  nodes.push({ kind: "text", text: connected ? `${account.upn || "Account resolved"} \xB7 ${account.tenantId || "tenant unavailable"}` : "Open Teams Client to check status or sign in.", style: { tone: "muted" } });
-  const scope = readSendScope();
-  nodes.push({ kind: "text", text: scope.mode === "all" ? "Agent sends: any chat" : `Agent sends: ${scope.chats.length} allowed chat${scope.chats.length === 1 ? "" : "s"}`, style: { tone: scope.mode === "all" ? "muted" : "warn" } });
-  if (lastSendState) nodes.push({ kind: "text", text: `Last send: ${lastSendState.state} \xB7 ${lastSendState.message}`, style: { tone: lastSendState.state === "sent" ? "ok" : "warn" } });
-  return { title: "Teams Client", nodes };
-}
 var plugin = {
   onAgentCommand,
   renderGlance,
   viewCall,
   __test_paths: paths,
-  __test_platform: hostPlatform,
-  __test_binaryNames: binaryNames,
-  __test_resolveTarget: resolveTarget,
-  __test_integrityByTarget: INTEGRITY_BY_TARGET,
-  __test_envFor: envFor,
-  __test_authState: authState,
-  __test_personalTenantId: PERSONAL_TENANT_ID,
-  __test_failureMessage: failureMessage,
-  __test_failureForUpstream: failureForUpstream,
   __test_setClock: (clock) => {
     injectedClock = clock;
   },
-  __test_readSendScope: readSendScope,
-  __test_previewCommand: previewCommand,
-  __test_sendCommand: sendCommand,
-  __test_agentChats: agentChats,
-  __test_sha256Hex: sha256Hex,
-  __test_lifecycleMessage: lifecycleMessage,
-  __test_accountRows: accountRows,
-  __test_validChatId: validChatId,
-  __test_utf8Bytes: utf8Bytes,
-  __test_boundedHistory: boundedHistory,
-  __test_status: status,
-  __test_jsonCommand: jsonCommand,
-  __test_loginStart: loginStart,
-  __test_loginPoll: loginPoll,
-  __test_logout: logout,
-  __test_installM365: installM365,
-  __test_agentAccounts: agentAccounts,
-  __test_useAccount: useAccount,
-  __test_agentHistory: agentHistory,
-  __test_credentials: credentialPublic,
+  __test_reset: () => {
+    for (const id of Object.keys(installJobs)) delete installJobs[id];
+    activeInstallJobId = null;
+    cachedTarget = null;
+    memoryChats = null;
+    lastStatus = null;
+    lastSendState = null;
+    clearPreviewTokens();
+    for (const key of Object.keys(storageProtectionCache)) delete storageProtectionCache[key];
+  },
+  __test_resolveTarget: resolveTarget,
   __test_windowsAclCommands: windowsAclCommands,
-  __test_signInLogFailure: signInLogFailure,
-  __test_parseSignInLog: parseSignInLog,
-  __test_signInTtlMs: SIGN_IN_TTL_MS,
-  __test_signInWrapper: SIGN_IN_WRAPPER,
-  __test_defaultAppId: DEFAULT_APP_ID,
-  __test_metadataReader: METADATA_READER
+  __test_sha256Hex: sha256Hex,
+  __test_boundedHistory: boundedHistory,
+  __test_failureMessage: failureMessage
 };
 var plugin_default = plugin;
