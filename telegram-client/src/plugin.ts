@@ -104,7 +104,7 @@ function resetRejectedConfig(p: Paths, label: string): void {
   const entries = host.fs.readDir(p.root) || [];
   const prefix = new RegExp(`^gotd\\.(session|peers)\\.${label}\\.`);
   for (const entry of entries) if (prefix.test(entry.name)) host.fs.removeFile(entry.path);
-  if (host.fs.fileExists(p.config)) host.fs.removeFile(p.config);
+  host.fs.removeFile(p.config);
   try { host.secretDelete("config_initialized"); } catch { }
 }
 

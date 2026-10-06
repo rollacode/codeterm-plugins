@@ -759,6 +759,7 @@ test("agent login surfaces a rejected-credential exit and resets the config so n
   const env = mockHost({ loginLog: "tg: callback: qr login: export: rpcDoRequest: rpc error code 400: API_ID_INVALID\n", secrets: { api_id: "1", api_hash: "deadbeefdeadbeefdeadbeefdeadbeef" } });
   try {
     const p = plugin.__test_paths();
+    host.fs.fileExists = (file) => file !== p.config && existsSync(file);
     const session = join(p.root, "gotd.session.default.user.fixture.json");
     const other = join(p.root, "gotd.session.work.user.fixture.json");
     writeFileSync(session, "s");
