@@ -160,20 +160,19 @@ function protectStorage(p: Paths): { error?: string; message?: string } {
   return result;
 }
 
-// `/inheritance:r` with `/T` strips each file's inherited ACEs while `(OI)(CI)` grants never apply to files,
-// leaving existing files with an empty ACL; reset children to inherit, then restrict only the root.
 // `m365 --version` prints a banner plus help and can take tens of seconds cold, so read the installed manifest.
 function installedPackageVersion(p: Paths): string {
   const manifest = host.fs.readJson(joinPath(p.runtime, `node_modules/${PACKAGE}/package.json`)) as { name?: string; version?: string } | null;
   return manifest?.name === PACKAGE ? String(manifest.version || "") : "";
 }
 
+// Restrict only the root, once: `/T` with `/inheritance:r` empties existing files' ACLs, and any walk over
+// the installed runtime takes far longer than the exec bound. Files created later inherit the root's ACL.
 function windowsAclCommands(root: string, principal: string): string[][] {
-  return [
-    [root, "/reset", "/T", "/C", "/Q"],
-    [root, "/inheritance:r", "/grant:r", `${principal}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "/C"],
-  ];
+  return [[root, "/inheritance:r", "/grant:r", `${principal}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "/C"]];
 }
+
+const ACL_MARKER = ".acl-restricted";
 
 function applyStorageProtection(p: Paths): { error?: string; message?: string } {
   for (const dir of [p.root, p.home, p.runtime, p.npmCache]) {
@@ -181,6 +180,8 @@ function applyStorageProtection(p: Paths): { error?: string; message?: string } 
     catch { return { error: "storage-protection-failed", message: "Could not create the plugin-owned private runtime directory." }; }
   }
   if (host.path.isWindows) {
+    const marker = joinPath(p.root, ACL_MARKER);
+    if (host.fs.fileExists(marker)) return {};
     const names = binaryNamesForHost();
     const env = envFor(p);
     const who = runProcess(names.whoami, [], env);
@@ -190,6 +191,7 @@ function applyStorageProtection(p: Paths): { error?: string; message?: string } 
       const acl = runProcess(names.icacls, args, env);
       if (!acl.ok) return { error: "storage-protection-failed", message: "Could not restrict the plugin cache with a Windows ACL. No sign-in was started." };
     }
+    host.fs.writeFile(marker, "1");
     return {};
   }
   const env = envFor(p);

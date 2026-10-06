@@ -176,11 +176,9 @@ function installedPackageVersion(p) {
   return manifest?.name === PACKAGE ? String(manifest.version || "") : "";
 }
 function windowsAclCommands(root, principal) {
-  return [
-    [root, "/reset", "/T", "/C", "/Q"],
-    [root, "/inheritance:r", "/grant:r", `${principal}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "/C"]
-  ];
+  return [[root, "/inheritance:r", "/grant:r", `${principal}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "/C"]];
 }
+var ACL_MARKER = ".acl-restricted";
 function applyStorageProtection(p) {
   for (const dir of [p.root, p.home, p.runtime, p.npmCache]) {
     try {
@@ -190,6 +188,8 @@ function applyStorageProtection(p) {
     }
   }
   if (host.path.isWindows) {
+    const marker = joinPath(p.root, ACL_MARKER);
+    if (host.fs.fileExists(marker)) return {};
     const names = binaryNamesForHost();
     const env2 = envFor(p);
     const who = runProcess(names.whoami, [], env2);
@@ -199,6 +199,7 @@ function applyStorageProtection(p) {
       const acl = runProcess(names.icacls, args, env2);
       if (!acl.ok) return { error: "storage-protection-failed", message: "Could not restrict the plugin cache with a Windows ACL. No sign-in was started." };
     }
+    host.fs.writeFile(marker, "1");
     return {};
   }
   const env = envFor(p);
