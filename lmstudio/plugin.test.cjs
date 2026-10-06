@@ -118,8 +118,20 @@ mockHostFetch.async = (opts, then) => {
   return { __ctAwait__: { job: jobId, k: continuationId } };
 };
 
+const secretStore = {};
+const logLines = [];
 globalThis.host = {
   homeDir: () => "/tmp/codeterm-home",
+  secretGet: (name) => (Object.prototype.hasOwnProperty.call(secretStore, name) ? secretStore[name] : null),
+  secretSet: (name, value) => {
+    secretStore[name] = value;
+    return true;
+  },
+  secretDelete: (name) => {
+    delete secretStore[name];
+    return true;
+  },
+  log: (level, message) => logLines.push(`${level}: ${message}`),
   makeDirs: () => true,
   settingsJson: () => JSON.stringify(settingsObj),
   fetch: mockHostFetch,
@@ -247,6 +259,9 @@ function reset(settings) {
   forceParse = null;
   settingsObj = settings || {};
   for (const key of Object.keys(fileStore)) delete fileStore[key];
+  for (const key of Object.keys(secretStore)) delete secretStore[key];
+  logLines.length = 0;
+  if (plugin && plugin.__test_resetRouter) plugin.__test_resetRouter();
   fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
   asyncFetchHandler = () => ({ status: 500, error: "no async fetch handler set" });
 }
@@ -415,7 +430,7 @@ test("lmstudio_open_session_uses_session_config_system_prompt_and_model", () => 
   assert(manifest.capabilities.chatBackend.sessionConfig === true, "chatBackend declares sessionConfig support");
   assert(manifest.capabilities.decisionModel === true, "decisionModel remains in the backward-compatible bare form");
   assert(manifest.hostApi === 2, "manifest remains compatible with host API 2");
-  assert(manifest.minCodeterm === "1.12.3", "chatBackend session config remains available on CodeTerm 1.12.3");
+  assert(manifest.minCodeterm === "1.12.4", "manifest agentVerbs need a host that accepts the field (newer than 1.12.3)");
   const endpoint = "http://eight.tail0e459c.ts.net:1234";
   reset({ baseUrl: endpoint, model: "settings-model", defaultPreset: "codeterm", presets: [] });
   const ctx = {
@@ -1281,7 +1296,7 @@ test("tri-state: a thrown host.toolcall.parse is handled as a normal message, no
   assert(p.done === true, "thrown parse ends the turn cleanly");
 });
 
-test("listPresets returns configured presets and listModels uses /api/v1/models", () => {
+test("listPresets returns configured presets and listModels falls back from /api/v0 to /api/v1/models", () => {
   const endpoint = "http://eight.tail0e459c.ts.net:1234";
   reset({
     baseUrl: `${endpoint}/`,
@@ -1294,16 +1309,19 @@ test("listPresets returns configured presets and listModels uses /api/v1/models"
   const presets = plugin.listPresets();
   assert(presets.length === 2 && presets[1].id === "rhymes", "configured presets");
 
-  // Native shape: { models: [{ key, ... }] }.
+  // Older servers 404 the v0 listing; the native v1 shape is { models: [{ key, ... }] }.
+  const urls = [];
   fetchHandler = (opts) => {
     assert(opts.method === "GET", "GET");
-    assert(opts.url === `${endpoint}/api/v1/models`, "native model list uses the configured server address, got " + opts.url);
+    urls.push(opts.url);
+    if (opts.url.endsWith("/api/v0/models")) return JSON.stringify({ status: 404, body: "{}" });
     return JSON.stringify({
       status: 200,
       body: JSON.stringify({ models: [{ key: "llama-3" }, { key: "qwen2.5" }, { bogus: true }] }),
     });
   };
   const models = plugin.listModels();
+  assert(urls[0] === `${endpoint}/api/v0/models` && urls[1] === `${endpoint}/api/v1/models`, "v0 first, then v1 on the configured server, got " + urls.join(", "));
   assert(models.length === 2, "two valid models, got " + models.length);
   assert(models[0].id === "llama-3" && models[0].displayName === "llama-3", "first model");
 });
@@ -2149,6 +2167,312 @@ test("decision_model_id_reports_catalogue_fallback_and_metadata_normalizes_remot
   const models = settleFetchExport(adapter.models(), "catalogue fallback models");
   assert(models.length > 0 && adapter.modelId() === models[0].id, "modelId reports the first discovered model fallback");
   assert(adapter.metadata().server_address === endpoint, "metadata reports the normalized configured server address");
+});
+
+
+// ── Router: multi-provider routing, keys, usage, verbs, view bridge ──
+
+const ROUTER_STATE = "/tmp/codeterm-home/.codeterm/plugins/lmstudio/router.json";
+const MIMO_KEY = "tp-0123456789abcdef";
+
+function routerSettings(extra) {
+  return Object.assign({ baseUrl: "http://localhost:1234", presets: [] }, extra || {});
+}
+
+function seedRouter(state) {
+  fileStore[ROUTER_STATE] = JSON.stringify(state);
+}
+
+function mimoProviders() {
+  return {
+    providers: [
+      { id: "mimo", name: "Xiaomi MiMo", kind: "openai", baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1", apiKeySecret: "mimo_api_key" },
+      { id: "mimo-anthropic", name: "MiMo (Anthropic)", kind: "anthropic", baseUrl: "https://token-plan-sgp.xiaomimimo.com/anthropic", apiKeySecret: "mimo_api_key" },
+    ],
+  };
+}
+
+function oaiChunk(obj) { return `data: ${JSON.stringify(obj)}\n\n`; }
+function anthEvent(type, obj) { return `event: ${type}\ndata: ${JSON.stringify(Object.assign({ type }, obj))}\n\n`; }
+
+function allText() {
+  return JSON.stringify(fileStore) + JSON.stringify(settingsObj) + logLines.join("\n");
+}
+
+test("router_openai_provider_streams_through_chat_completions_with_bearer_key_and_usage_line", () => {
+  reset(routerSettings());
+  seedRouter(mimoProviders());
+  secretStore.mimo_api_key = MIMO_KEY;
+  plugin.openSession({ tabId: "r-oai", config: {}, model: "mimo::mimo-v2.6-pro", systemPrompt: "Be brief." });
+  assert(plugin.sessionInfo("r-oai").model === "mimo::mimo-v2.6-pro", "session reports the qualified model");
+  plugin.sendMessage("r-oai", "reply with OK");
+  const call = streamCalls[0];
+  assert(call.url === "https://token-plan-sgp.xiaomimimo.com/v1/chat/completions", "openai route, got " + call.url);
+  assert(call.headers.authorization === `Bearer ${MIMO_KEY}`, "bearer key header");
+  const body = JSON.parse(call.body);
+  assert(body.model === "mimo-v2.6-pro" && body.stream === true, "bare model id on the wire");
+  assertJsonEqual(body.messages, [{ role: "system", content: "Be brief." }, { role: "user", content: "reply with OK" }], "system + user messages");
+  assert(!call.body.includes(MIMO_KEY), "key never in the request body");
+  enqueueStream(0, [
+    { chunks: [oaiChunk({ id: "c1", choices: [{ delta: { content: "O" } }] })], done: false, status: 200 },
+    { chunks: [oaiChunk({ choices: [{ delta: { content: "K" } }] }), oaiChunk({ choices: [], usage: { prompt_tokens: 1200, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 1024 } } }), "data: [DONE]\n\n"], done: true, status: 200 },
+  ]);
+  const p = pumpUntilDone("r-oai");
+  assert(contents(p.messages, "assistant").join("") === "OK", "assistant reply OK, got " + contents(p.messages, "assistant"));
+  const usage = contents(p.messages, "system").find((m) => /cached/.test(m));
+  assert(usage === "mimo::mimo-v2.6-pro · 1,200 in · 1,024 cached · 176 fresh · 2 out", "usage line, got " + usage);
+  assert(!allText().includes(MIMO_KEY), "key never in settings, state files or logs");
+  plugin.closeSession("r-oai");
+});
+
+test("router_anthropic_provider_uses_messages_api_cache_breakpoints_and_cache_read_usage", () => {
+  reset(routerSettings());
+  seedRouter(mimoProviders());
+  secretStore.mimo_api_key = MIMO_KEY;
+  plugin.openSession({ tabId: "r-anth", config: {}, model: "mimo-anthropic::mimo-v2.6-pro", systemPrompt: "LONG STABLE PREFIX" });
+  plugin.sendMessage("r-anth", "first");
+  let call = streamCalls[0];
+  assert(call.url === "https://token-plan-sgp.xiaomimimo.com/anthropic/v1/messages", "anthropic route, got " + call.url);
+  assert(call.headers["x-api-key"] === MIMO_KEY && call.headers["anthropic-version"] === "2023-06-01", "anthropic auth headers");
+  assert(!call.headers.authorization, "no bearer header for anthropic");
+  let body = JSON.parse(call.body);
+  assertJsonEqual(body.system, [{ type: "text", text: "LONG STABLE PREFIX", cache_control: { type: "ephemeral" } }], "system block is a breakpoint");
+  assert(body.max_tokens === 4096, "default max_tokens");
+  enqueueStream(0, [{
+    chunks: [
+      anthEvent("message_start", { message: { id: "msg_1", usage: { input_tokens: 20, cache_creation_input_tokens: 1500, output_tokens: 1 } } }),
+      anthEvent("content_block_delta", { delta: { type: "text_delta", text: "OK" } }),
+      anthEvent("message_delta", { usage: { output_tokens: 2 } }),
+      anthEvent("message_stop", {}),
+    ],
+    done: true,
+    status: 200,
+  }]);
+  pumpUntilDone("r-anth");
+  plugin.sendMessage("r-anth", "second");
+  call = streamCalls[1];
+  body = JSON.parse(call.body);
+  assert(body.messages.length === 3, "stateless history resent, got " + body.messages.length);
+  assert(body.messages[1].role === "assistant" && body.messages[1].content[0].cache_control, "breakpoint on the turn before the newest user message");
+  assert(!body.messages[2].content[0].cache_control, "newest user turn is not cached");
+  assert(JSON.stringify(body).split("cache_control").length - 1 === 2, "exactly two breakpoints");
+  enqueueStream(1, [{
+    chunks: [
+      anthEvent("message_start", { message: { id: "msg_2", usage: { input_tokens: 9, cache_read_input_tokens: 1500, output_tokens: 1 } } }),
+      anthEvent("content_block_delta", { delta: { type: "text_delta", text: "OK again" } }),
+      anthEvent("message_delta", { usage: { output_tokens: 3 } }),
+    ],
+    done: true,
+    status: 200,
+  }]);
+  const p = pumpUntilDone("r-anth");
+  const usage = contents(p.messages, "system").filter((m) => /in · /.test(m));
+  assert(usage[0] === "mimo-anthropic::mimo-v2.6-pro · 1,520 in · 0 cached · 1,520 fresh · 1,500 cache write · 2 out", "first usage, got " + usage[0]);
+  assert(usage[1] === "mimo-anthropic::mimo-v2.6-pro · 1,509 in · 1,500 cached · 9 fresh · 3 out", "second usage, got " + usage[1]);
+  plugin.closeSession("r-anth");
+});
+
+test("router_http_error_is_typed_and_redacts_an_echoed_key", () => {
+  reset(routerSettings());
+  seedRouter(mimoProviders());
+  secretStore.mimo_api_key = MIMO_KEY;
+  plugin.openSession({ tabId: "r-401", config: {}, model: "mimo::mimo-v2.6-pro" });
+  plugin.sendMessage("r-401", "hi");
+  enqueueStream(0, [{ chunks: [], done: true, status: 401, body: JSON.stringify({ error: { message: `invalid key ${MIMO_KEY}` } }) }]);
+  const p = pumpUntilDone("r-401");
+  const err = contents(p.messages, "system").join("\n");
+  assert(/Xiaomi MiMo HTTP 401/.test(err) && /check the API key/.test(err), "typed auth error, got " + err);
+  assert(!JSON.stringify(p.messages).includes(MIMO_KEY), "echoed key is redacted from the transcript");
+});
+
+test("router_unknown_provider_reports_a_route_error_without_network", () => {
+  reset(routerSettings());
+  plugin.openSession({ tabId: "r-unknown", config: {}, model: "ghost::m" });
+  plugin.sendMessage("r-unknown", "hi");
+  const p = pumpUntilDone("r-unknown");
+  assert(streamCalls.length === 0, "no stream for an unknown provider");
+  assert(contents(p.messages, "system").some((m) => /unknown provider "ghost"/.test(m)), "route error surfaced");
+});
+
+test("router_setModel_switches_provider_for_the_next_turn", () => {
+  reset(routerSettings());
+  seedRouter(mimoProviders());
+  secretStore.mimo_api_key = MIMO_KEY;
+  plugin.openSession({ tabId: "r-switch", config: {}, model: "llama-3" });
+  plugin.setModel("r-switch", "mimo::mimo-v2.6-flash");
+  assert(plugin.sessionInfo("r-switch").model === "mimo::mimo-v2.6-flash", "qualified model after switch");
+  plugin.sendMessage("r-switch", "hi");
+  assert(streamCalls[0].url.endsWith("/v1/chat/completions") && JSON.parse(streamCalls[0].body).model === "mimo-v2.6-flash", "next turn routes to mimo");
+  plugin.setModel("r-switch", "llama-3");
+  assert(plugin.sessionInfo("r-switch").model === "llama-3", "bare id switches back to LM Studio");
+  plugin.closeSession("r-switch");
+});
+
+test("router_listModels_groups_providers_and_skips_providers_missing_a_key", () => {
+  reset(routerSettings());
+  seedRouter(mimoProviders());
+  fetchHandler = (opts) => {
+    if (opts.url.endsWith("/api/v0/models")) return JSON.stringify({ status: 200, body: JSON.stringify({ data: [{ id: "qwen", type: "vlm", state: "loaded", max_context_length: 32768 }] }) });
+    throw new Error("no fetch expected without a key: " + opts.url);
+  };
+  let models = plugin.listModels();
+  assertJsonEqual(models.map((m) => [m.id, m.group, m.badge]), [["qwen", "LM Studio", "loaded"]], "only LM Studio without a key");
+
+  plugin.__test_resetRouter();
+  secretStore.mimo_api_key = MIMO_KEY;
+  const seen = [];
+  fetchHandler = (opts) => {
+    seen.push([opts.url, opts.headers.authorization || opts.headers["x-api-key"] || ""]);
+    if (opts.url.endsWith("/api/v0/models")) return JSON.stringify({ status: 200, body: JSON.stringify({ data: [] }) });
+    return JSON.stringify({ status: 200, body: JSON.stringify({ data: [{ id: "mimo-v2.6-pro" }, { id: "mimo-v2.6-flash", context_length: 262144 }] }) });
+  };
+  models = plugin.listModels();
+  assertJsonEqual(
+    models.map((m) => [m.id, m.group]),
+    [["mimo::mimo-v2.6-pro", "Xiaomi MiMo"], ["mimo::mimo-v2.6-flash", "Xiaomi MiMo"], ["mimo-anthropic::mimo-v2.6-pro", "MiMo (Anthropic)"], ["mimo-anthropic::mimo-v2.6-flash", "MiMo (Anthropic)"]],
+    "models grouped per provider",
+  );
+  assert(models[1].badge === "262k", "context badge");
+  assertJsonEqual(seen.slice(1).map((x) => x[0]), ["https://token-plan-sgp.xiaomimimo.com/v1/models", "https://token-plan-sgp.xiaomimimo.com/anthropic/v1/models"], "per-kind model endpoints");
+  assert(seen[1][1] === `Bearer ${MIMO_KEY}` && seen[2][1] === MIMO_KEY, "per-kind auth");
+  const before = seen.length;
+  plugin.listModels();
+  assert(seen.length === before, "a second listing within the TTL is served from the cache");
+  assert(!allText().includes(MIMO_KEY), "model cache never stores the key");
+});
+
+test("router_preset_with_provider_model_and_knobs_routes_and_maps_params", () => {
+  reset(routerSettings());
+  seedRouter(Object.assign(mimoProviders(), { presets: [{ id: "mimo-fast", name: "MiMo fast", provider: "mimo", model: "mimo-v2.6-flash", temperature: 0.2, maxTokens: 64, systemPrompt: "Terse." }] }));
+  secretStore.mimo_api_key = MIMO_KEY;
+  const presets = plugin.listPresets();
+  assert(presets.some((p) => p.id === "mimo-fast"), "user preset listed");
+  plugin.openSession({ tabId: "r-preset", config: {}, preset: "mimo-fast" });
+  assert(plugin.sessionInfo("r-preset").model === "mimo::mimo-v2.6-flash", "preset routes to its provider/model, got " + plugin.sessionInfo("r-preset").model);
+  plugin.sendMessage("r-preset", "hi");
+  const body = JSON.parse(streamCalls[0].body);
+  assert(body.temperature === 0.2 && body.max_tokens === 64, "preset knobs on the wire");
+  assert(body.messages[0].content === "Terse.", "preset system prompt");
+  plugin.closeSession("r-preset");
+});
+
+test("router_agent_verbs_manage_providers_and_presets_without_touching_keys", () => {
+  reset(routerSettings());
+  let r = plugin.onAgentCommand({ sessionId: "a", verb: "add-provider", args: ["mimo", "openai", "https://token-plan-sgp.xiaomimimo.com/v1", "--name", "Xiaomi MiMo"] });
+  assert(r.result && /added mimo/.test(r.result), "added, got " + JSON.stringify(r));
+  assert(/--secret mimo_api_key/.test(r.result), "next step names the declared key slot");
+  assert(/--allow-host token-plan-sgp\.xiaomimimo\.com/.test(r.result), "next step names the host grant");
+  const state = JSON.parse(fileStore[ROUTER_STATE]);
+  assertJsonEqual(state.providers, [{ id: "mimo", name: "Xiaomi MiMo", kind: "openai", baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1", apiKeySecret: "mimo_api_key" }], "state has no key material");
+  r = plugin.onAgentCommand({ sessionId: "a", verb: "add-provider", args: ["mimo", "openai", "https://x/v1"] });
+  assert(r.error && /already exists/.test(r.error), "duplicate refused");
+  r = plugin.onAgentCommand({ sessionId: "a", verb: "providers", args: [] });
+  assert(/^lmstudio\tlmstudio/m.test(r.result) && /^mimo\topenai\tkey_missing/m.test(r.result) && /key=mimo_api_key:unset/.test(r.result), "providers table, got " + r.result);
+  r = plugin.onAgentCommand({ sessionId: "a", verb: "add-preset", args: ["quick", "mimo::mimo-v2.6-flash", "--temperature", "0.3", "--max-tokens", "100"] });
+  assert(r.result === "saved preset quick", "preset saved, got " + JSON.stringify(r));
+  r = plugin.onAgentCommand({ sessionId: "a", verb: "presets", args: [] });
+  assert(/quick\tquick\tmimo::mimo-v2.6-flash\tt=0.3 max=100/.test(r.result), "presets table, got " + r.result);
+  r = plugin.onAgentCommand({ sessionId: "a", verb: "add-preset", args: ["hot", "mimo::x", "--temperature", "9"] });
+  assert(r.error && /Temperature/.test(r.error), "invalid knob refused");
+  secretStore.mimo_api_key = MIMO_KEY;
+  fetchHandler = (opts) => {
+    if (opts.url.indexOf("localhost") >= 0) return JSON.stringify({ error: "connection refused" });
+    return JSON.stringify({ status: 200, body: JSON.stringify({ data: [{ id: "mimo-v2.6-pro" }, { id: "mimo-v2.6-flash" }] }) });
+  };
+  r = plugin.onAgentCommand({ sessionId: "a", verb: "models", args: ["mimo", "flash"] });
+  assert(/## Xiaomi MiMo \(mimo\) — 1\/2/.test(r.result) && /^mimo::mimo-v2.6-flash$/m.test(r.result), "filtered section, got " + r.result);
+  r = plugin.onAgentCommand({ sessionId: "a", verb: "remove-provider", args: ["lmstudio"] });
+  assert(r.error && /built in/.test(r.error), "builtin cannot be removed");
+  r = plugin.onAgentCommand({ sessionId: "a", verb: "remove-provider", args: ["mimo"] });
+  assert(/removed mimo/.test(r.result), "removed");
+  assert(JSON.parse(fileStore[ROUTER_STATE]).presets.length === 0, "presets of a removed provider go with it");
+  assert(plugin.onAgentCommand({ sessionId: "a", verb: "bogus", args: [] }).error, "unknown verb errors");
+  assert(!allText().includes(MIMO_KEY), "verbs never persist keys");
+});
+
+test("router_view_bridge_stores_keys_in_the_secret_bucket_and_never_returns_them", () => {
+  reset(routerSettings());
+  let r = plugin.viewCall("addProvider", { provider: { id: "mimo", name: "Xiaomi MiMo", kind: "openai", baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1" } });
+  assert(r.ok && r.provider.status.state === "key_missing", "added with key missing, got " + JSON.stringify(r));
+  r = plugin.viewCall("addProvider", { provider: { id: "BAD ID", kind: "x", baseUrl: "nope" } });
+  assert(!r.ok && r.fieldErrors.length === 3, "field errors for the form, got " + JSON.stringify(r));
+  r = plugin.viewCall("setProviderKey", { id: "mimo", key: `  ${MIMO_KEY}  ` });
+  assert(r.ok === true && Object.keys(r).length === 1, "set returns only ok");
+  assert(secretStore.mimo_api_key === MIMO_KEY, "key trimmed into the declared slot");
+  fetchHandler = (opts) => JSON.stringify(opts.url.indexOf("localhost") >= 0 ? { error: "fetch denied: localhost:1234" } : { status: 200, body: JSON.stringify({ data: [{ id: "mimo-v2.6-pro" }] }) });
+  r = plugin.viewCall("testProvider", { id: "mimo" });
+  assert(r.ok && r.provider.status.state === "connected" && r.provider.status.modelCount === 1, "connected after test, got " + JSON.stringify(r.provider.status));
+  r = plugin.viewCall("testProvider", { id: "lmstudio" });
+  assert(r.provider.status.state === "denied" && /--allow-host localhost:1234/.test(r.provider.status.message), "denied status carries the grant command");
+  const overview = plugin.viewCall("overview", {});
+  assert(overview.providers.find((p) => p.id === "mimo").hasKey === true, "overview reports key presence");
+  assert(overview.templates.length > 5 && overview.kinds.length === 3, "templates and kinds for the form");
+  const sections = plugin.viewCall("models", { query: "pro" }).sections;
+  assert(sections.find((s) => s.providerId === "mimo").models[0].id === "mimo::mimo-v2.6-pro", "model sections with qualified ids");
+  r = plugin.viewCall("savePreset", { preset: { id: "p1", provider: "mimo", model: "mimo-v2.6-pro", temperature: "0.5" }, replace: false });
+  assert(r.ok, "preset saved");
+  r = plugin.viewCall("savePreset", { preset: { id: "p1", name: "renamed" }, replace: false });
+  assert(!r.ok && r.fieldErrors[0].field === "id", "duplicate preset id reported on the id field");
+  r = plugin.viewCall("savePreset", { preset: { id: "p1", name: "renamed" }, replace: true });
+  assert(r.ok && r.preset.name === "renamed", "replace edits in place");
+  plugin.viewCall("setProviderEnabled", { id: "lmstudio", enabled: false });
+  assert(plugin.viewCall("overview", {}).defaultProvider === "mimo", "disabling LM Studio moves the default");
+  for (const method of ["overview", "models"]) assert(!JSON.stringify(plugin.viewCall(method, {})).includes(MIMO_KEY), method + " never returns the key");
+  r = plugin.viewCall("clearProviderKey", { id: "mimo" });
+  assert(r.ok && secretStore.mimo_api_key === undefined, "key cleared");
+  assert(!allText().includes(MIMO_KEY), "no key in settings, state or logs");
+});
+
+test("router_provider_without_model_listing_falls_back_to_configured_model_ids", () => {
+  reset(routerSettings());
+  secretStore.mimo_api_key = MIMO_KEY;
+  let r = plugin.onAgentCommand({ sessionId: "a", verb: "add-provider", args: ["mimo-anthropic", "anthropic", "https://token-plan-sgp.xiaomimimo.com/anthropic", "--key-slot", "mimo_api_key", "--models", "mimo-v2.6-pro,mimo-v2.6-flash"] });
+  assert(r.result, "added, got " + JSON.stringify(r));
+  fetchHandler = (opts) => JSON.stringify(opts.url.indexOf("localhost") >= 0 ? { error: "connection refused" } : { status: 404, body: "<html><title>404 Not Found</title><h1>404 Not Found</h1></html>" });
+  r = plugin.onAgentCommand({ sessionId: "a", verb: "test-provider", args: ["mimo-anthropic"] });
+  assert(/connected — No model listing here; using 2 configured models/.test(r.result), "configured fallback, got " + r.result);
+  const ids = plugin.listModels().map((m) => m.id);
+  assertJsonEqual(ids, ["mimo-anthropic::mimo-v2.6-pro", "mimo-anthropic::mimo-v2.6-flash"], "configured ids listed");
+  plugin.__test_resetRouter();
+  r = plugin.onAgentCommand({ sessionId: "a", verb: "add-provider", args: ["bare-anth", "anthropic", "https://other.example/anthropic", "--key-slot", "mimo_api_key"] });
+  r = plugin.onAgentCommand({ sessionId: "a", verb: "test-provider", args: ["bare-anth"] });
+  assert(/error — Endpoint not found \(HTTP 404\): 404 Not Found$/m.test(r.result), "404 without configured ids stays an error with clean text, got " + r.result);
+});
+
+test("router_failed_discovery_is_cached_briefly_and_a_new_key_invalidates_it", () => {
+  reset(routerSettings({ baseUrl: "http://localhost:1234" }));
+  seedRouter({ providers: [mimoProviders().providers[0]], disabled: ["lmstudio"] });
+  secretStore.mimo_api_key = "old-key";
+  const urls = [];
+  fetchHandler = (opts) => {
+    urls.push(opts.url);
+    return JSON.stringify({ status: 401, body: JSON.stringify({ error: { message: "bad key" } }) });
+  };
+  plugin.listModels();
+  plugin.listModels();
+  assert(urls.length === 1, "an auth failure is not re-probed on every picker open, got " + urls.length);
+  plugin.viewCall("setProviderKey", { id: "mimo", key: MIMO_KEY });
+  fetchHandler = (opts) => {
+    urls.push(opts.url);
+    return JSON.stringify({ status: 200, body: JSON.stringify({ data: [{ id: "mimo-v2.6-pro" }] }) });
+  };
+  const ids = plugin.listModels().map((m) => m.id);
+  assert(urls.length === 2 && ids[0] === "mimo::mimo-v2.6-pro", "new key re-probes at once, got " + JSON.stringify(ids));
+});
+
+test("router_manifest_declares_view_secrets_agent_verbs_and_key_slots", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  assert(manifest.id === "lmstudio", "plugin id kept for upgrade continuity");
+  assert(manifest.capabilities.view === true, "view capability");
+  assert(manifest.permissions.secrets === true && manifest.permissions.agentCommands === true, "secrets + agent commands");
+  for (const verb of ["providers", "add-provider", "remove-provider", "models", "presets", "add-preset"]) {
+    assert(manifest.agentVerbs.some((v) => v.split(" ")[0] === verb), "verb declared: " + verb);
+  }
+  const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));
+  const slots = [];
+  const walk = (fields) => fields.forEach((f) => (f.kind === "api_key" ? slots.push(f.env_var) : f.fields && walk(f.fields)));
+  walk(schema);
+  for (const slot of ["mimo_api_key", "openrouter_api_key", "anthropic_api_key", "custom1_api_key"]) assert(slots.includes(slot), "declared key slot " + slot);
 });
 
 let failed = 0;

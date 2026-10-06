@@ -25,7 +25,7 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
-// ../../codeterm/packages/chat-engine/src/index.ts
+// ../codeterm/packages/chat-engine/src/index.ts
 var VERDICT_CONTRACT = [
   "Respond ONLY with a JSON object of this exact shape (no markdown fences, no surrounding prose):",
   "{",
@@ -698,9 +698,9 @@ var TOOL_SCHEMA_JSON = JSON.stringify({
 });
 var FENCE_RE = /```[^\r\n`]*\r?\n[\s\S]*?```/g;
 var TOOL_WRAPPER_RE = /<\s*\|?\/?\s*(?:tool_call|tool▁call)\s*\|?\s*>/gi;
-function createToolRuntime(host2, parseJson2) {
-  function shellQuote(s) {
-    return `'${String(s).replace(/'/g, `'\\''`)}'`;
+function createToolRuntime(host2, parseJson3) {
+  function shellQuote(s2) {
+    return `'${String(s2).replace(/'/g, `'\\''`)}'`;
   }
   function execShellCmd2(call) {
     if (call.tool === "exec") {
@@ -714,13 +714,13 @@ function createToolRuntime(host2, parseJson2) {
     return { shellCmd: `codeterm ${args}` };
   }
   function startExecJob2(shellCmd) {
-    return parseJson2(
+    return parseJson3(
       host2.execStart(JSON.stringify({ bin: "sh", args: ["-lc", shellCmd], timeoutMs: 12e4 })),
       { error: "host.exec.start returned non-JSON" }
     );
   }
   function pollExecJob2(jobId) {
-    return parseJson2(host2.execPoll(jobId), { done: true, error: "host.exec.poll returned non-JSON" });
+    return parseJson3(host2.execPoll(jobId), { done: true, error: "host.exec.poll returned non-JSON" });
   }
   function execResultFromPoll2(poll) {
     const result = {};
@@ -738,10 +738,10 @@ function createToolRuntime(host2, parseJson2) {
     const ordered = [...spans].sort((a, b) => a.start - b.start);
     let out = "";
     let cursor = 0;
-    for (const s of ordered) {
-      if (s.start < cursor) continue;
-      out += text.slice(cursor, s.start);
-      cursor = s.end;
+    for (const s2 of ordered) {
+      if (s2.start < cursor) continue;
+      out += text.slice(cursor, s2.start);
+      cursor = s2.end;
     }
     out += text.slice(cursor);
     return out.replace(/\n{3,}/g, "\n\n").trim();
@@ -782,7 +782,7 @@ function createToolRuntime(host2, parseJson2) {
       host2.log("warn", `host.toolcall.parse failed: ${String(e)}`);
       return { entries: [], cleaned: text, status: "none" };
     }
-    const parsed = parseJson2(raw, null);
+    const parsed = parseJson3(raw, null);
     if (!parsed || typeof parsed !== "object") return { entries: [], cleaned: text, status: "none" };
     if (parsed.status === "malformed") {
       const reason = typeof parsed.reason === "string" && parsed.reason ? parsed.reason : "unparseable tool call";
@@ -823,7 +823,7 @@ function createToolRuntime(host2, parseJson2) {
         if (!query) return { error: "mem_search requires args.query" };
         const maybeHost = host2;
         if (typeof maybeHost.mem === "function") {
-          return parseJson2(maybeHost.mem(JSON.stringify({ query })), { error: "host.mem returned non-JSON" });
+          return parseJson3(maybeHost.mem(JSON.stringify({ query })), { error: "host.mem returned non-JSON" });
         }
         return maybeHost.mem && maybeHost.mem.search ? maybeHost.mem.search({ query, k: 5 }) : { error: "host.mem.search unavailable" };
       }
@@ -858,7 +858,1196 @@ function createToolRuntime(host2, parseJson2) {
 }
 
 // lmstudio/prompts/watcher-orchestration.md
-var watcher_orchestration_default = '# Orchestration health watcher\n\nYou observe a **read-only snapshot** of an orchestration group (orchestrator + its managers and workers). Decide whether work is **progressing** or **stalled**. When stalled, you may request a **nudge** to the stuck pane.\n\nYou may investigate with tools when observations are insufficient, then you must finish with **ONLY the verdict JSON** as the final assistant message (no markdown fences, no prose before or after, and no tool block in the final message).\n\n## Tools\n\n**Tool discipline:** call at most ONE tool per tick, only when the snapshot is\ninsufficient. After a `tool_result` arrives, your NEXT message MUST be the\nverdict JSON \u2014 never another tool call for the same question.\n\n\nWhen the snapshot is ambiguous or missing key evidence, use at most the tools needed to clarify it. Available curated tools:\n\n- `exec`: run a shell command.\n- `read_file`: read a file.\n- `write_file`: write a file.\n- `codeterm`: run a CodeTerm command, such as `codeterm plan get` or `codeterm pane status --pane <id>`.\n- `mem_search`: search memory.\n- `spawn_agent`: start an agent only if explicitly needed for investigation.\n\nTool calls use fenced `codeterm-tool` JSON blocks. After each tool result, continue reasoning internally and either call another needed tool or finish with the verdict JSON. Use tools for facts you cannot infer reliably from `observations`, for example checking a pane\'s status or the current plan. Do not include a tool block in the final verdict message.\n\n## Input you receive each tick\n\nThe user message is JSON: `{ "state": <your prior state>, "input": { "tick", "nowMs", "state", "observations" } }`.\n\n`observations` is the host-assembled snapshot. Typical shape:\n\n```json\n{\n  "orchestrator_id": "abc123",\n  "panes": [\n    {\n      "pane_id": "abc123",\n      "title": "Orchestrator",\n      "role": "Orchestrator",\n      "status": "Working",\n      "last_activity_ms": 1700000000000\n    },\n    {\n      "pane_id": "def456",\n      "title": "Worker Alpha",\n      "role": "Worker",\n      "role_profile": null,\n      "status": "Working",\n      "last_activity_ms": 1700000005000,\n      "chatTail": [\n        { "id": "m1", "kind": "user", "content": "finish the task" },\n        { "id": "m2", "kind": "assistant", "content": "working on it\u2026" }\n      ]\n    }\n  ],\n  "reports": [\n    {\n      "id": "r1",\n      "from_pane_id": "def456",\n      "from_title": "Worker Alpha",\n      "message": "Completed step 1",\n      "timestamp": 1700000006000,\n      "status": "Done"\n    }\n  ]\n}\n```\n\nFields you care about on each pane:\n\n| Field | Meaning |\n|---|---|\n| `pane_id` | Target for nudge actions |\n| `title` | Human label |\n| `role` | `Orchestrator`, `Manager`, or `Worker` (may be absent) |\n| `role_profile` | Manager specialization (`planner`, `watcher`, \u2026) or null |\n| `status` | `Working`, `Waiting`, `Idle`, `Dead`, or `Unknown` |\n| `last_activity_ms` | Host clock when the pane last did something meaningful |\n| `chatTail` | Optional: last N parsed chat messages as `{id, kind, content}` objects |\n\nTop-level `orchestrator_id` identifies the orchestrator; the orchestrator also appears as a row in `panes[]`. `reports` is optional (when observation config enables it).\n\n## Progressing vs stalled\n\n**Progressing (`status: "ok"`)** \u2014 recent activity and forward motion:\n\n- `last_activity_ms` on key panes is within ~3 minutes of `nowMs`, **or**\n- worker/manager `status` values are advancing (e.g. `Waiting` \u2192 `Working`, `Working` with fresh `chatTail`), **or**\n- new agent reports arrive at the orchestrator with concrete progress.\n\n**Attention (`status: "attention"`)** \u2014 ambiguous or early warning:\n\n- activity is slowing but not clearly stuck yet, **or**\n- you lack enough data to judge (empty snapshot, missing tails).\n\n**Stalled (`status: "stalled"`)** \u2014 the group needs a kick:\n\n- no meaningful activity on workers for ~5+ minutes while tasks should be active, **or**\n- a worker sits on the same status with no `chatTail` movement, **or**\n- the orchestrator is `Idle` while workers are `Waiting`/`Idle` with no progress, **or**\n- unread reports pile up at the orchestrator with no follow-up.\n\nWhen stalled, emit **at most one nudge** to the most stuck pane. Nudges must be:\n\n- **Short** (1\u20132 sentences)\n- **Evidence-based** (cite what you saw: idle time, status, last `chatTail` line)\n- **Addressed to that pane** (use its `pane_id` in the action)\n\nDo not nudge watchers or the orchestrator unless the orchestrator itself is clearly idle with pending work.\n\n## State\n\nUse `state` to remember lightweight notes across ticks (e.g. `{ "last_nudged": { "def456": 1700000000000 } }`). Keep it small.\n\n## Worked example 1 \u2014 progressing (ok)\n\nObservation (abbreviated):\n\n```json\n{\n  "tick": 2,\n  "nowMs": 1700000120000,\n  "observations": {\n    "orchestrator_id": "o1",\n    "panes": [\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000110000 },\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "role_profile": null, "status": "Working", "last_activity_ms": 1700000118000 }\n    ],\n    "reports": [\n      { "id": "r1", "from_pane_id": "w1", "from_title": "Worker", "message": "Implemented tests", "timestamp": 1700000119000, "status": "Partial" }\n    ]\n  }\n}\n```\n\nYour verdict:\n\n```json\n{"status":"ok","summary":"Worker active in last minute with a progress report.","state":{"seen_ticks":2},"actions":[]}\n```\n\n## Worked example 2 \u2014 stalled worker (one nudge)\n\nObservation (abbreviated):\n\n```json\n{\n  "tick": 5,\n  "nowMs": 1700000420000,\n  "observations": {\n    "orchestrator_id": "o1",\n    "panes": [\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Idle", "last_activity_ms": 1700000200000 },\n      {\n        "pane_id": "w1",\n        "title": "Worker",\n        "role": "Worker",\n        "role_profile": null,\n        "status": "Waiting",\n        "last_activity_ms": 1700000000000,\n        "chatTail": [\n          { "id": "m1", "kind": "user", "content": "run the tests" },\n          { "id": "m2", "kind": "assistant", "content": "I\'ll get to it\u2026" }\n        ]\n      }\n    ]\n  }\n}\n```\n\nWorker `w1` has been silent ~7 minutes (`nowMs - last_activity_ms` = 420000 ms) with `status: Waiting` and no new `chatTail`.\n\nYour verdict:\n\n```json\n{"status":"stalled","summary":"Worker w1 Waiting with no activity for 7+ minutes.","state":{"seen_ticks":5,"last_nudged":{"w1":1700000420000}},"actions":[{"kind":"nudge","pane":"w1","message":"Stalled ~7m on \'run the tests\' \u2014 status Waiting, no new chat since \'I\'ll get to it\u2026\'. Please run tests and report STATUS."}]}\n```\n\n## Worked example 3 \u2014 investigate with a codeterm tool, then verdict\n\nObservation (abbreviated):\n\n```json\n{\n  "tick": 8,\n  "nowMs": 1700000600000,\n  "observations": {\n    "orchestrator_id": "o1",\n    "panes": [\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000580000 },\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "status": "Unknown", "last_activity_ms": 1700000200000 }\n    ]\n  }\n}\n```\n\nThe worker looks stale, but `status: Unknown` and missing `chatTail` are insufficient evidence. First check the pane:\n\n```codeterm-tool\n{"tool":"codeterm","args":{"args":"pane status --pane w1"}}\n```\n\nTool result (abbreviated): `{"status":"Working","last_activity_ms":1700000590000,"prompt":"running focused tests"}`\n\nYour final message:\n\n```json\n{"status":"ok","summary":"Worker w1 is active after status check and is running focused tests.","state":{"seen_ticks":8},"actions":[]}\n```\n';
+var watcher_orchestration_default = '# Orchestration health watcher\r\n\r\nYou observe a **read-only snapshot** of an orchestration group (orchestrator + its managers and workers). Decide whether work is **progressing** or **stalled**. When stalled, you may request a **nudge** to the stuck pane.\r\n\r\nYou may investigate with tools when observations are insufficient, then you must finish with **ONLY the verdict JSON** as the final assistant message (no markdown fences, no prose before or after, and no tool block in the final message).\r\n\r\n## Tools\r\n\r\n**Tool discipline:** call at most ONE tool per tick, only when the snapshot is\r\ninsufficient. After a `tool_result` arrives, your NEXT message MUST be the\r\nverdict JSON \u2014 never another tool call for the same question.\r\n\r\n\r\nWhen the snapshot is ambiguous or missing key evidence, use at most the tools needed to clarify it. Available curated tools:\r\n\r\n- `exec`: run a shell command.\r\n- `read_file`: read a file.\r\n- `write_file`: write a file.\r\n- `codeterm`: run a CodeTerm command, such as `codeterm plan get` or `codeterm pane status --pane <id>`.\r\n- `mem_search`: search memory.\r\n- `spawn_agent`: start an agent only if explicitly needed for investigation.\r\n\r\nTool calls use fenced `codeterm-tool` JSON blocks. After each tool result, continue reasoning internally and either call another needed tool or finish with the verdict JSON. Use tools for facts you cannot infer reliably from `observations`, for example checking a pane\'s status or the current plan. Do not include a tool block in the final verdict message.\r\n\r\n## Input you receive each tick\r\n\r\nThe user message is JSON: `{ "state": <your prior state>, "input": { "tick", "nowMs", "state", "observations" } }`.\r\n\r\n`observations` is the host-assembled snapshot. Typical shape:\r\n\r\n```json\r\n{\r\n  "orchestrator_id": "abc123",\r\n  "panes": [\r\n    {\r\n      "pane_id": "abc123",\r\n      "title": "Orchestrator",\r\n      "role": "Orchestrator",\r\n      "status": "Working",\r\n      "last_activity_ms": 1700000000000\r\n    },\r\n    {\r\n      "pane_id": "def456",\r\n      "title": "Worker Alpha",\r\n      "role": "Worker",\r\n      "role_profile": null,\r\n      "status": "Working",\r\n      "last_activity_ms": 1700000005000,\r\n      "chatTail": [\r\n        { "id": "m1", "kind": "user", "content": "finish the task" },\r\n        { "id": "m2", "kind": "assistant", "content": "working on it\u2026" }\r\n      ]\r\n    }\r\n  ],\r\n  "reports": [\r\n    {\r\n      "id": "r1",\r\n      "from_pane_id": "def456",\r\n      "from_title": "Worker Alpha",\r\n      "message": "Completed step 1",\r\n      "timestamp": 1700000006000,\r\n      "status": "Done"\r\n    }\r\n  ]\r\n}\r\n```\r\n\r\nFields you care about on each pane:\r\n\r\n| Field | Meaning |\r\n|---|---|\r\n| `pane_id` | Target for nudge actions |\r\n| `title` | Human label |\r\n| `role` | `Orchestrator`, `Manager`, or `Worker` (may be absent) |\r\n| `role_profile` | Manager specialization (`planner`, `watcher`, \u2026) or null |\r\n| `status` | `Working`, `Waiting`, `Idle`, `Dead`, or `Unknown` |\r\n| `last_activity_ms` | Host clock when the pane last did something meaningful |\r\n| `chatTail` | Optional: last N parsed chat messages as `{id, kind, content}` objects |\r\n\r\nTop-level `orchestrator_id` identifies the orchestrator; the orchestrator also appears as a row in `panes[]`. `reports` is optional (when observation config enables it).\r\n\r\n## Progressing vs stalled\r\n\r\n**Progressing (`status: "ok"`)** \u2014 recent activity and forward motion:\r\n\r\n- `last_activity_ms` on key panes is within ~3 minutes of `nowMs`, **or**\r\n- worker/manager `status` values are advancing (e.g. `Waiting` \u2192 `Working`, `Working` with fresh `chatTail`), **or**\r\n- new agent reports arrive at the orchestrator with concrete progress.\r\n\r\n**Attention (`status: "attention"`)** \u2014 ambiguous or early warning:\r\n\r\n- activity is slowing but not clearly stuck yet, **or**\r\n- you lack enough data to judge (empty snapshot, missing tails).\r\n\r\n**Stalled (`status: "stalled"`)** \u2014 the group needs a kick:\r\n\r\n- no meaningful activity on workers for ~5+ minutes while tasks should be active, **or**\r\n- a worker sits on the same status with no `chatTail` movement, **or**\r\n- the orchestrator is `Idle` while workers are `Waiting`/`Idle` with no progress, **or**\r\n- unread reports pile up at the orchestrator with no follow-up.\r\n\r\nWhen stalled, emit **at most one nudge** to the most stuck pane. Nudges must be:\r\n\r\n- **Short** (1\u20132 sentences)\r\n- **Evidence-based** (cite what you saw: idle time, status, last `chatTail` line)\r\n- **Addressed to that pane** (use its `pane_id` in the action)\r\n\r\nDo not nudge watchers or the orchestrator unless the orchestrator itself is clearly idle with pending work.\r\n\r\n## State\r\n\r\nUse `state` to remember lightweight notes across ticks (e.g. `{ "last_nudged": { "def456": 1700000000000 } }`). Keep it small.\r\n\r\n## Worked example 1 \u2014 progressing (ok)\r\n\r\nObservation (abbreviated):\r\n\r\n```json\r\n{\r\n  "tick": 2,\r\n  "nowMs": 1700000120000,\r\n  "observations": {\r\n    "orchestrator_id": "o1",\r\n    "panes": [\r\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000110000 },\r\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "role_profile": null, "status": "Working", "last_activity_ms": 1700000118000 }\r\n    ],\r\n    "reports": [\r\n      { "id": "r1", "from_pane_id": "w1", "from_title": "Worker", "message": "Implemented tests", "timestamp": 1700000119000, "status": "Partial" }\r\n    ]\r\n  }\r\n}\r\n```\r\n\r\nYour verdict:\r\n\r\n```json\r\n{"status":"ok","summary":"Worker active in last minute with a progress report.","state":{"seen_ticks":2},"actions":[]}\r\n```\r\n\r\n## Worked example 2 \u2014 stalled worker (one nudge)\r\n\r\nObservation (abbreviated):\r\n\r\n```json\r\n{\r\n  "tick": 5,\r\n  "nowMs": 1700000420000,\r\n  "observations": {\r\n    "orchestrator_id": "o1",\r\n    "panes": [\r\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Idle", "last_activity_ms": 1700000200000 },\r\n      {\r\n        "pane_id": "w1",\r\n        "title": "Worker",\r\n        "role": "Worker",\r\n        "role_profile": null,\r\n        "status": "Waiting",\r\n        "last_activity_ms": 1700000000000,\r\n        "chatTail": [\r\n          { "id": "m1", "kind": "user", "content": "run the tests" },\r\n          { "id": "m2", "kind": "assistant", "content": "I\'ll get to it\u2026" }\r\n        ]\r\n      }\r\n    ]\r\n  }\r\n}\r\n```\r\n\r\nWorker `w1` has been silent ~7 minutes (`nowMs - last_activity_ms` = 420000 ms) with `status: Waiting` and no new `chatTail`.\r\n\r\nYour verdict:\r\n\r\n```json\r\n{"status":"stalled","summary":"Worker w1 Waiting with no activity for 7+ minutes.","state":{"seen_ticks":5,"last_nudged":{"w1":1700000420000}},"actions":[{"kind":"nudge","pane":"w1","message":"Stalled ~7m on \'run the tests\' \u2014 status Waiting, no new chat since \'I\'ll get to it\u2026\'. Please run tests and report STATUS."}]}\r\n```\r\n\r\n## Worked example 3 \u2014 investigate with a codeterm tool, then verdict\r\n\r\nObservation (abbreviated):\r\n\r\n```json\r\n{\r\n  "tick": 8,\r\n  "nowMs": 1700000600000,\r\n  "observations": {\r\n    "orchestrator_id": "o1",\r\n    "panes": [\r\n      { "pane_id": "o1", "title": "Orch", "role": "Orchestrator", "status": "Working", "last_activity_ms": 1700000580000 },\r\n      { "pane_id": "w1", "title": "Worker", "role": "Worker", "status": "Unknown", "last_activity_ms": 1700000200000 }\r\n    ]\r\n  }\r\n}\r\n```\r\n\r\nThe worker looks stale, but `status: Unknown` and missing `chatTail` are insufficient evidence. First check the pane:\r\n\r\n```codeterm-tool\r\n{"tool":"codeterm","args":{"args":"pane status --pane w1"}}\r\n```\r\n\r\nTool result (abbreviated): `{"status":"Working","last_activity_ms":1700000590000,"prompt":"running focused tests"}`\r\n\r\nYour final message:\r\n\r\n```json\r\n{"status":"ok","summary":"Worker w1 is active after status check and is running focused tests.","state":{"seen_ticks":8},"actions":[]}\r\n```\r\n';
+
+// lmstudio/src/router/config.ts
+var LMSTUDIO_PROVIDER_ID = "lmstudio";
+var DEFAULT_LMSTUDIO_URL = "http://localhost:1234";
+var KEY_SLOTS = [
+  "lmstudio_api_key",
+  "openai_api_key",
+  "anthropic_api_key",
+  "openrouter_api_key",
+  "groq_api_key",
+  "together_api_key",
+  "deepseek_api_key",
+  "xai_api_key",
+  "mistral_api_key",
+  "gemini_api_key",
+  "mimo_api_key",
+  "litellm_api_key",
+  "custom1_api_key",
+  "custom2_api_key",
+  "custom3_api_key",
+  "custom4_api_key"
+];
+var PROVIDER_KINDS_INFO = [
+  { kind: "openai", label: "OpenAI-compatible", hint: "/models + /chat/completions \u2014 OpenRouter, Groq, Together, DeepSeek, xAI, Mistral, Ollama, vLLM, LiteLLM, custom" },
+  { kind: "anthropic", label: "Anthropic Messages", hint: "/v1/models + /v1/messages with x-api-key" },
+  { kind: "lmstudio", label: "LM Studio native", hint: "/api/v0/models with load state + stateful /api/v1/chat" }
+];
+var PROVIDER_TEMPLATES = [
+  { id: "openrouter", name: "OpenRouter", kind: "openai", baseUrl: "https://openrouter.ai/api/v1" },
+  { id: "openai", name: "OpenAI", kind: "openai", baseUrl: "https://api.openai.com/v1" },
+  { id: "anthropic", name: "Anthropic", kind: "anthropic", baseUrl: "https://api.anthropic.com" },
+  { id: "groq", name: "Groq", kind: "openai", baseUrl: "https://api.groq.com/openai/v1" },
+  { id: "together", name: "Together", kind: "openai", baseUrl: "https://api.together.xyz/v1" },
+  { id: "deepseek", name: "DeepSeek", kind: "openai", baseUrl: "https://api.deepseek.com/v1" },
+  { id: "xai", name: "xAI", kind: "openai", baseUrl: "https://api.x.ai/v1" },
+  { id: "mistral", name: "Mistral", kind: "openai", baseUrl: "https://api.mistral.ai/v1" },
+  { id: "gemini", name: "Gemini (OpenAI endpoint)", kind: "openai", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai" },
+  { id: "ollama", name: "Ollama", kind: "openai", baseUrl: "http://localhost:11434/v1" },
+  { id: "litellm", name: "LiteLLM proxy", kind: "openai", baseUrl: "http://localhost:4000/v1" }
+];
+var ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+var SECRET_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+function coerceState(raw) {
+  const obj = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const list = (v) => Array.isArray(v) ? v.filter((x) => x && typeof x === "object") : [];
+  const state = {
+    providers: list(obj.providers),
+    presets: list(obj.presets),
+    disabled: Array.isArray(obj.disabled) ? obj.disabled.filter((x) => typeof x === "string") : []
+  };
+  if (typeof obj.defaultProvider === "string" && obj.defaultProvider) state.defaultProvider = obj.defaultProvider;
+  return state;
+}
+function normalizeKind(value) {
+  if (typeof value !== "string") return null;
+  const v = value.trim().toLowerCase();
+  if (v === "openai" || v === "openai-compatible" || v === "openai_compatible" || v === "oai") return "openai";
+  if (v === "anthropic" || v === "anthropic-compatible" || v === "claude") return "anthropic";
+  if (v === "lmstudio" || v === "lm-studio" || v === "lmstudio-native") return "lmstudio";
+  return null;
+}
+function defaultKeySlot(id) {
+  return `${id}_api_key`;
+}
+function isDeclaredKeySlot(slot) {
+  return KEY_SLOTS.includes(slot);
+}
+function parseUrl(raw) {
+  const m = raw.match(/^(https?):\/\/([^/?#\s@]+)(\/[^?#\s]*)?$/i);
+  if (!m) return null;
+  return { scheme: m[1].toLowerCase(), authority: m[2], path: (m[3] || "").replace(/\/+$/, "") };
+}
+function normalizeBaseUrl(raw) {
+  if (typeof raw !== "string") return null;
+  const parsed = parseUrl(raw.trim());
+  if (!parsed) return null;
+  return `${parsed.scheme}://${parsed.authority}${parsed.path}`;
+}
+function hostOf(url) {
+  const parsed = parseUrl(url);
+  return parsed ? parsed.authority.toLowerCase() : "";
+}
+function apiRoot(provider) {
+  const parsed = parseUrl(provider.baseUrl);
+  if (!parsed) return provider.baseUrl.replace(/\/+$/, "");
+  const origin = `${parsed.scheme}://${parsed.authority}`;
+  if (provider.kind === "lmstudio") return origin + parsed.path.replace(/\/(api\/)?v\d+$/, "");
+  if (provider.kind === "anthropic") return /\/v1$/.test(parsed.path) ? origin + parsed.path : `${origin}${parsed.path}/v1`;
+  return parsed.path ? origin + parsed.path : `${origin}/v1`;
+}
+function str(v) {
+  return typeof v === "string" ? v.trim() : "";
+}
+function parseModelIds(v) {
+  const list = Array.isArray(v) ? v : typeof v === "string" ? v.split(/[,\n]/) : [];
+  const out = [];
+  for (const item of list) {
+    const id = typeof item === "string" ? item.trim() : "";
+    if (id && !out.includes(id)) out.push(id);
+  }
+  return out;
+}
+function finiteNumber(v) {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() && Number.isFinite(Number(v))) return Number(v);
+  return void 0;
+}
+function validateProvider(input, takenIds, source = "user") {
+  const errors = [];
+  const id = str(input.id).toLowerCase();
+  if (!ID_RE.test(id)) errors.push({ field: "id", message: "Use 1-32 lowercase letters, digits or dashes." });
+  else if (takenIds.includes(id)) errors.push({ field: "id", message: `A provider named ${id} already exists.` });
+  const kind = normalizeKind(input.kind);
+  if (!kind) errors.push({ field: "kind", message: "Kind must be openai, anthropic or lmstudio." });
+  const baseUrl2 = normalizeBaseUrl(input.baseUrl);
+  if (!baseUrl2) errors.push({ field: "baseUrl", message: "Enter an http(s) URL such as https://api.example.com/v1." });
+  const secretRaw = str(input.apiKeySecret);
+  const apiKeySecret = secretRaw || defaultKeySlot(id);
+  if (secretRaw && !SECRET_RE.test(apiKeySecret)) errors.push({ field: "apiKeySecret", message: "Key slot may use letters, digits, _ . -" });
+  if (errors.length) return { ok: false, errors };
+  return {
+    ok: true,
+    value: {
+      id,
+      name: str(input.name) || id,
+      kind,
+      baseUrl: baseUrl2,
+      apiKeySecret,
+      models: parseModelIds(input.models),
+      enabled: input.enabled !== false,
+      source
+    }
+  };
+}
+function validatePreset(input, takenIds, source = "user") {
+  const errors = [];
+  const id = str(input.id);
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$/.test(id)) errors.push({ field: "id", message: "Use 1-48 letters, digits, _ . -" });
+  else if (takenIds.includes(id)) errors.push({ field: "id", message: `A preset named ${id} already exists.` });
+  const temperature = finiteNumber(input.temperature);
+  if (input.temperature !== void 0 && input.temperature !== "" && (temperature === void 0 || temperature < 0 || temperature > 2)) {
+    errors.push({ field: "temperature", message: "Temperature must be between 0 and 2." });
+  }
+  const maxTokens2 = finiteNumber(input.maxTokens);
+  if (input.maxTokens !== void 0 && input.maxTokens !== "" && (maxTokens2 === void 0 || maxTokens2 < 1 || !Number.isInteger(maxTokens2))) {
+    errors.push({ field: "maxTokens", message: "Max tokens must be a positive whole number." });
+  }
+  if (input.params !== void 0 && (typeof input.params !== "object" || input.params === null || Array.isArray(input.params))) {
+    errors.push({ field: "params", message: "params must be an object." });
+  }
+  if (errors.length) return { ok: false, errors };
+  const preset = { id, name: str(input.name) || id, source };
+  const description = str(input.description);
+  if (description) preset.description = description;
+  const provider = str(input.provider).toLowerCase();
+  if (provider) preset.provider = provider;
+  const model = str(input.model);
+  if (model) preset.model = model;
+  if (temperature !== void 0) preset.temperature = temperature;
+  if (maxTokens2 !== void 0) preset.maxTokens = maxTokens2;
+  if (typeof input.systemPrompt === "string") preset.systemPrompt = input.systemPrompt;
+  if (input.params && typeof input.params === "object") preset.params = { ...input.params };
+  return { ok: true, value: preset };
+}
+function builtinLmStudio(settings2) {
+  return {
+    id: LMSTUDIO_PROVIDER_ID,
+    name: "LM Studio",
+    kind: "lmstudio",
+    baseUrl: normalizeBaseUrl(settings2.baseUrl) || DEFAULT_LMSTUDIO_URL,
+    apiKeySecret: defaultKeySlot(LMSTUDIO_PROVIDER_ID),
+    models: [],
+    enabled: true,
+    source: "builtin"
+  };
+}
+function resolveProviders(settings2, state) {
+  const issues = [];
+  const providers = [];
+  const declared = Array.isArray(settings2.providers) ? settings2.providers : [];
+  const declaresLmStudio = declared.some((p) => p && str(p.id).toLowerCase() === LMSTUDIO_PROVIDER_ID);
+  if (!declaresLmStudio) providers.push(builtinLmStudio(settings2));
+  const add = (input, source) => {
+    const result = validateProvider(input, providers.map((p) => p.id), source);
+    if (result.ok) providers.push(result.value);
+    else issues.push(`provider ${str(input && input.id) || "?"}: ${result.errors.map((e) => e.message).join(" ")}`);
+  };
+  for (const input of declared) add(input, "config");
+  for (const input of state.providers) add(input, "user");
+  for (const p of providers) if (state.disabled.includes(p.id)) p.enabled = false;
+  return { providers, issues };
+}
+function resolvePresets(settings2, state) {
+  const presets2 = [];
+  const add = (input, source) => {
+    const result = validatePreset(input, presets2.map((p) => p.id), source);
+    if (result.ok) presets2.push(result.value);
+  };
+  if (Array.isArray(settings2.presets)) {
+    for (const p of settings2.presets) if (p) add(p, "config");
+  }
+  for (const p of state.presets) add(p, "user");
+  return presets2;
+}
+function defaultProviderId(settings2, state, providers) {
+  const wanted = [state.defaultProvider, str(settings2.defaultProvider), LMSTUDIO_PROVIDER_ID];
+  for (const id of wanted) {
+    if (id && providers.some((p) => p.id === id && p.enabled)) return id;
+  }
+  const first = providers.find((p) => p.enabled);
+  return first ? first.id : LMSTUDIO_PROVIDER_ID;
+}
+function keyRequired(provider) {
+  if (provider.kind === "anthropic") return true;
+  if (provider.kind === "lmstudio") return false;
+  const host2 = hostOf(provider.baseUrl).replace(/:\d+$/, "");
+  return !(host2 === "localhost" || host2 === "127.0.0.1" || host2 === "[::1]" || /\.(local|ts\.net)$/.test(host2) || /^(10|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(host2));
+}
+
+// lmstudio/src/router/adapters.ts
+var ANTHROPIC_VERSION = "2023-06-01";
+var ANTHROPIC_DEFAULT_MAX_TOKENS = 4096;
+var DISCOVERY_TIMEOUT_MS = 8e3;
+var CHAT_TIMEOUT_MS = 12e4;
+function authHeaders(provider, key) {
+  const headers = { "content-type": "application/json" };
+  if (provider.kind === "anthropic") {
+    headers["anthropic-version"] = ANTHROPIC_VERSION;
+    if (key) headers["x-api-key"] = key;
+  } else if (key) {
+    headers.authorization = `Bearer ${key}`;
+  }
+  return headers;
+}
+function modelsRequests(provider, key) {
+  const root = apiRoot(provider);
+  const headers = authHeaders(provider, key);
+  const get = (url) => ({ url, method: "GET", headers, timeoutMs: DISCOVERY_TIMEOUT_MS });
+  if (provider.kind === "lmstudio") return [get(`${root}/api/v0/models`), get(`${root}/api/v1/models`), get(`${root}/v1/models`)];
+  return [get(`${root}/models`)];
+}
+function normalizeTurns(turns) {
+  const out = [];
+  for (const t of turns) {
+    if (!t.content) continue;
+    const last = out[out.length - 1];
+    if (last && last.role === t.role) last.content = `${last.content}
+
+${t.content}`;
+    else out.push({ role: t.role, content: t.content });
+  }
+  while (out.length && out[0].role !== "user") out.shift();
+  return out;
+}
+function cacheBreakpoints(hasSystem, turns) {
+  let newestUser = -1;
+  for (let i = turns.length - 1; i >= 0; i -= 1) {
+    if (turns[i].role === "user") {
+      newestUser = i;
+      break;
+    }
+  }
+  return { system: hasSystem, messageIndex: newestUser > 0 ? newestUser - 1 : -1 };
+}
+var EPHEMERAL = { type: "ephemeral" };
+function anthropicBody(req) {
+  const turns = normalizeTurns(req.turns);
+  const plan = cacheBreakpoints(!!req.system, turns);
+  const messages2 = turns.map((t, i) => ({
+    role: t.role,
+    content: [i === plan.messageIndex ? { type: "text", text: t.content, cache_control: EPHEMERAL } : { type: "text", text: t.content }]
+  }));
+  const { max_tokens: maxTokens2, ...rest } = req.params;
+  const body = {
+    ...rest,
+    model: req.model,
+    max_tokens: typeof maxTokens2 === "number" && maxTokens2 > 0 ? maxTokens2 : ANTHROPIC_DEFAULT_MAX_TOKENS,
+    messages: messages2,
+    stream: true
+  };
+  if (req.system) body.system = [{ type: "text", text: req.system, cache_control: EPHEMERAL }];
+  return body;
+}
+function openAiBody(req) {
+  const messages2 = [];
+  if (req.system) messages2.push({ role: "system", content: req.system });
+  for (const t of normalizeTurns(req.turns)) messages2.push({ role: t.role, content: t.content });
+  return {
+    ...req.params,
+    model: req.model,
+    messages: messages2,
+    stream: true,
+    stream_options: { include_usage: true }
+  };
+}
+function chatRequest(provider, key, req) {
+  const root = apiRoot(provider);
+  const headers = authHeaders(provider, key);
+  if (provider.kind === "anthropic") {
+    return { url: `${root}/messages`, method: "POST", headers, body: JSON.stringify(anthropicBody(req)), timeoutMs: CHAT_TIMEOUT_MS };
+  }
+  return { url: `${root}/chat/completions`, method: "POST", headers, body: JSON.stringify(openAiBody(req)), timeoutMs: CHAT_TIMEOUT_MS };
+}
+function splitSse(buffer, flush) {
+  const segments = buffer.split(/\r?\n\r?\n/);
+  const rest = flush ? "" : segments.pop() ?? "";
+  const events = [];
+  for (const seg of segments) {
+    let event = "";
+    let data = "";
+    for (const line of seg.split(/\r?\n/)) {
+      if (line.indexOf("event:") === 0) event = line.slice(6).trim();
+      else if (line.indexOf("data:") === 0) {
+        let v = line.slice(5);
+        if (v.charAt(0) === " ") v = v.slice(1);
+        data += data ? `
+${v}` : v;
+      }
+    }
+    if (data || event) events.push({ event, data });
+  }
+  return { events, rest };
+}
+function n(v) {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+}
+function emptyDelta() {
+  return { content: "", reasoning: "", usage: null, responseId: null, error: null };
+}
+function openAiUsage(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const u = raw;
+  const details = u.prompt_tokens_details && typeof u.prompt_tokens_details === "object" ? u.prompt_tokens_details : {};
+  const input = n(u.prompt_tokens) || n(u.input_tokens);
+  const cached = n(details.cached_tokens) || n(u.prompt_cache_hit_tokens) || n(u.cached_tokens);
+  const output = n(u.completion_tokens) || n(u.output_tokens);
+  if (!input && !output) return null;
+  return { input, cachedInput: Math.min(cached, input || cached), cacheWrite: 0, output };
+}
+function anthropicUsage(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const u = raw;
+  const read = n(u.cache_read_input_tokens);
+  const write = n(u.cache_creation_input_tokens);
+  const input = n(u.input_tokens) + read + write;
+  const output = n(u.output_tokens);
+  if (!input && !output) return null;
+  return { input, cachedInput: read, cacheWrite: write, output };
+}
+function mergeUsage(prev, next) {
+  if (!next) return prev;
+  if (!prev) return next;
+  return {
+    input: next.input || prev.input,
+    cachedInput: next.cachedInput || prev.cachedInput,
+    cacheWrite: next.cacheWrite || prev.cacheWrite,
+    output: next.output || prev.output
+  };
+}
+function errorMessage(raw) {
+  if (!raw) return null;
+  if (typeof raw === "string") return raw;
+  if (typeof raw === "object") {
+    const o = raw;
+    if (typeof o.message === "string") return o.message;
+    if (o.error) return errorMessage(o.error);
+  }
+  return null;
+}
+function applyOpenAiEvent(acc, ev) {
+  if (!ev.data || ev.data === "[DONE]") return;
+  let data;
+  try {
+    data = JSON.parse(ev.data);
+  } catch {
+    return;
+  }
+  if (data.error) {
+    acc.error = errorMessage(data.error) || "stream error";
+    return;
+  }
+  if (typeof data.id === "string" && !acc.responseId) acc.responseId = data.id;
+  const choices = Array.isArray(data.choices) ? data.choices : [];
+  for (const c of choices) {
+    const delta = c && typeof c.delta === "object" && c.delta ? c.delta : c && typeof c.message === "object" && c.message ? c.message : {};
+    if (typeof delta.content === "string") acc.content += delta.content;
+    const reasoning = typeof delta.reasoning_content === "string" ? delta.reasoning_content : typeof delta.reasoning === "string" ? delta.reasoning : "";
+    if (reasoning) acc.reasoning += reasoning;
+  }
+  acc.usage = mergeUsage(acc.usage, openAiUsage(data.usage));
+}
+function applyAnthropicEvent(acc, ev) {
+  if (!ev.data) return;
+  let data;
+  try {
+    data = JSON.parse(ev.data);
+  } catch {
+    return;
+  }
+  const type = typeof data.type === "string" ? data.type : ev.event;
+  if (type === "error") {
+    acc.error = errorMessage(data.error) || "stream error";
+  } else if (type === "message_start" && data.message && typeof data.message === "object") {
+    const message = data.message;
+    if (typeof message.id === "string") acc.responseId = message.id;
+    acc.usage = mergeUsage(acc.usage, anthropicUsage(message.usage));
+  } else if (type === "content_block_delta" && data.delta && typeof data.delta === "object") {
+    const delta = data.delta;
+    if (typeof delta.text === "string") acc.content += delta.text;
+    else if (typeof delta.thinking === "string") acc.reasoning += delta.thinking;
+  } else if (type === "message_delta" && data.usage && typeof data.usage === "object") {
+    const u = data.usage;
+    const prev = acc.usage || { input: 0, cachedInput: 0, cacheWrite: 0, output: 0 };
+    const read = n(u.cache_read_input_tokens) || prev.cachedInput;
+    const write = n(u.cache_creation_input_tokens) || prev.cacheWrite;
+    const input = n(u.input_tokens) ? n(u.input_tokens) + read + write : prev.input;
+    acc.usage = { input, cachedInput: read, cacheWrite: write, output: n(u.output_tokens) || prev.output };
+  }
+}
+function applyWholeBody(kind, acc, body) {
+  let data;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    return false;
+  }
+  if (!data || typeof data !== "object") return false;
+  if (kind === "anthropic" && Array.isArray(data.content)) {
+    for (const block of data.content) {
+      if (block && block.type === "text" && typeof block.text === "string") acc.content += block.text;
+      if (block && block.type === "thinking" && typeof block.thinking === "string") acc.reasoning += block.thinking;
+    }
+    if (typeof data.id === "string") acc.responseId = data.id;
+    acc.usage = anthropicUsage(data.usage) || acc.usage;
+    return true;
+  }
+  if (Array.isArray(data.choices)) {
+    applyOpenAiEvent(acc, { event: "", data: body });
+    return true;
+  }
+  return false;
+}
+function groupDigits(value) {
+  const s2 = String(Math.round(value));
+  return s2.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+function formatUsage(u) {
+  const fresh = Math.max(0, u.input - u.cachedInput);
+  const parts = [`${groupDigits(u.input)} in`];
+  if (u.cachedInput || u.cacheWrite) {
+    parts.push(`${groupDigits(u.cachedInput)} cached`, `${groupDigits(fresh)} fresh`);
+    if (u.cacheWrite) parts.push(`${groupDigits(u.cacheWrite)} cache write`);
+  }
+  parts.push(`${groupDigits(u.output)} out`);
+  return parts.join(" \xB7 ");
+}
+function snippet(body) {
+  if (!body) return "";
+  let text = body;
+  try {
+    text = errorMessage(JSON.parse(body)) || body;
+  } catch {
+  }
+  if (/<\/?[a-z][^>]*>/i.test(text)) text = text.replace(/<title>[\s\S]*?<\/title>/i, "").replace(/<[^>]+>/g, " ");
+  text = text.replace(/\s+/g, " ").trim();
+  return text.length > 200 ? `${text.slice(0, 197)}\u2026` : text;
+}
+function classifyFetch(url, res) {
+  if (res.error) {
+    const e = res.error;
+    if (/denied/i.test(e)) {
+      return { kind: "denied", message: `CodeTerm blocks ${hostOf(url)}. Grant it: codeterm plugin settings lmstudio --allow-host ${hostOf(url)}` };
+    }
+    if (/time(d)?\s*out|timeout|deadline/i.test(e)) return { kind: "timeout", message: `${hostOf(url)} did not answer in time.` };
+    return { kind: "unreachable", message: `Cannot reach ${hostOf(url)}: ${snippet(e)}` };
+  }
+  const status = res.status || 0;
+  if (status >= 200 && status < 300) return null;
+  const detail = snippet(res.body);
+  if (status === 401 || status === 403) return { kind: "auth", status, message: `Key rejected (HTTP ${status})${detail ? `: ${detail}` : ""}` };
+  if (status === 404) return { kind: "not_found", status, message: `Endpoint not found (HTTP 404)${detail ? `: ${detail}` : ""}` };
+  return { kind: "http", status, message: `HTTP ${status || "?"}${detail ? `: ${detail}` : ""}` };
+}
+function redact(text, key) {
+  if (!key || key.length < 4) return text;
+  return text.split(key).join("[redacted]");
+}
+
+// lmstudio/src/router/models.ts
+function rows(body) {
+  if (Array.isArray(body)) return body.filter((r) => !!r && typeof r === "object");
+  if (!body || typeof body !== "object") return [];
+  const obj = body;
+  for (const key of ["data", "models"]) {
+    const list = obj[key];
+    if (Array.isArray(list)) return list.filter((r) => !!r && typeof r === "object");
+  }
+  return [];
+}
+function num(v) {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : void 0;
+}
+function strList(v) {
+  return Array.isArray(v) ? v.filter((x) => typeof x === "string").map((x) => x.toLowerCase()) : [];
+}
+function capabilities(row) {
+  const caps = {};
+  const topProvider = row.top_provider && typeof row.top_provider === "object" ? row.top_provider : {};
+  const ctx = num(row.context_length) ?? num(row.context_window) ?? num(row.max_context_length) ?? num(row.max_input_tokens) ?? num(topProvider.context_length);
+  if (ctx) caps.contextLength = ctx;
+  const arch = row.architecture && typeof row.architecture === "object" ? row.architecture : {};
+  const inputModalities = strList(arch.input_modalities).concat(strList(row.input_modalities), strList(row.modalities));
+  const capObj = row.capabilities && typeof row.capabilities === "object" && !Array.isArray(row.capabilities) ? row.capabilities : null;
+  const capList = strList(row.capabilities);
+  const params = strList(row.supported_parameters);
+  if (inputModalities.includes("image") || row.type === "vlm" || row.vision === true || capObj && (capObj.vision === true || capObj.image_input === true) || capList.includes("vision")) caps.vision = true;
+  if (params.includes("tools") || params.includes("tool_choice") || capList.includes("tool_use") || capList.includes("tools") || row.trained_for_tool_use === true || capObj && (capObj.function_calling === true || capObj.tool_use === true || capObj.tools === true)) caps.tools = true;
+  if (params.includes("reasoning") || params.includes("include_reasoning") || capList.includes("reasoning") || capObj && (capObj.reasoning === true || capObj.thinking === true)) {
+    caps.reasoning = true;
+  }
+  return caps;
+}
+function isEmbedding(row, id) {
+  return row.type === "embeddings" || row.type === "embedding" || /(^|[-_/])embed/i.test(id);
+}
+function parseModelList2(providerId, body) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const row of rows(body)) {
+    const id = typeof row.id === "string" ? row.id : typeof row.key === "string" ? row.key : "";
+    if (!id || seen.has(id) || isEmbedding(row, id)) continue;
+    seen.add(id);
+    const displayName = typeof row.display_name === "string" && row.display_name.trim() ? row.display_name.trim() : typeof row.name === "string" && row.name.trim() ? row.name.trim() : id;
+    const model = { providerId, id, displayName, capabilities: capabilities(row) };
+    if (row.state === "loaded" || Array.isArray(row.loaded_instances) && row.loaded_instances.length > 0) model.loaded = true;
+    else if (row.state === "not-loaded" || Array.isArray(row.loaded_instances)) model.loaded = false;
+    out.push(model);
+  }
+  return out;
+}
+function formatContext(tokens) {
+  if (tokens >= 1e6) return `${+(tokens / 1e6).toFixed(tokens % 1e6 ? 1 : 0)}M`;
+  if (tokens >= 1e3) return `${Math.round(tokens / 1e3)}k`;
+  return String(tokens);
+}
+function capabilityBadges(caps) {
+  const out = [];
+  if (caps.contextLength) out.push(formatContext(caps.contextLength));
+  if (caps.vision) out.push("vision");
+  if (caps.tools) out.push("tools");
+  if (caps.reasoning) out.push("reasoning");
+  return out;
+}
+function fold(s2) {
+  return s2.toLowerCase();
+}
+function matchScore(model, providerName, query) {
+  const tokens = fold(query).split(/\s+/).filter(Boolean);
+  if (!tokens.length) return 1;
+  const id = fold(model.id);
+  const name = fold(model.displayName);
+  const hay = `${id} ${name} ${fold(providerName)} ${fold(model.providerId)} ${capabilityBadges(model.capabilities).join(" ")}`;
+  let score2 = 0;
+  for (const t of tokens) {
+    if (!hay.includes(t)) return 0;
+    if (id === t || name === t) score2 += 100;
+    else if (id.startsWith(t) || name.startsWith(t) || id.includes(`/${t}`)) score2 += 40;
+    else if (id.includes(t) || name.includes(t)) score2 += 20;
+    else score2 += 5;
+  }
+  return score2;
+}
+function groupAndSearch(providers, models, query) {
+  const q = query.trim();
+  return providers.map((provider) => {
+    const own = models.filter((m) => m.providerId === provider.id);
+    if (!q) return { provider, models: own, total: own.length };
+    const ranked = own.map((m, i) => ({ m, i, s: matchScore(m, provider.name, q) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.m);
+    return { provider, models: ranked, total: own.length };
+  });
+}
+
+// lmstudio/src/router/routing.ts
+var MODEL_SEPARATOR = "::";
+function qualifyModel(providerId, model) {
+  if (!model) return "";
+  return providerId === LMSTUDIO_PROVIDER_ID ? model : `${providerId}${MODEL_SEPARATOR}${model}`;
+}
+function splitModelId(raw) {
+  const value = raw.trim();
+  const at = value.indexOf(MODEL_SEPARATOR);
+  if (at <= 0) return { providerId: null, model: value };
+  return { providerId: value.slice(0, at).toLowerCase(), model: value.slice(at + MODEL_SEPARATOR.length) };
+}
+function bareProvider(providers, defaultProvider) {
+  return providers.find((p) => p.id === LMSTUDIO_PROVIDER_ID && p.enabled) || providers.find((p) => p.id === defaultProvider && p.enabled) || providers.find((p) => p.enabled) || null;
+}
+function resolveModelTarget(raw, providers, defaultProvider, presetProvider) {
+  const { providerId, model } = splitModelId(raw);
+  if (providerId) {
+    const provider2 = providers.find((p) => p.id === providerId) || null;
+    if (!provider2) return { provider: null, model, error: `unknown provider "${providerId}"` };
+    if (!provider2.enabled) return { provider: null, model, error: `provider "${providerId}" is disabled` };
+    return { provider: provider2, model };
+  }
+  if (presetProvider) {
+    const provider2 = providers.find((p) => p.id === presetProvider) || null;
+    if (!provider2) return { provider: null, model, error: `unknown provider "${presetProvider}"` };
+    if (!provider2.enabled) return { provider: null, model, error: `provider "${presetProvider}" is disabled` };
+    return { provider: provider2, model };
+  }
+  const provider = bareProvider(providers, defaultProvider);
+  return provider ? { provider, model } : { provider: null, model, error: "no enabled provider" };
+}
+function presetModelId(preset) {
+  const model = (preset.model || "").trim();
+  if (!model) return "";
+  if (splitModelId(model).providerId) return model;
+  return preset.provider ? qualifyModel(preset.provider, model) : model;
+}
+function presetParams(preset) {
+  if (!preset) return {};
+  const params = { ...preset.params || {} };
+  if (preset.temperature !== void 0) params.temperature = preset.temperature;
+  if (preset.maxTokens !== void 0) params.max_tokens = preset.maxTokens;
+  return params;
+}
+
+// lmstudio/src/router/store.ts
+var STATE_REL = ".codeterm/plugins/lmstudio/router.json";
+var MODEL_CACHE_REL = ".codeterm/plugins/lmstudio/router-models.json";
+var REMOTE_MODEL_TTL_MS = 10 * 60 * 1e3;
+var LOCAL_MODEL_TTL_MS = 15 * 1e3;
+var FAILURE_TTL_MS = 60 * 1e3;
+function configuredModels(provider) {
+  return provider.models.map((id) => ({ providerId: provider.id, id, displayName: id, capabilities: {} }));
+}
+var memCache = null;
+function parseJson(raw, fallback) {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+function dataPath(rel) {
+  try {
+    const viaFs = host.fs && typeof host.fs.expandHome === "function" ? host.fs.expandHome(`~/${rel}`) : null;
+    if (viaFs) return viaFs;
+    const viaHost = typeof host.expandHome === "function" ? host.expandHome(`~/${rel}`) : null;
+    if (viaHost) return viaHost;
+    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
+    return home ? `${home.replace(/\/+$/, "")}/${rel}` : null;
+  } catch {
+    return null;
+  }
+}
+function writeJsonFile(rel, value) {
+  const path = dataPath(rel);
+  if (!path) return false;
+  try {
+    const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
+    const text = JSON.stringify(value, null, 2);
+    return typeof host.writeFileAtomic === "function" ? host.writeFileAtomic(path, text) : host.writeFile(path, text);
+  } catch {
+    return false;
+  }
+}
+function readJsonFile(rel) {
+  const path = dataPath(rel);
+  if (!path) return null;
+  try {
+    return parseJson(host.readFile(path), null);
+  } catch {
+    return null;
+  }
+}
+function readSettings() {
+  const raw = parseJson(host.settingsJson ? host.settingsJson() : "{}", {});
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+}
+function readState() {
+  return coerceState(readJsonFile(STATE_REL));
+}
+function writeState(state) {
+  return writeJsonFile(STATE_REL, state);
+}
+function snapshot() {
+  const settings2 = readSettings();
+  const state = readState();
+  const { providers, issues } = resolveProviders(settings2, state);
+  return {
+    settings: settings2,
+    state,
+    providers,
+    presets: resolvePresets(settings2, state),
+    defaultProvider: defaultProviderId(settings2, state, providers),
+    issues
+  };
+}
+function secretsAvailable() {
+  return typeof host.secretGet === "function";
+}
+function getKey(provider) {
+  if (!secretsAvailable()) return null;
+  try {
+    const value = host.secretGet(provider.apiKeySecret);
+    return value && value.trim() ? value.trim() : null;
+  } catch {
+    return null;
+  }
+}
+function hasKey(provider) {
+  return !!getKey(provider);
+}
+function setKey(slot, value) {
+  if (typeof host.secretSet !== "function") return false;
+  try {
+    return host.secretSet(slot, value);
+  } catch {
+    return false;
+  }
+}
+function deleteKey(slot) {
+  if (typeof host.secretDelete !== "function") return false;
+  try {
+    return host.secretDelete(slot);
+  } catch {
+    return false;
+  }
+}
+function fetchSync(req) {
+  try {
+    return parseJson(host.fetch(JSON.stringify(req)), { error: "fetch returned non-JSON" });
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+function cache() {
+  if (!memCache) {
+    const stored = readJsonFile(MODEL_CACHE_REL);
+    memCache = stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+  }
+  return memCache;
+}
+function persistCache() {
+  const entries = cache();
+  const durable = {};
+  for (const id of Object.keys(entries)) if (!entries[id].error) durable[id] = entries[id];
+  writeJsonFile(MODEL_CACHE_REL, durable);
+}
+function invalidateModels(providerId) {
+  delete cache()[providerId];
+}
+function resetModelCache() {
+  memCache = {};
+}
+function cachedModels(provider) {
+  const entry = cache()[provider.id];
+  return entry && entry.baseUrl === provider.baseUrl ? entry : null;
+}
+function ttl(provider) {
+  return provider.kind === "lmstudio" ? LOCAL_MODEL_TTL_MS : REMOTE_MODEL_TTL_MS;
+}
+function now() {
+  try {
+    return typeof host.unixNowMs === "function" ? host.unixNowMs() : Date.now();
+  } catch {
+    return Date.now();
+  }
+}
+function discoverModels(provider, opts) {
+  const existing = cachedModels(provider);
+  const reusable = existing && !(existing.error && existing.error.kind === "key_missing");
+  if (!opts?.force && existing && reusable && now() - existing.at < (existing.error ? FAILURE_TTL_MS : ttl(provider))) return existing;
+  const key = getKey(provider);
+  let entry;
+  if (!key && keyRequired(provider)) {
+    entry = {
+      at: now(),
+      baseUrl: provider.baseUrl,
+      models: existing ? existing.models : [],
+      error: { kind: "key_missing", message: `No API key in slot ${provider.apiKeySecret}.` }
+    };
+  } else {
+    entry = { at: now(), baseUrl: provider.baseUrl, models: [], error: { kind: "unreachable", message: "no model endpoint answered" } };
+    for (const req of modelsRequests(provider, key)) {
+      const res = fetchSync(req);
+      const failure = classifyFetch(req.url, res);
+      if (failure) {
+        entry.error = failure;
+        if (failure.kind === "not_found") continue;
+        break;
+      }
+      const body = parseJson(res.body, void 0);
+      if (body === void 0) {
+        entry.error = { kind: "parse", message: "The model list was not JSON." };
+        continue;
+      }
+      entry.models = parseModelList2(provider.id, body);
+      entry.error = null;
+      break;
+    }
+    if (entry.error && entry.error.kind === "not_found" && provider.models.length) {
+      entry.models = configuredModels(provider);
+      entry.error = null;
+      entry.configured = true;
+    } else if (entry.error && existing) entry.models = existing.models;
+  }
+  cache()[provider.id] = entry;
+  persistCache();
+  return entry;
+}
+function statusFromEntry(provider, entry) {
+  if (!provider.enabled) return { state: "disabled", message: "Disabled", modelCount: entry ? entry.models.length : 0, checkedAt: entry ? entry.at : null };
+  if (!entry) {
+    if (keyRequired(provider) && !hasKey(provider)) return { state: "key_missing", message: `No API key in slot ${provider.apiKeySecret}.`, modelCount: 0, checkedAt: null };
+    return { state: "unchecked", message: "Not checked yet", modelCount: 0, checkedAt: null };
+  }
+  const count = entry.models.length;
+  if (!entry.error) {
+    const message = entry.configured ? `No model listing here; using ${count} configured model${count === 1 ? "" : "s"}` : `${count} model${count === 1 ? "" : "s"}`;
+    return { state: "connected", message, modelCount: count, checkedAt: entry.at };
+  }
+  const kind = entry.error.kind;
+  const state = kind === "key_missing" ? "key_missing" : kind === "auth" ? "auth" : kind === "denied" ? "denied" : kind === "unreachable" || kind === "timeout" ? "unreachable" : "error";
+  return { state, message: entry.error.message, modelCount: count, checkedAt: entry.at };
+}
+
+// lmstudio/src/router/manage.ts
+function fail(error, fieldErrors) {
+  return fieldErrors ? { ok: false, error, fieldErrors } : { ok: false, error };
+}
+function providerView(p, defaultProvider) {
+  return {
+    id: p.id,
+    name: p.name,
+    kind: p.kind,
+    baseUrl: p.baseUrl,
+    host: hostOf(p.baseUrl),
+    apiKeySecret: p.apiKeySecret,
+    models: p.models,
+    keySlotDeclared: isDeclaredKeySlot(p.apiKeySecret),
+    hasKey: hasKey(p),
+    enabled: p.enabled,
+    source: p.source,
+    isDefault: p.id === defaultProvider,
+    status: statusFromEntry(p, cachedModels(p))
+  };
+}
+function listProviders() {
+  const snap = snapshot();
+  return {
+    providers: snap.providers.map((p) => providerView(p, snap.defaultProvider)),
+    defaultProvider: snap.defaultProvider,
+    issues: snap.issues
+  };
+}
+function stripUserProvider(input) {
+  const out = { id: input.id, name: input.name, kind: input.kind, baseUrl: input.baseUrl };
+  if (input.apiKeySecret) out.apiKeySecret = input.apiKeySecret;
+  if (Array.isArray(input.models) && input.models.length) out.models = input.models;
+  return out;
+}
+function addProvider(input) {
+  const snap = snapshot();
+  const result = validateProvider(input, snap.providers.map((p2) => p2.id));
+  if (!result.ok) return fail(result.errors.map((e) => e.message).join(" "), result.errors);
+  const p = result.value;
+  snap.state.providers.push(stripUserProvider({ id: p.id, name: p.name, kind: p.kind, baseUrl: p.baseUrl, apiKeySecret: p.apiKeySecret, models: p.models }));
+  if (!writeState(snap.state)) return fail("Could not save the provider list.");
+  return { ok: true, provider: providerView(p, snap.defaultProvider) };
+}
+function updateProvider(id, input) {
+  const snap = snapshot();
+  const existing = snap.providers.find((p2) => p2.id === id);
+  if (!existing) return fail(`Unknown provider ${id}.`);
+  if (existing.source !== "user") return fail(`${existing.name} is defined in config.yaml; edit it there.`);
+  const merged = { ...existing, ...input, id };
+  const result = validateProvider(merged, snap.providers.filter((p2) => p2.id !== id).map((p2) => p2.id));
+  if (!result.ok) return fail(result.errors.map((e) => e.message).join(" "), result.errors);
+  const p = result.value;
+  snap.state.providers = snap.state.providers.map(
+    (raw) => String(raw.id || "").toLowerCase() === id ? stripUserProvider({ id, name: p.name, kind: p.kind, baseUrl: p.baseUrl, apiKeySecret: p.apiKeySecret, models: p.models }) : raw
+  );
+  if (!writeState(snap.state)) return fail("Could not save the provider list.");
+  invalidateModels(id);
+  return { ok: true, provider: providerView({ ...p, enabled: existing.enabled }, snap.defaultProvider) };
+}
+function removeProvider(id) {
+  const snap = snapshot();
+  const existing = snap.providers.find((p) => p.id === id);
+  if (!existing) return fail(`Unknown provider ${id}.`);
+  if (existing.source !== "user") return fail(`${existing.name} is ${existing.source === "builtin" ? "built in; disable it instead" : "defined in config.yaml"}.`);
+  snap.state.providers = snap.state.providers.filter((raw) => String(raw.id || "").toLowerCase() !== id);
+  snap.state.disabled = snap.state.disabled.filter((d) => d !== id);
+  snap.state.presets = snap.state.presets.filter((raw) => String(raw.provider || "").toLowerCase() !== id);
+  if (snap.state.defaultProvider === id) delete snap.state.defaultProvider;
+  if (!writeState(snap.state)) return fail("Could not save the provider list.");
+  return { ok: true };
+}
+function setProviderEnabled(id, enabled) {
+  const snap = snapshot();
+  if (!snap.providers.some((p) => p.id === id)) return fail(`Unknown provider ${id}.`);
+  const others = snap.state.disabled.filter((d) => d !== id);
+  snap.state.disabled = enabled ? others : others.concat(id);
+  return writeState(snap.state) ? { ok: true } : fail("Could not save the provider list.");
+}
+function setDefaultProvider(id) {
+  const snap = snapshot();
+  if (!snap.providers.some((p) => p.id === id && p.enabled)) return fail(`Unknown or disabled provider ${id}.`);
+  snap.state.defaultProvider = id;
+  return writeState(snap.state) ? { ok: true } : fail("Could not save the provider list.");
+}
+function setProviderKey(id, key) {
+  const snap = snapshot();
+  const p = snap.providers.find((x) => x.id === id);
+  if (!p) return fail(`Unknown provider ${id}.`);
+  const value = typeof key === "string" ? key.trim() : "";
+  if (!value) return fail("Paste a key first.");
+  if (/\s/.test(value)) return fail("A key cannot contain spaces or line breaks.");
+  if (!setKey(p.apiKeySecret, value)) return fail("The plugin secret store is unavailable (grant the secrets permission).");
+  for (const other of snap.providers) if (other.apiKeySecret === p.apiKeySecret) invalidateModels(other.id);
+  return { ok: true };
+}
+function clearProviderKey(id) {
+  const snap = snapshot();
+  const p = snap.providers.find((x) => x.id === id);
+  if (!p) return fail(`Unknown provider ${id}.`);
+  deleteKey(p.apiKeySecret);
+  for (const other of snap.providers) if (other.apiKeySecret === p.apiKeySecret) invalidateModels(other.id);
+  return { ok: true };
+}
+function testProvider(id) {
+  const snap = snapshot();
+  const p = snap.providers.find((x) => x.id === id);
+  if (!p) return fail(`Unknown provider ${id}.`);
+  discoverModels(p, { force: true });
+  return { ok: true, provider: providerView(p, snap.defaultProvider) };
+}
+function modelView(m) {
+  const view = {
+    id: qualifyModel(m.providerId, m.id),
+    model: m.id,
+    displayName: m.displayName,
+    providerId: m.providerId,
+    badges: capabilityBadges(m.capabilities)
+  };
+  if (m.loaded !== void 0) view.loaded = m.loaded;
+  return view;
+}
+function modelSections(opts) {
+  const snap = snapshot();
+  const targets = snap.providers.filter((p) => p.enabled && (!opts.provider || p.id === opts.provider));
+  const all = [];
+  const statuses = {};
+  for (const p of targets) {
+    const entry = discoverModels(p, { force: !!opts.refresh });
+    all.push(...entry.models);
+    statuses[p.id] = statusFromEntry(p, entry);
+  }
+  return groupAndSearch(targets, all, opts.query || "").map((s2) => ({
+    providerId: s2.provider.id,
+    providerName: s2.provider.name,
+    kind: s2.provider.kind,
+    total: s2.total,
+    models: s2.models.map(modelView),
+    status: statuses[s2.provider.id]
+  }));
+}
+function listPresetViews() {
+  return snapshot().presets;
+}
+function savePreset(input, opts) {
+  const snap = snapshot();
+  const id = typeof input.id === "string" ? input.id.trim() : "";
+  const existing = snap.presets.find((p) => p.id === id);
+  if (existing && existing.source !== "user") return fail(`Preset ${id} is defined in config.yaml; edit it there.`);
+  if (existing && !opts?.replace) return fail(`A preset named ${id} already exists.`, [{ field: "id", message: `A preset named ${id} already exists.` }]);
+  const taken = snap.presets.filter((p) => p.id !== id).map((p) => p.id);
+  const result = validatePreset(input, taken);
+  if (!result.ok) return fail(result.errors.map((e) => e.message).join(" "), result.errors);
+  const preset = result.value;
+  if (preset.provider && !snap.providers.some((p) => p.id === preset.provider)) {
+    return fail(`Unknown provider ${preset.provider}.`, [{ field: "provider", message: `Unknown provider ${preset.provider}.` }]);
+  }
+  const { source: _source, ...stored } = preset;
+  void _source;
+  snap.state.presets = snap.state.presets.filter((raw) => raw.id !== id).concat(stored);
+  if (!writeState(snap.state)) return fail("Could not save presets.");
+  return { ok: true, preset };
+}
+function removePreset(id) {
+  const snap = snapshot();
+  const existing = snap.presets.find((p) => p.id === id);
+  if (!existing) return fail(`Unknown preset ${id}.`);
+  if (existing.source !== "user") return fail(`Preset ${id} is defined in config.yaml.`);
+  snap.state.presets = snap.state.presets.filter((raw) => raw.id !== id);
+  return writeState(snap.state) ? { ok: true } : fail("Could not save presets.");
+}
+
+// lmstudio/src/router/verbs.ts
+var AGENT_VERBS = [
+  "providers",
+  "add-provider <id> <openai|anthropic|lmstudio> <baseUrl> [--name NAME] [--key-slot SLOT] [--models id1,id2]",
+  "remove-provider <id>",
+  "test-provider <id>",
+  "set-default <provider>",
+  "models [provider] [query] [--refresh]",
+  "presets",
+  "add-preset <id> <provider::model> [--name NAME] [--temperature N] [--max-tokens N] [--system TEXT]",
+  "remove-preset <id>"
+];
+var PLUGIN_ID = "lmstudio";
+function parseArgs(args) {
+  const positional = [];
+  const flags = {};
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (a.indexOf("--") === 0 && a.length > 2) {
+      const eq = a.indexOf("=");
+      if (eq > 0) flags[a.slice(2, eq)] = a.slice(eq + 1);
+      else if (i + 1 < args.length && args[i + 1].indexOf("--") !== 0) flags[a.slice(2)] = args[++i];
+      else flags[a.slice(2)] = true;
+    } else positional.push(a);
+  }
+  return { positional, flags };
+}
+function flag(p, name) {
+  const v = p.flags[name];
+  return typeof v === "string" ? v : void 0;
+}
+function keyCommand(slot) {
+  return `printf %s "$API_KEY" | codeterm plugin config ${PLUGIN_ID} --secret ${slot}`;
+}
+function allowHostCommand(host2) {
+  return `codeterm plugin settings ${PLUGIN_ID} --allow-host ${host2}`;
+}
+function nextSteps(p) {
+  const steps = [];
+  if (!p.hasKey && keyRequired(p)) {
+    steps.push(
+      p.keySlotDeclared ? `store the key (never in argv history): ${keyCommand(p.apiKeySecret)}` : `slot ${p.apiKeySecret} is not declared for --secret; re-add with --key-slot one of ${KEY_SLOTS.join(", ")} or paste the key in the Router view`
+    );
+  }
+  if (p.status.state !== "connected" && keyRequired(p)) steps.push(`if CodeTerm blocks the host: ${allowHostCommand(hostOf(p.baseUrl))}`);
+  return steps;
+}
+function providerLine(p) {
+  const key = keyRequired(p) || p.hasKey ? ` key=${p.apiKeySecret}:${p.hasKey ? "set" : "unset"}` : "";
+  const flags = [p.isDefault ? "default" : "", p.enabled ? "" : "disabled", p.source !== "user" ? p.source : ""].filter(Boolean).join(",");
+  return `${p.id}	${p.kind}	${p.status.state}	${p.baseUrl}${key}${flags ? `	[${flags}]` : ""}`;
+}
+function err(message) {
+  return { error: message };
+}
+function runAgentVerb(verb, args) {
+  const p = parseArgs(args || []);
+  switch (verb) {
+    case "providers": {
+      const { providers, issues } = listProviders();
+      const lines = providers.map(providerLine);
+      if (issues.length) lines.push("", "config issues:", ...issues.map((i) => `- ${i}`));
+      return { result: lines.join("\n") || "no providers" };
+    }
+    case "add-provider": {
+      const [id, kind, baseUrl2] = p.positional;
+      if (!id || !kind || !baseUrl2) return err(`usage: ${AGENT_VERBS[1]}`);
+      const res = addProvider({ id, kind, baseUrl: baseUrl2, name: flag(p, "name") || p.positional.slice(3).join(" ") || void 0, apiKeySecret: flag(p, "key-slot"), models: flag(p, "models") });
+      if (!res.ok) return err(res.error);
+      return { result: [`added ${providerLine(res.provider)}`, ...nextSteps(res.provider)].join("\n") };
+    }
+    case "remove-provider": {
+      const id = p.positional[0];
+      if (!id) return err("usage: remove-provider <id>");
+      const res = removeProvider(id.toLowerCase());
+      return res.ok ? { result: `removed ${id} (its key stays in the secret bucket until cleared)` } : err(res.error);
+    }
+    case "test-provider": {
+      const id = p.positional[0];
+      if (!id) return err("usage: test-provider <id>");
+      const res = testProvider(id.toLowerCase());
+      if (!res.ok) return err(res.error);
+      return { result: [`${res.provider.id}: ${res.provider.status.state} \u2014 ${res.provider.status.message}`, ...nextSteps(res.provider)].join("\n") };
+    }
+    case "set-default": {
+      const id = p.positional[0];
+      if (!id) return err("usage: set-default <provider>");
+      const res = setDefaultProvider(id.toLowerCase());
+      return res.ok ? { result: `default provider: ${id}` } : err(res.error);
+    }
+    case "models": {
+      const known = listProviders().providers.map((x) => x.id);
+      const first = (p.positional[0] || "").toLowerCase();
+      const provider = known.includes(first) ? first : void 0;
+      const query = (provider ? p.positional.slice(1) : p.positional).join(" ");
+      const sections = modelSections({ provider, query, refresh: p.flags.refresh === true });
+      const lines = [];
+      for (const s2 of sections) {
+        lines.push(`## ${s2.providerName} (${s2.providerId}) \u2014 ${s2.models.length}/${s2.total}${s2.status.state === "connected" ? "" : ` \xB7 ${s2.status.state}: ${s2.status.message}`}`);
+        for (const m of s2.models) lines.push(`${m.id}${m.badges.length ? `	${m.badges.join(" ")}` : ""}${m.loaded ? "	loaded" : ""}`);
+      }
+      return { result: lines.join("\n") || "no providers enabled" };
+    }
+    case "presets": {
+      const lines = listPresetViews().map((x) => {
+        const knobs = [x.temperature !== void 0 ? `t=${x.temperature}` : "", x.maxTokens !== void 0 ? `max=${x.maxTokens}` : ""].filter(Boolean).join(" ");
+        const model = x.model ? x.provider && !splitModelId(x.model).providerId ? `${x.provider}::${x.model}` : x.model : x.provider ? `${x.provider}::(default)` : "(any)";
+        return `${x.id}	${x.name}	${model}${knobs ? `	${knobs}` : ""}${x.source !== "user" ? `	[${x.source}]` : ""}`;
+      });
+      return { result: lines.join("\n") || "no presets" };
+    }
+    case "add-preset": {
+      const [id, model] = p.positional;
+      if (!id) return err(`usage: ${AGENT_VERBS[7]}`);
+      const split = splitModelId(model || "");
+      const res = savePreset(
+        {
+          id,
+          name: flag(p, "name"),
+          provider: split.providerId || flag(p, "provider"),
+          model: split.model || void 0,
+          temperature: flag(p, "temperature"),
+          maxTokens: flag(p, "max-tokens"),
+          systemPrompt: flag(p, "system")
+        },
+        { replace: p.flags.replace === true }
+      );
+      return res.ok ? { result: `saved preset ${res.preset.id}` } : err(res.error);
+    }
+    case "remove-preset": {
+      const id = p.positional[0];
+      if (!id) return err("usage: remove-preset <id>");
+      const res = removePreset(id);
+      return res.ok ? { result: `removed preset ${id}` } : err(res.error);
+    }
+    default:
+      return err(`unknown verb "${verb}". Verbs: ${AGENT_VERBS.join(" | ")}`);
+  }
+}
+
+// lmstudio/src/router/view.ts
+function s(v) {
+  return typeof v === "string" ? v : "";
+}
+function viewCall(method, raw) {
+  const args = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  switch (method) {
+    case "overview": {
+      const { providers, defaultProvider, issues } = listProviders();
+      return {
+        providers,
+        defaultProvider,
+        issues,
+        presets: listPresetViews(),
+        kinds: PROVIDER_KINDS_INFO,
+        templates: PROVIDER_TEMPLATES,
+        keySlots: KEY_SLOTS,
+        commands: Object.fromEntries(providers.map((p) => [p.id, { key: keyCommand(p.apiKeySecret), allowHost: allowHostCommand(p.host) }]))
+      };
+    }
+    case "models":
+      return { sections: modelSections({ provider: s(args.provider) || void 0, query: s(args.query), refresh: args.refresh === true }) };
+    case "addProvider":
+      return addProvider(args.provider || {});
+    case "updateProvider":
+      return updateProvider(s(args.id), args.provider || {});
+    case "removeProvider":
+      return removeProvider(s(args.id));
+    case "setProviderEnabled":
+      return setProviderEnabled(s(args.id), args.enabled !== false);
+    case "setDefaultProvider":
+      return setDefaultProvider(s(args.id));
+    case "setProviderKey":
+      return setProviderKey(s(args.id), args.key);
+    case "clearProviderKey":
+      return clearProviderKey(s(args.id));
+    case "testProvider":
+      return testProvider(s(args.id));
+    case "savePreset":
+      return savePreset(args.preset || {}, { replace: args.replace === true });
+    case "removePreset":
+      return removePreset(s(args.id));
+    default:
+      return { ok: false, error: `unknown view method ${method}` };
+  }
+}
 
 // lmstudio/src/plugin.ts
 var CHARTER_REF_PREFIX = "charter:";
@@ -871,7 +2060,7 @@ function resolveCharterRef(ref) {
   if (!id) return { charter: "", error: "charter reference is missing an id" };
   const shipped = SHIPPED_CHARTERS[id];
   if (shipped) return { charter: shipped };
-  const settings2 = readSettings();
+  const settings2 = readSettings2();
   const raw = settings2.charters;
   const body = raw && typeof raw === "object" && !Array.isArray(raw) ? raw[id] : void 0;
   if (typeof body === "string" && body.trim() && !body.trim().endsWith(".md")) {
@@ -899,8 +2088,8 @@ var {
   parseToolEntries,
   toolContent,
   executeTool
-} = createToolRuntime(host, parseJson);
-function readSettings() {
+} = createToolRuntime(host, parseJson2);
+function readSettings2() {
   try {
     const raw = JSON.parse(host.settingsJson() || "{}");
     return raw && typeof raw === "object" ? raw : {};
@@ -978,10 +2167,10 @@ function writeAuthoredPrompt(model, draft) {
   } catch {
   }
 }
-function applyAuthoredPrompt(s, model, draft) {
+function applyAuthoredPrompt(s2, model, draft) {
   if (!model) return;
   writeAuthoredPrompt(model, draft);
-  s.systemPrompt = draft;
+  s2.systemPrompt = draft;
 }
 function buildAuthoringRequest(model, currentPrompt, instruction) {
   const ask = instruction && instruction.trim() ? `
@@ -1003,22 +2192,23 @@ function describeSwitchMessage(targetModel) {
 function describeModelSwitch(sessionId, targetModel) {
   const target = cleanModel(targetModel);
   if (!target) return { needsConfirm: false, message: "" };
-  const s = sessions.get(sessionId);
-  const active = cleanModel(s && s.model);
-  if (!s || active === target) return { needsConfirm: false, message: "" };
+  const s2 = sessions.get(sessionId);
+  const active = s2 ? sessionModelId(s2) : "";
+  if (!s2 || active === target) return { needsConfirm: false, message: "" };
   return { needsConfirm: true, message: describeSwitchMessage(target) };
 }
 function baseUrl() {
-  const s = readSettings();
-  const url = s.baseUrl && s.baseUrl.trim() ? s.baseUrl.trim() : DEFAULT_BASE_URL2;
+  const s2 = readSettings2();
+  const url = s2.baseUrl && s2.baseUrl.trim() ? s2.baseUrl.trim() : DEFAULT_BASE_URL2;
   return url.replace(/\/+$/, "");
 }
 function presets() {
-  const s = readSettings();
-  if (!Array.isArray(s.presets)) return [];
-  return s.presets.filter(
-    (p) => !!p && typeof p.id === "string" && typeof p.name === "string" && (p.systemPrompt === void 0 || typeof p.systemPrompt === "string")
-  );
+  return snapshot().presets.map((p) => {
+    const preset = { id: p.id, name: p.name, model: presetModelId(p), params: presetParams(p) };
+    if (p.description) preset.description = p.description;
+    if (p.systemPrompt !== void 0) preset.systemPrompt = p.systemPrompt;
+    return preset;
+  });
 }
 function presetById(all, id) {
   if (!id) return null;
@@ -1026,8 +2216,8 @@ function presetById(all, id) {
 }
 function defaultPreset(all) {
   if (!all.length) return null;
-  const s = readSettings();
-  return presetById(all, s.defaultPreset) || all[0];
+  const s2 = readSettings2();
+  return presetById(all, s2.defaultPreset) || all[0];
 }
 function presetBoundToModel(all, modelId) {
   if (!modelId) return null;
@@ -1042,24 +2232,24 @@ function defaultSystemPrompt(all) {
   const p = defaultPreset(all);
   return p && typeof p.systemPrompt === "string" ? p.systemPrompt : "";
 }
-function nextId(s, prefix = "lmstudio") {
-  const id = `${prefix}-${s.seq}`;
-  s.seq += 1;
+function nextId(s2, prefix = "lmstudio") {
+  const id = `${prefix}-${s2.seq}`;
+  s2.seq += 1;
   return id;
 }
-function append(s, type, content, id, extras) {
-  const msgId = id || nextId(s);
-  const existing = s.messages.find((m) => m.id === msgId);
+function append(s2, type, content, id, extras) {
+  const msgId = id || nextId(s2);
+  const existing = s2.messages.find((m) => m.id === msgId);
   if (existing) {
     existing.content = content;
     if (extras) Object.assign(existing, extras);
     return existing;
   }
   const msg = { id: msgId, type, content, ...extras || {} };
-  s.messages.push(msg);
+  s2.messages.push(msg);
   return msg;
 }
-function parseJson(raw, fallback) {
+function parseJson2(raw, fallback) {
   try {
     return JSON.parse(raw);
   } catch {
@@ -1071,34 +2261,45 @@ function fetchJson(opts) {
     JSON.stringify({
       url: opts.url,
       method: opts.method,
-      headers: { "content-type": "application/json" },
+      headers: opts.headers || { "content-type": "application/json" },
       body: opts.body,
       timeoutMs: 12e4
     })
   );
-  return parseJson(raw, { error: "fetch returned non-JSON" });
+  return parseJson2(raw, { error: "fetch returned non-JSON" });
 }
-function resolveModelId() {
-  const res = fetchJson({ url: `${baseUrl()}/api/v1/models`, method: "GET" });
+function lmStudioHeaders(provider) {
+  return provider ? authHeaders(provider, getKey(provider)) : { "content-type": "application/json" };
+}
+function lmStudioRoot(provider) {
+  return provider ? apiRoot(provider) : baseUrl();
+}
+function resolveRemoteModelId(provider) {
+  const entry = discoverModels(provider);
+  return entry.models.length ? entry.models[0].id : "";
+}
+function resolveModelId(provider) {
+  if (provider && provider.kind !== "lmstudio") return resolveRemoteModelId(provider);
+  const res = fetchJson({ url: `${lmStudioRoot(provider)}/api/v1/models`, method: "GET", headers: lmStudioHeaders(provider) });
   if (res.error || res.status && res.status >= 400) return "";
-  const data = parseJson(res.body || "{}", {});
-  const rows = Array.isArray(data.models) ? data.models : [];
-  const loaded = rows.find(
+  const data = parseJson2(res.body || "{}", {});
+  const rows2 = Array.isArray(data.models) ? data.models : [];
+  const loaded = rows2.find(
     (r) => r && typeof r.key === "string" && Array.isArray(r.loaded_instances) && r.loaded_instances.length > 0
   );
   if (loaded && typeof loaded.key === "string") return loaded.key;
-  const first = rows.find((r) => r && typeof r.key === "string");
+  const first = rows2.find((r) => r && typeof r.key === "string");
   return first && typeof first.key === "string" ? first.key : "";
 }
 function startFetchStream(opts) {
-  return parseJson(
+  return parseJson2(
     host.fetchStream(
       JSON.stringify({
         url: opts.url,
         method: opts.method,
-        headers: { "content-type": "application/json" },
+        headers: opts.headers || { "content-type": "application/json" },
         body: opts.body,
-        timeoutMs: 12e4
+        timeoutMs: opts.timeoutMs || 12e4
       })
     ),
     { error: "fetchStream returned non-JSON" }
@@ -1106,7 +2307,7 @@ function startFetchStream(opts) {
 }
 function errorTextFromBody(raw) {
   if (!raw) return "";
-  const parsed = parseJson(raw, null);
+  const parsed = parseJson2(raw, null);
   if (parsed && typeof parsed === "object") {
     const obj = parsed;
     const error = obj.error;
@@ -1128,16 +2329,16 @@ function vramLoadFailureMessage(model) {
   return `couldn't load ${model}: not enough VRAM \u2014 unload a model in LM Studio or pick a smaller one`;
 }
 function pollFetchStream(jobId) {
-  return parseJson(host.fetchStreamPoll(jobId), {
+  return parseJson2(host.fetchStreamPoll(jobId), {
     chunks: [],
     done: true,
     error: "fetchStreamPoll returned non-JSON"
   });
 }
-function emitToolCall(s, call) {
-  const toolId = nextId(s, `lmstudio-tool-${call.tool}`);
+function emitToolCall(s2, call) {
+  const toolId = nextId(s2, `lmstudio-tool-${call.tool}`);
   const toolArgs = JSON.stringify(call.args);
-  append(s, "tool_call", toolContent(call), toolId, {
+  append(s2, "tool_call", toolContent(call), toolId, {
     toolName: call.tool,
     toolInput: call.args,
     toolArgs,
@@ -1147,15 +2348,15 @@ function emitToolCall(s, call) {
   });
   return toolId;
 }
-function emitToolResult(s, call, result, toolId) {
+function emitToolResult(s2, call, result, toolId) {
   const formatted = formatToolResult(call, result);
-  append(s, "tool_result", formatted, void 0, {
+  append(s2, "tool_result", formatted, void 0, {
     toolId,
     toolResult: formatted,
     collapsed: true,
     provider: "lmstudio"
   });
-  s.pendingInputs.push(`tool_result:
+  s2.pendingInputs.push(`tool_result:
 ${formatted}`);
 }
 function promptVariantForModel(modelId, generalPrompt) {
@@ -1176,7 +2377,7 @@ function consumeSseEvent(stream, segment) {
     dataStr += value;
   }
   if (!dataStr) return;
-  const data = parseJson(
+  const data = parseJson2(
     dataStr,
     null
   );
@@ -1187,19 +2388,39 @@ function consumeSseEvent(stream, segment) {
   } else if (type.indexOf("reasoning.") === 0 && typeof data.content === "string") {
     stream.reasoning += data.content;
   } else if (type === "chat.end") {
-    const rid = data.result && data.result.response_id;
-    if (typeof rid === "string") stream.responseId = rid;
+    const result = data.result || {};
+    if (typeof result.response_id === "string") stream.responseId = result.response_id;
+    const stats = result.stats;
+    if (stats && typeof stats === "object") {
+      const input = typeof stats.input_tokens === "number" ? stats.input_tokens : 0;
+      const output = typeof stats.total_output_tokens === "number" ? stats.total_output_tokens : 0;
+      if (input || output) stream.usage = { input, cachedInput: 0, cacheWrite: 0, output };
+    }
   }
+}
+function consumeRouterEvents(stream, flush) {
+  const { events, rest } = splitSse(stream.buffer, flush);
+  stream.buffer = rest;
+  const acc = emptyDelta();
+  for (const ev of events) {
+    if (stream.kind === "anthropic") applyAnthropicEvent(acc, ev);
+    else applyOpenAiEvent(acc, ev);
+  }
+  stream.content += acc.content;
+  stream.reasoning += acc.reasoning;
+  if (acc.responseId && !stream.responseId) stream.responseId = acc.responseId;
+  if (acc.error) stream.error = acc.error;
+  stream.usage = mergeUsage(stream.usage, acc.usage);
 }
 function parseSse(stream, flush) {
   const segments = stream.buffer.split(/\r?\n\r?\n/);
   stream.buffer = flush ? "" : segments.pop() ?? "";
   for (const seg of segments) consumeSseEvent(stream, seg);
 }
-function assembledContext(s) {
+function assembledContext(s2) {
   const prior = [];
   const assistantIndex = {};
-  for (const m of s.messages) {
+  for (const m of s2.messages) {
     if (m.type === "assistant") {
       if (assistantIndex[m.id] === void 0) {
         assistantIndex[m.id] = prior.length;
@@ -1214,10 +2435,10 @@ function assembledContext(s) {
   }
   return prior.map((m) => m.line).join("\n\n");
 }
-function messagesAsEngineHistory(s) {
+function messagesAsEngineHistory(s2) {
   const history = [];
-  if (s.systemPrompt) history.push({ role: "system", content: s.systemPrompt });
-  for (const m of s.messages) {
+  if (s2.systemPrompt) history.push({ role: "system", content: s2.systemPrompt });
+  for (const m of s2.messages) {
     if (m.type === "user") {
       if (m.content.indexOf(SYSTEM_PROMPT_MARKER) === 0) continue;
       history.push({ role: "user", content: m.content });
@@ -1230,124 +2451,196 @@ function messagesAsEngineHistory(s) {
 function requestInputFromMessages(messages2) {
   return messages2.map((m) => `${m.role}: ${m.content}`).join("\n\n");
 }
-function startLmStudioCall(s, input, opts) {
-  if (!s.model) {
-    const resolved = resolveModelId();
-    if (!resolved) {
-      append(s, "system", "LM Studio error: no model configured and none could be auto-resolved from /api/v1/models.");
-      s.done = true;
-      return;
+function sessionModelId(s2) {
+  return qualifyModel(s2.provider ? s2.provider.id : LMSTUDIO_PROVIDER_ID, s2.model);
+}
+function providerLabel(s2) {
+  return s2.provider && s2.provider.id !== LMSTUDIO_PROVIDER_ID ? s2.provider.name : "LM Studio";
+}
+function routerTurns(s2, input) {
+  const turns = [];
+  for (const m of s2.messages) {
+    if (m.type === "user") {
+      if (m.content.indexOf(SYSTEM_PROMPT_MARKER) === 0) continue;
+      turns.push({ role: "user", content: m.content });
+    } else if (m.type === "assistant") {
+      turns.push({ role: "assistant", content: m.content });
+    } else if (m.type === "tool_result") {
+      turns.push({ role: "user", content: `tool_result:
+${m.content}` });
     }
-    s.model = resolved;
-    rememberLastModel(resolved);
   }
-  const needsFallbackContext = !s.previousResponseId && s.messages.some((m) => m.type === "assistant" || m.type === "tool_result");
-  let requestInput = input;
+  const last = turns[turns.length - 1];
+  if (input && !(last && last.role === "user" && last.content === input)) turns.push({ role: "user", content: input });
+  return turns;
+}
+function engineToRouter(messages2) {
+  const system = [];
+  const turns = [];
+  for (const m of messages2) {
+    if (m.role === "system") system.push(m.content);
+    else turns.push({ role: m.role === "assistant" ? "assistant" : "user", content: m.content });
+  }
+  return { system: system.join("\n\n"), turns };
+}
+function startRouterCall(s2, provider, input, opts) {
+  let system = s2.systemPrompt;
+  let turns;
   if (opts?.messages) {
-    requestInput = requestInputFromMessages(opts.messages);
-  } else if (s.engine && s.engine.kind === "chat" && s.engine.window?.maxMessages !== void 0) {
-    requestInput = requestInputFromMessages(assembleChat(messagesAsEngineHistory(s), s.engine.window));
-  } else if (needsFallbackContext) {
-    requestInput = assembledContext(s);
+    const converted = engineToRouter(opts.messages);
+    system = converted.system;
+    turns = converted.turns;
+  } else if (s2.engine && s2.engine.kind === "chat" && s2.engine.window?.maxMessages !== void 0) {
+    turns = engineToRouter(assembleChat(messagesAsEngineHistory(s2), s2.engine.window)).turns;
+  } else {
+    turns = routerTurns(s2, input);
   }
-  const body = {
-    model: s.model,
-    system_prompt: s.systemPrompt,
-    input: requestInput,
-    stream: true,
-    ...s.params
-  };
-  if (!opts?.messages && s.previousResponseId) body.previous_response_id = s.previousResponseId;
-  const started = startFetchStream({
-    url: `${baseUrl()}/api/v1/chat`,
-    method: "POST",
-    body: JSON.stringify(body)
-  });
+  const key = getKey(provider);
+  const req = chatRequest(provider, key, { model: s2.model, system, turns, params: s2.params });
+  const started = startFetchStream({ url: req.url, method: req.method, headers: req.headers, body: req.body || "", timeoutMs: req.timeoutMs });
   if (!started.jobId) {
-    const err = started.error || "missing jobId";
-    append(s, "system", isVramLoadFailure(err) ? vramLoadFailureMessage(s.model) : `LM Studio stream error: ${err}`);
-    s.done = true;
+    append(s2, "system", `${provider.name} stream error: ${redact(started.error || "missing jobId", key)}`);
+    s2.done = true;
     return;
   }
-  s.stream = {
-    jobId: started.jobId,
-    messageId: nextId(s, "lmstudio-assistant"),
-    reasoningId: nextId(s, "lmstudio-reasoning"),
+  beginStream(s2, started.jobId, provider.kind, opts?.watcher);
+}
+function beginStream(s2, jobId, kind, watcher) {
+  s2.stream = {
+    jobId,
+    messageId: nextId(s2, "lmstudio-assistant"),
+    reasoningId: nextId(s2, "lmstudio-reasoning"),
     content: "",
     reasoning: "",
     buffer: "",
-    responseId: null
+    responseId: null,
+    kind,
+    usage: null,
+    error: null
   };
-  s.currentRun = opts?.watcher || s.mode === "watcher" ? "watcher" : "interactive";
-  s.done = false;
+  s2.currentRun = watcher || s2.mode === "watcher" ? "watcher" : "interactive";
+  s2.done = false;
 }
-function startNextIfIdle(s) {
-  if (!s.stream && s.pendingInputs.length) {
-    const next = s.pendingInputs.shift() || "";
-    const queued = parseJson(next, null);
+function startLmStudioCall(s2, input, opts) {
+  if (s2.routeError) {
+    append(s2, "system", `Router error: ${s2.routeError}`);
+    s2.done = true;
+    return;
+  }
+  if (!s2.model) {
+    const resolved = resolveModelId(s2.provider);
+    if (!resolved) {
+      const where = s2.provider && s2.provider.kind !== "lmstudio" ? `${s2.provider.name} /models` : "/api/v1/models";
+      append(s2, "system", `${providerLabel(s2)} error: no model configured and none could be auto-resolved from ${where}.`);
+      s2.done = true;
+      return;
+    }
+    s2.model = resolved;
+    rememberLastModel(sessionModelId(s2));
+  }
+  if (s2.provider && s2.provider.kind !== "lmstudio") {
+    startRouterCall(s2, s2.provider, input, opts);
+    return;
+  }
+  const needsFallbackContext = !s2.previousResponseId && s2.messages.some((m) => m.type === "assistant" || m.type === "tool_result");
+  let requestInput = input;
+  if (opts?.messages) {
+    requestInput = requestInputFromMessages(opts.messages);
+  } else if (s2.engine && s2.engine.kind === "chat" && s2.engine.window?.maxMessages !== void 0) {
+    requestInput = requestInputFromMessages(assembleChat(messagesAsEngineHistory(s2), s2.engine.window));
+  } else if (needsFallbackContext) {
+    requestInput = assembledContext(s2);
+  }
+  const body = {
+    model: s2.model,
+    system_prompt: s2.systemPrompt,
+    input: requestInput,
+    stream: true,
+    ...s2.params
+  };
+  if (!opts?.messages && s2.previousResponseId) body.previous_response_id = s2.previousResponseId;
+  if (typeof body.max_tokens === "number" && body.max_output_tokens === void 0) body.max_output_tokens = body.max_tokens;
+  const started = startFetchStream({
+    url: `${lmStudioRoot(s2.provider)}/api/v1/chat`,
+    method: "POST",
+    headers: lmStudioHeaders(s2.provider),
+    body: JSON.stringify(body)
+  });
+  if (!started.jobId) {
+    const err2 = started.error || "missing jobId";
+    append(s2, "system", isVramLoadFailure(err2) ? vramLoadFailureMessage(s2.model) : `LM Studio stream error: ${err2}`);
+    s2.done = true;
+    return;
+  }
+  beginStream(s2, started.jobId, "lmstudio", opts?.watcher);
+}
+function startNextIfIdle(s2) {
+  if (!s2.stream && s2.pendingInputs.length) {
+    const next = s2.pendingInputs.shift() || "";
+    const queued = parseJson2(next, null);
     if (queued && Array.isArray(queued.watcherMessages)) {
-      startLmStudioCall(s, "", { messages: queued.watcherMessages, watcher: true });
+      startLmStudioCall(s2, "", { messages: queued.watcherMessages, watcher: true });
     } else if (queued && Array.isArray(queued.machineMessages)) {
-      startLmStudioCall(s, "", { messages: queued.machineMessages });
+      startLmStudioCall(s2, "", { messages: queued.machineMessages });
     } else {
-      startLmStudioCall(s, next);
+      startLmStudioCall(s2, next);
     }
   }
 }
-function finishAssistantMessage(s, content, responseId, messageId) {
-  if (s.currentRun === "watcher") {
-    finishLoopAssistantMessage(s, content, responseId, messageId);
+function finishAssistantMessage(s2, content, responseId, messageId) {
+  if (s2.currentRun === "watcher") {
+    finishLoopAssistantMessage(s2, content, responseId, messageId);
     return;
   }
-  if (responseId && !(s.engine && s.engine.kind === "machine")) s.previousResponseId = responseId;
-  finishLoopAssistantMessage(s, content, responseId, messageId);
+  if (responseId && !(s2.engine && s2.engine.kind === "machine")) s2.previousResponseId = responseId;
+  finishLoopAssistantMessage(s2, content, responseId, messageId);
 }
-function finishLoopAssistantMessage(s, content, responseId, messageId) {
-  if (s.currentRun === "watcher") {
-    s.watcherLastAssistant = content;
-    if (responseId) s.previousResponseId = responseId;
+function finishLoopAssistantMessage(s2, content, responseId, messageId) {
+  if (s2.currentRun === "watcher") {
+    s2.watcherLastAssistant = content;
+    if (responseId) s2.previousResponseId = responseId;
   }
   const { entries, cleaned, status, reason } = parseToolEntries(content);
   if (status === "malformed") {
-    if (s.malformedRetries < MAX_MALFORMED_RETRIES) {
-      s.malformedRetries += 1;
-      s.pendingInputs.push(
+    if (s2.malformedRetries < MAX_MALFORMED_RETRIES) {
+      s2.malformedRetries += 1;
+      s2.pendingInputs.push(
         `tool_result:
 ERROR: your codeterm-tool JSON was invalid (${reason || "unparseable tool call"}). Resend a single valid JSON tool call, or answer in plain text if no tool is needed.`
       );
       return;
     }
-    if (s.currentRun === "watcher") {
-      append(s, "system", `Could not parse a valid tool call after ${MAX_MALFORMED_RETRIES} retries; ending this watcher tick.`);
-      completeWatcherTick(s, content);
+    if (s2.currentRun === "watcher") {
+      append(s2, "system", `Could not parse a valid tool call after ${MAX_MALFORMED_RETRIES} retries; ending this watcher tick.`);
+      completeWatcherTick(s2, content);
     } else {
       append(
-        s,
+        s2,
         "system",
         `Could not parse a valid tool call after ${MAX_MALFORMED_RETRIES} retries; treating the reply as a normal message.`
       );
-      s.done = true;
+      s2.done = true;
     }
     return;
   }
   if (!entries.length) {
-    if (s.currentRun === "watcher") completeWatcherTick(s, content);
+    if (s2.currentRun === "watcher") completeWatcherTick(s2, content);
     else {
-      if (s.engine && s.engine.kind === "machine") s.machineState = extractVerdictState(content, s.machineState);
-      s.done = true;
+      if (s2.engine && s2.engine.kind === "machine") s2.machineState = extractVerdictState(content, s2.machineState);
+      s2.done = true;
     }
     return;
   }
   if (cleaned !== content) {
     if (cleaned.trim() === "") {
-      const idx = s.messages.findIndex((m) => m.id === messageId);
-      if (idx >= 0) s.messages.splice(idx, 1);
+      const idx = s2.messages.findIndex((m) => m.id === messageId);
+      if (idx >= 0) s2.messages.splice(idx, 1);
     } else {
-      append(s, "assistant", cleaned, messageId);
+      append(s2, "assistant", cleaned, messageId);
     }
   }
-  s.pendingTools = entries.slice();
-  advanceTools(s);
+  s2.pendingTools = entries.slice();
+  advanceTools(s2);
 }
 function watcherFallbackVerdict() {
   return JSON.stringify({
@@ -1356,13 +2649,13 @@ function watcherFallbackVerdict() {
     actions: []
   });
 }
-function completeWatcherTick(s, verdict) {
-  if (!s.watcherVerdictEmitted) {
+function completeWatcherTick(s2, verdict) {
+  if (!s2.watcherVerdictEmitted) {
     const text = verdict && verdict.trim() ? verdict : watcherFallbackVerdict();
-    append(s, "watcher_verdict", text);
-    s.watcherVerdictEmitted = true;
+    append(s2, "watcher_verdict", text);
+    s2.watcherVerdictEmitted = true;
   }
-  s.done = true;
+  s2.done = true;
 }
 function extractVerdictState(text, prior) {
   const trimmed = text.trim();
@@ -1377,106 +2670,110 @@ function extractVerdictState(text, prior) {
   }
   return prior;
 }
-function advanceTools(s) {
-  if (s.pendingExec) return;
-  while (s.pendingTools && s.pendingTools.length) {
-    const entry = s.pendingTools.shift();
+function advanceTools(s2) {
+  if (s2.pendingExec) return;
+  while (s2.pendingTools && s2.pendingTools.length) {
+    const entry = s2.pendingTools.shift();
     const call = entry.call;
-    if (s.toolRounds >= MAX_TOOL_ROUNDS) {
-      s.pendingInputs = [];
-      s.pendingTools = null;
-      if (!s.capReached) {
-        append(s, "system", `Tool round cap (${MAX_TOOL_ROUNDS}) reached; stopping this turn.`);
-        s.capReached = true;
+    if (s2.toolRounds >= MAX_TOOL_ROUNDS) {
+      s2.pendingInputs = [];
+      s2.pendingTools = null;
+      if (!s2.capReached) {
+        append(s2, "system", `Tool round cap (${MAX_TOOL_ROUNDS}) reached; stopping this turn.`);
+        s2.capReached = true;
       }
-      if (s.currentRun === "watcher") completeWatcherTick(s, null);
-      else s.done = true;
+      if (s2.currentRun === "watcher") completeWatcherTick(s2, null);
+      else s2.done = true;
       return;
     }
-    s.toolRounds += 1;
-    const toolId = emitToolCall(s, call);
+    s2.toolRounds += 1;
+    const toolId = emitToolCall(s2, call);
     if (call.tool === "exec" || call.tool === "codeterm") {
       const shell = execShellCmd(call);
       if (shell.error) {
-        emitToolResult(s, call, { error: shell.error }, toolId);
+        emitToolResult(s2, call, { error: shell.error }, toolId);
         continue;
       }
       const started = startExecJob(shell.shellCmd);
       if (started.jobId) {
-        s.pendingExec = { call, jobId: started.jobId, toolId };
+        s2.pendingExec = { call, jobId: started.jobId, toolId };
         return;
       }
-      emitToolResult(s, call, { error: started.error || "host.exec.start failed" }, toolId);
+      emitToolResult(s2, call, { error: started.error || "host.exec.start failed" }, toolId);
       continue;
     }
-    emitToolResult(s, call, executeTool(call), toolId);
+    emitToolResult(s2, call, executeTool(call), toolId);
   }
-  s.pendingTools = null;
+  s2.pendingTools = null;
 }
-function drainExec(s) {
-  while (s.pendingExec) {
-    const poll = pollExecJob(s.pendingExec.jobId);
+function drainExec(s2) {
+  while (s2.pendingExec) {
+    const poll = pollExecJob(s2.pendingExec.jobId);
     if (!poll.done) return;
-    const finished = s.pendingExec;
+    const finished = s2.pendingExec;
     host.execClose(finished.jobId);
-    s.pendingExec = null;
-    emitToolResult(s, finished.call, execResultFromPoll(poll), finished.toolId);
-    advanceTools(s);
+    s2.pendingExec = null;
+    emitToolResult(s2, finished.call, execResultFromPoll(poll), finished.toolId);
+    advanceTools(s2);
   }
 }
-function drainAuthor(s) {
-  if (!s.pendingAuthor) return;
-  const pending = s.pendingAuthor;
+function drainAuthor(s2) {
+  if (!s2.pendingAuthor) return;
+  const pending = s2.pendingAuthor;
   let poll;
   try {
     poll = host.agent.poll(pending.ticket);
   } catch (e) {
-    s.pendingAuthor = null;
+    s2.pendingAuthor = null;
     try {
       host.agent.reap(pending.agentSessionId);
     } catch {
     }
-    append(s, "system", `Prompt authoring failed: ${String(e)}`);
-    s.done = true;
+    append(s2, "system", `Prompt authoring failed: ${String(e)}`);
+    s2.done = true;
     return;
   }
   if (!poll || !poll.done) return;
-  s.pendingAuthor = null;
+  s2.pendingAuthor = null;
   try {
     host.agent.reap(pending.agentSessionId);
   } catch {
   }
   const reply = typeof poll.reply === "string" ? poll.reply : "";
   if (poll.error || !reply.trim()) {
-    append(s, "system", `Prompt authoring failed: ${poll.error || "the author agent returned no prompt"}.`);
-    s.done = true;
+    append(s2, "system", `Prompt authoring failed: ${poll.error || "the author agent returned no prompt"}.`);
+    s2.done = true;
     return;
   }
-  applyAuthoredPrompt(s, pending.model, stripPromptFence(reply));
-  append(s, "system", `Updated the system prompt for ${pending.model} from the author agent.`);
-  s.done = true;
+  applyAuthoredPrompt(s2, pending.model, stripPromptFence(reply));
+  append(s2, "system", `Updated the system prompt for ${pending.model} from the author agent.`);
+  s2.done = true;
 }
-function pollStream(s) {
-  if (!s.stream) return;
-  const stream = s.stream;
+function pollStream(s2) {
+  if (!s2.stream) return;
+  const stream = s2.stream;
   const poll = pollFetchStream(stream.jobId);
+  if (stream.kind !== "lmstudio") {
+    pollRouterStream(s2, stream, poll);
+    return;
+  }
   if (poll.error) {
-    append(s, "system", isVramLoadFailure(poll.error) ? vramLoadFailureMessage(s.model) : `LM Studio stream error: ${poll.error}`);
+    append(s2, "system", isVramLoadFailure(poll.error) ? vramLoadFailureMessage(s2.model) : `LM Studio stream error: ${poll.error}`);
     host.fetchStreamClose(stream.jobId);
-    s.stream = null;
-    s.done = true;
+    s2.stream = null;
+    s2.done = true;
     return;
   }
   if (poll.status && poll.status >= 400) {
-    const err = errorTextFromBody(poll.body);
+    const err2 = errorTextFromBody(poll.body);
     append(
-      s,
+      s2,
       "system",
-      isVramLoadFailure(err) ? vramLoadFailureMessage(s.model) : `LM Studio HTTP ${poll.status}`
+      isVramLoadFailure(err2) ? vramLoadFailureMessage(s2.model) : `LM Studio HTTP ${poll.status}`
     );
     host.fetchStreamClose(stream.jobId);
-    s.stream = null;
-    s.done = true;
+    s2.stream = null;
+    s2.done = true;
     return;
   }
   const chunks = Array.isArray(poll.chunks) ? poll.chunks : [];
@@ -1485,30 +2782,84 @@ function pollStream(s) {
     parseSse(stream, false);
   }
   if (poll.done) parseSse(stream, true);
-  if (stream.reasoning) append(s, "thinking", stream.reasoning, stream.reasoningId);
-  if (stream.content) append(s, "assistant", stream.content, stream.messageId);
-  if (poll.done) {
+  publishStream(s2, stream, !!poll.done);
+}
+function failStream(s2, stream, message) {
+  if (stream.content) append(s2, "assistant", stream.content, stream.messageId);
+  append(s2, "system", message);
+  host.fetchStreamClose(stream.jobId);
+  s2.stream = null;
+  if (s2.currentRun === "watcher") completeWatcherTick(s2, null);
+  else s2.done = true;
+}
+function pollRouterStream(s2, stream, poll) {
+  const name = s2.provider ? s2.provider.name : "Provider";
+  const key = s2.provider ? getKey(s2.provider) : null;
+  if (poll.error) {
+    failStream(s2, stream, `${name} stream error: ${redact(poll.error, key)}`);
+    return;
+  }
+  if (poll.status && poll.status >= 400) {
+    const detail = redact(errorTextFromBody(poll.body || (poll.chunks || []).join("")), key).slice(0, 300);
+    const hint = poll.status === 401 || poll.status === 403 ? " \u2014 check the API key for this provider" : "";
+    failStream(s2, stream, `${name} HTTP ${poll.status}${detail ? `: ${detail}` : ""}${hint}`);
+    return;
+  }
+  const chunks = Array.isArray(poll.chunks) ? poll.chunks : [];
+  if (chunks.length) stream.buffer += chunks.join("");
+  const looksSse = /(^|\n)(data|event):/.test(stream.buffer);
+  if (looksSse || !poll.done) consumeRouterEvents(stream, !!poll.done);
+  if (poll.done && !looksSse && stream.buffer.trim()) {
+    const acc = emptyDelta();
+    if (applyWholeBody(stream.kind, acc, stream.buffer)) {
+      stream.content += acc.content;
+      stream.reasoning += acc.reasoning;
+      if (acc.usage) stream.usage = acc.usage;
+    }
+    stream.buffer = "";
+  }
+  if (stream.error) {
+    failStream(s2, stream, `${name} error: ${redact(stream.error, key)}`);
+    return;
+  }
+  publishStream(s2, stream, !!poll.done);
+}
+function emitUsage(s2, usage, messageId) {
+  if (!usage || s2.currentRun === "watcher") return;
+  const target = s2.messages.find((m) => m.id === messageId);
+  if (target) target.usage = usage;
+  if (readSettings2().showUsage === false) return;
+  append(s2, "system", `${sessionModelId(s2)} \xB7 ${formatUsage(usage)}`, void 0, { usage, collapsed: true });
+}
+function publishStream(s2, stream, done) {
+  if (stream.reasoning) append(s2, "thinking", stream.reasoning, stream.reasoningId);
+  if (stream.content) append(s2, "assistant", stream.content, stream.messageId);
+  if (done) {
     host.fetchStreamClose(stream.jobId);
-    s.stream = null;
-    finishAssistantMessage(s, stream.content, stream.responseId, stream.messageId);
+    s2.stream = null;
+    emitUsage(s2, stream.usage, stream.messageId);
+    finishAssistantMessage(s2, stream.content, stream.kind === "lmstudio" ? stream.responseId : null, stream.messageId);
   }
 }
 function resolveSession(ctx) {
-  const s = readSettings();
+  const s2 = readSettings2();
   const allPresets = presets();
   const explicitModel = cleanModel(ctx.model);
   const requestedPreset = presetById(allPresets, ctx.preset);
   const presetModel = explicitModel ? "" : cleanModel(requestedPreset && requestedPreset.model);
   const persistedModel = explicitModel || presetModel ? "" : readLastModel();
-  const chosenModel = explicitModel || presetModel || persistedModel || cleanModel(s.model);
+  const chosenModel = explicitModel || presetModel || persistedModel || cleanModel(s2.model);
   const boundPreset = presetBoundToModel(allPresets, chosenModel);
   const preset = boundPreset || resolvePreset(ctx.preset, chosenModel);
   const model = chosenModel || cleanModel(preset && preset.model);
+  const router = snapshot();
+  const routerPreset = preset ? router.presets.find((p) => p.id === preset.id) : void 0;
+  const target = resolveModelTarget(model, router.providers, router.defaultProvider, model ? void 0 : routerPreset && routerPreset.provider);
   const presetSystemPrompt = preset && typeof preset.systemPrompt === "string" ? preset.systemPrompt : "";
   const generalSystemPrompt = (boundPreset ? presetSystemPrompt || defaultSystemPrompt(allPresets) : ctx.systemPrompt || presetSystemPrompt) || defaultSystemPrompt(allPresets) || "";
   const authoredPrompts = readAuthoredPrompts();
   const systemPrompt = model && authoredPrompts[model] || systemPromptForModel(generalSystemPrompt, model);
-  const params = { ...s.params || {}, ...preset && preset.params || {} };
+  const params = { ...s2.params || {}, ...preset && preset.params || {} };
   const mode = ctx.mode === "watcher" ? "watcher" : "interactive";
   const engine = ctx.engine && typeof ctx.engine === "object" ? ctx.engine : null;
   let charter = "";
@@ -1535,7 +2886,9 @@ function resolveSession(ctx) {
     watcherTicks: 0,
     watcherVerdictEmitted: false,
     watcherLastAssistant: "",
-    model,
+    model: target.model,
+    provider: target.provider,
+    routeError: target.error || null,
     params,
     previousResponseId: null,
     pendingInputs: [],
@@ -1553,110 +2906,108 @@ function resolveSession(ctx) {
 var plugin = {
   openSession(ctx) {
     const sid = ctx.tabId;
-    const s = resolveSession(ctx);
-    if (s.charterError) {
-      host.log("error", `openSession failed for ${sid}: ${s.charterError}`);
-      return { error: s.charterError };
+    const s2 = resolveSession(ctx);
+    if (s2.charterError) {
+      host.log("error", `openSession failed for ${sid}: ${s2.charterError}`);
+      return { error: s2.charterError };
     }
-    if (s.mode === "watcher") {
-      if (s.charter) append(s, "user", markSystemPrompt(s.charter), "system-prompt");
-    } else if (s.systemPrompt) {
-      append(s, "user", markSystemPrompt(s.systemPrompt), "system-prompt");
+    if (s2.mode === "watcher") {
+      if (s2.charter) append(s2, "user", markSystemPrompt(s2.charter), "system-prompt");
+    } else if (s2.systemPrompt) {
+      append(s2, "user", markSystemPrompt(s2.systemPrompt), "system-prompt");
     }
-    sessions.set(sid, s);
-    rememberLastModel(s.model);
+    sessions.set(sid, s2);
+    rememberLastModel(sessionModelId(s2));
     return { sessionId: sid };
   },
   sendMessage(sid, text) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    if (s.mode === "watcher") {
+    const s2 = sessions.get(sid);
+    if (!s2) return;
+    if (s2.mode === "watcher") {
       host.log("warn", `sendMessage ignored for watcher session ${sid}`);
       return;
     }
-    append(s, "user", text);
-    s.toolRounds = 0;
-    s.capReached = false;
-    s.malformedRetries = 0;
-    s.done = false;
-    if (s.engine && s.engine.kind === "machine") {
-      const messages2 = assembleMachine(s.charter, s.machineState, { query: text });
-      s.pendingInputs.push(JSON.stringify({ machineMessages: messages2 }));
+    append(s2, "user", text);
+    s2.toolRounds = 0;
+    s2.capReached = false;
+    s2.malformedRetries = 0;
+    s2.done = false;
+    if (s2.engine && s2.engine.kind === "machine") {
+      const messages2 = assembleMachine(s2.charter, s2.machineState, { query: text });
+      s2.pendingInputs.push(JSON.stringify({ machineMessages: messages2 }));
     } else {
-      s.pendingInputs.push(text);
+      s2.pendingInputs.push(text);
     }
-    startNextIfIdle(s);
+    startNextIfIdle(s2);
   },
   watcherTick(sid, input) {
-    const s = sessions.get(sid);
-    if (!s || s.mode !== "watcher") return;
+    const s2 = sessions.get(sid);
+    if (!s2 || s2.mode !== "watcher") return;
     const tickInput = input;
-    const messages2 = assembleMachine(s.charter, tickInput.state, tickInput);
-    s.watcherTicks += 1;
-    append(s, "context_request", JSON.stringify(messages2));
-    s.currentRun = "watcher";
-    s.previousResponseId = null;
-    s.pendingInputs = [];
-    s.pendingTools = null;
-    s.pendingExec = null;
-    s.stream = null;
-    s.toolRounds = 0;
-    s.capReached = false;
-    s.malformedRetries = 0;
-    s.watcherVerdictEmitted = false;
-    s.watcherLastAssistant = "";
-    s.done = false;
-    s.pendingInputs.push(JSON.stringify({ watcherMessages: messages2 }));
-    startNextIfIdle(s);
+    const messages2 = assembleMachine(s2.charter, tickInput.state, tickInput);
+    s2.watcherTicks += 1;
+    append(s2, "context_request", JSON.stringify(messages2));
+    s2.currentRun = "watcher";
+    s2.previousResponseId = null;
+    s2.pendingInputs = [];
+    s2.pendingTools = null;
+    s2.pendingExec = null;
+    s2.stream = null;
+    s2.toolRounds = 0;
+    s2.capReached = false;
+    s2.malformedRetries = 0;
+    s2.watcherVerdictEmitted = false;
+    s2.watcherLastAssistant = "";
+    s2.done = false;
+    s2.pendingInputs.push(JSON.stringify({ watcherMessages: messages2 }));
+    startNextIfIdle(s2);
   },
   pump(sid) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    pollStream(s);
-    drainExec(s);
-    drainAuthor(s);
-    startNextIfIdle(s);
+    const s2 = sessions.get(sid);
+    if (!s2) return;
+    pollStream(s2);
+    drainExec(s2);
+    drainAuthor(s2);
+    startNextIfIdle(s2);
   },
   poll(sid, cursor) {
-    const s = sessions.get(sid);
-    if (!s) return { messages: [], cursor: cursor ?? "0", done: true };
+    const s2 = sessions.get(sid);
+    if (!s2) return { messages: [], cursor: cursor ?? "0", done: true };
     const from = Number(cursor ?? 0) || 0;
     let liveFrom = -1;
-    if (s.stream) {
-      for (let i = 0; i < s.messages.length; i += 1) {
-        if (s.messages[i].id === s.stream.messageId || s.messages[i].id === s.stream.reasoningId) {
+    if (s2.stream) {
+      for (let i = 0; i < s2.messages.length; i += 1) {
+        if (s2.messages[i].id === s2.stream.messageId || s2.messages[i].id === s2.stream.reasoningId) {
           liveFrom = i;
           break;
         }
       }
     }
-    const nextCursor = liveFrom >= 0 ? liveFrom : s.messages.length;
+    const nextCursor = liveFrom >= 0 ? liveFrom : s2.messages.length;
     return {
-      messages: s.messages.slice(from),
+      messages: s2.messages.slice(from),
       cursor: String(nextCursor),
-      done: s.done && !s.stream && !s.pendingExec && !s.pendingAuthor && s.pendingInputs.length === 0
+      done: s2.done && !s2.stream && !s2.pendingExec && !s2.pendingAuthor && s2.pendingInputs.length === 0
     };
   },
   closeSession(sid) {
-    const s = sessions.get(sid);
-    if (s && s.stream) host.fetchStreamClose(s.stream.jobId);
+    const s2 = sessions.get(sid);
+    if (s2 && s2.stream) host.fetchStreamClose(s2.stream.jobId);
     sessions.delete(sid);
   },
   listModels() {
-    const res = fetchJson({ url: `${baseUrl()}/api/v1/models`, method: "GET" });
-    if (res.error || res.status && res.status >= 400) return [];
-    const data = parseJson(res.body || "{}", {});
+    const router = snapshot();
     const models = [];
-    if (Array.isArray(data.models)) {
-      for (const r of data.models) {
-        if (r && typeof r.key === "string") {
-          const displayName = typeof r.display_name === "string" ? r.display_name : r.key;
-          models.push({ id: r.key, displayName });
-        }
-      }
-    } else if (Array.isArray(data.data)) {
-      for (const r of data.data) {
-        if (r && typeof r.id === "string") models.push({ id: r.id, displayName: r.id });
+    for (const provider of router.providers) {
+      if (!provider.enabled) continue;
+      const entry = discoverModels(provider);
+      for (const m of entry.models) {
+        const badges = capabilityBadges(m.capabilities);
+        const info = { id: qualifyModel(provider.id, m.id), displayName: m.displayName, group: provider.name };
+        if (m.loaded) info.badge = "loaded";
+        else if (badges.length) info.badge = badges[0];
+        if (badges.length) info.description = badges.join(" \xB7 ");
+        models.push(info);
       }
     }
     return models;
@@ -1665,14 +3016,14 @@ var plugin = {
     return presets().map((p) => ({ id: p.id, name: p.name, description: p.description }));
   },
   sessionInfo(sid) {
-    const s = sessions.get(sid);
-    return { model: s ? s.model : void 0, systemPrompt: s ? s.systemPrompt : void 0 };
+    const s2 = sessions.get(sid);
+    return { model: s2 ? sessionModelId(s2) || void 0 : void 0, systemPrompt: s2 ? s2.systemPrompt : void 0 };
   },
   describeModelSwitch,
   authorSystemPrompt(sid, draft) {
-    const s = sessions.get(sid);
-    if (!s || !s.model) return;
-    applyAuthoredPrompt(s, s.model, draft);
+    const s2 = sessions.get(sid);
+    if (!s2 || !s2.model) return;
+    applyAuthoredPrompt(s2, sessionModelId(s2), draft);
   },
   // R6: hand the "tune this pane's system prompt for model X" task off to a
   // separate agent pane. Plugin-mediated end to end: we read THIS session's
@@ -1681,50 +3032,71 @@ var plugin = {
   // ticket across turns and writes the reply back via applyAuthoredPrompt, so
   // the user iteratively improves the per-model prompt without editing JSON.
   requestPromptAuthoring(sid, instruction) {
-    const s = sessions.get(sid);
-    if (!s || !s.model) return { ok: false, error: "no active session or model to author for" };
-    if (s.pendingAuthor) return { ok: false, error: "prompt authoring already in progress" };
+    const s2 = sessions.get(sid);
+    if (!s2 || !s2.model) return { ok: false, error: "no active session or model to author for" };
+    if (s2.pendingAuthor) return { ok: false, error: "prompt authoring already in progress" };
     let workspaceId = "";
     try {
       workspaceId = host.workspace.ensure({ name: PROMPT_AUTHOR_WORKSPACE }).workspaceId;
     } catch (e) {
-      append(s, "system", `Prompt authoring unavailable: ${String(e)}`);
+      append(s2, "system", `Prompt authoring unavailable: ${String(e)}`);
       return { ok: false, error: String(e) };
     }
     if (!workspaceId) {
-      append(s, "system", "Prompt authoring failed: could not open an authoring workspace.");
+      append(s2, "system", "Prompt authoring failed: could not open an authoring workspace.");
       return { ok: false, error: "no workspace" };
     }
     const spawned = host.agent.spawn(workspaceId, {
-      task: `Help tune the system prompt for the local LM Studio model "${s.model}".`
+      task: `Help tune the system prompt for the ${providerLabel(s2)} model "${sessionModelId(s2)}".`
     });
     const agentSessionId = spawned && spawned.sessionId;
     if (!agentSessionId) {
-      append(s, "system", "Prompt authoring failed: could not spawn an author agent.");
+      append(s2, "system", "Prompt authoring failed: could not spawn an author agent.");
       return { ok: false, error: "spawn failed" };
     }
-    const sent = host.agent.send(agentSessionId, buildAuthoringRequest(s.model, s.systemPrompt, instruction));
+    const sent = host.agent.send(agentSessionId, buildAuthoringRequest(sessionModelId(s2), s2.systemPrompt, instruction));
     const ticket = sent && sent.ticket;
     if (!ticket) {
       try {
         host.agent.reap(agentSessionId);
       } catch {
       }
-      append(s, "system", "Prompt authoring failed: could not send the request to the author agent.");
+      append(s2, "system", "Prompt authoring failed: could not send the request to the author agent.");
       return { ok: false, error: "send failed" };
     }
-    s.pendingAuthor = { ticket, agentSessionId, model: s.model };
-    s.done = false;
-    append(s, "system", `Handing off system-prompt authoring for ${s.model} to an agent\u2026`);
+    s2.pendingAuthor = { ticket, agentSessionId, model: sessionModelId(s2) };
+    s2.done = false;
+    append(s2, "system", `Handing off system-prompt authoring for ${sessionModelId(s2)} to an agent\u2026`);
     return { ok: true };
   },
   setModel(sid, model) {
-    const s = sessions.get(sid);
-    if (!s || typeof model !== "string" || !model) return;
-    if (s.model === model) return;
-    s.model = model;
-    rememberLastModel(model);
-    s.previousResponseId = null;
+    const s2 = sessions.get(sid);
+    if (!s2 || typeof model !== "string" || !model.trim()) return;
+    const router = snapshot();
+    const target = resolveModelTarget(model, router.providers, router.defaultProvider);
+    if (!target.provider || !target.model) {
+      append(s2, "system", `Router error: ${target.error || `cannot route ${model}`}`);
+      return;
+    }
+    if (s2.provider && s2.provider.id === target.provider.id && s2.model === target.model) return;
+    s2.provider = target.provider;
+    s2.model = target.model;
+    s2.routeError = null;
+    rememberLastModel(sessionModelId(s2));
+    s2.previousResponseId = null;
   }
 };
-var plugin_default = { ...plugin, ...decision_default };
+function onAgentCommand(ctx) {
+  try {
+    return runAgentVerb(ctx.verb, Array.isArray(ctx.args) ? ctx.args : []);
+  } catch (e) {
+    return { error: `router verb failed: ${String(e)}` };
+  }
+}
+var plugin_default = {
+  ...plugin,
+  ...decision_default,
+  viewCall,
+  onAgentCommand,
+  __test_resetRouter: resetModelCache
+};

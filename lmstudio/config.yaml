@@ -1,4 +1,14 @@
-# LM Studio plugin configuration.
+# Domios Router (plugin id lmstudio) configuration.
+#
+# Providers and presets are usually managed in the Router view or with agent
+# verbs. Optional read-only providers can be declared here; keys never go in
+# this file (each provider names a secret slot such as openrouter_api_key):
+#
+# providers:
+#   - { id: openrouter, name: OpenRouter, kind: openai, baseUrl: https://openrouter.ai/api/v1 }
+#
+# defaultProvider: lmstudio
+# showUsage: true
 #
 # Start LM Studio, load a model, and start the Developer server.
 # Server address, e.g. http://localhost:1234 or

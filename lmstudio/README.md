@@ -1,20 +1,59 @@
-# LM Studio
+# Domios Router
 
-A CodeTerm **chatBackend** plugin that turns a pane into an open agent shell
-backed by an [LM Studio](https://lmstudio.ai) model. The shell uses LM
-Studio native v1 chat, streams partial tokens, shows the active system prompt as
-the first message, and can run validated CodeTerm tool calls parsed by the host.
+A CodeTerm **chatBackend** that routes a chat pane to any registered model
+provider: LM Studio, any OpenAI-compatible API (OpenRouter, Groq, Together,
+DeepSeek, xAI, Mistral, Ollama, vLLM, LiteLLM, custom servers) and the
+Anthropic Messages API. The plugin id stays `lmstudio` so existing installs,
+grants and secrets carry over; with no router configuration it behaves exactly
+like the LM Studio plugin it grew from.
 
-The LM Studio server is the model backend; this plugin connects to it via
-permission-gated host APIs.
+The shell streams partial tokens, shows the active system prompt as the first
+message, runs validated CodeTerm tool calls parsed by the host, and appends a
+token-usage line (cached vs fresh input) after each reply.
 
-The plugin also supports **context engines** and **interaction modes**:
+## Router
 
-| Engine | Mode | Use |
-|---|---|---|
-| `chat` (default) | `interactive` | Today's rolling chat pane with optional bounded window |
-| `machine` | `interactive` | State-machine queries: charter + state + user query → verdict JSON |
-| `machine` | `watcher` | Read-only orchestration health watcher (host tick loop) |
+| Kind | Models | Chat | Auth |
+|---|---|---|---|
+| `openai` | `GET {api}/models` | `POST {api}/chat/completions` (SSE) | `Authorization: Bearer` |
+| `anthropic` | `GET {base}/v1/models` | `POST {base}/v1/messages` (SSE) | `x-api-key` + `anthropic-version` |
+| `lmstudio` | `GET /api/v0/models` (load state), falls back to `/api/v1/models` | native `POST /api/v1/chat` | optional Bearer |
+
+- **Providers** live in the Router view (Extensions → Domios Router) or come
+  from agent verbs; `config.yaml` may also declare read-only `providers`.
+  Each provider has `{id, name, kind, baseUrl, apiKeySecret, models?}`.
+  `models` lists ids for APIs without a model listing (for example
+  Xiaomi MiMo's Anthropic-compatible endpoint).
+- **Model ids** are `provider::model`; bare ids belong to the LM Studio
+  provider, so remembered models and preset bindings keep working.
+- **Keys** live only in the plugin secret store. Paste one into the masked
+  field on a provider card, or pipe it into a declared slot:
+
+  ```sh
+  printf %s "$KEY" | codeterm plugin config lmstudio --secret openrouter_api_key
+  ```
+
+  Declared slots: `lmstudio`, `openai`, `anthropic`, `openrouter`, `groq`,
+  `together`, `deepseek`, `xai`, `mistral`, `gemini`, `mimo`, `litellm` and
+  `custom1`–`custom4` (each `<name>_api_key`). Keys never enter
+  `config.yaml`, the router state file, transcripts or logs.
+- **Hosts**: the manifest allows localhost and the common cloud APIs. Any
+  other host needs a grant:
+  `codeterm plugin settings lmstudio --allow-host <host[:port]>`.
+- **Presets** `{id, name, provider?, model?, temperature?, maxTokens?,
+  systemPrompt?, params?}` pin a route and its knobs.
+- **Prompt caching**: Anthropic requests mark the system block and the turn
+  before the newest user message with `cache_control: {type: "ephemeral"}`;
+  OpenAI-compatible providers cache automatically. Usage reports
+  `cache_read_input_tokens` / `prompt_tokens_details.cached_tokens` as
+  cached input. Turn the line off with `showUsage: false`.
+
+Agent verbs (`codeterm plugin lmstudio <verb>`): `providers`,
+`add-provider <id> <kind> <baseUrl> [--name N] [--key-slot S] [--models a,b]`,
+`remove-provider <id>`, `test-provider <id>`, `set-default <id>`,
+`models [provider] [query] [--refresh]`, `presets`,
+`add-preset <id> <provider::model> [--temperature N] [--max-tokens N] [--system T]`,
+`remove-preset <id>`.
 
 ## Setup
 
@@ -110,7 +149,9 @@ the plugin never receives or logs it.
   `response_id`. If no continuation id is available, the plugin resends assembled
   visible context as `input`. Watcher and machine-engine paths never chain
   `previous_response_id`.
-- `listModels` maps `GET /api/v1/models` into the model picker.
+- `listModels` lists every enabled provider's models, grouped per provider
+  in the picker, cached 15 s for LM Studio and 10 min for remote APIs
+  (failures for 60 s).
 
 Tool rounds are capped at 8 per user turn.
 
@@ -168,6 +209,7 @@ may not reach callers.
 ```sh
 node scripts/build-plugin.mjs lmstudio
 npx tsx lmstudio/plugin.test.cjs
+npx tsx --test lmstudio/src/router/router.test.ts lmstudio/ui/src/view.test.tsx
 npm run typecheck
 npm run check:icons
 ```

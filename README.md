@@ -9,6 +9,7 @@ This channel is pre-registered out of the box — its plugins show up under
 - **bitwarden** — secret backend via the `bw` CLI, glance + connection view
 - **pebble** — authenticated Pebble ring webhook receiver
 - **grok** — optional xAI Grok CLI PTY agent (not a core provider)
+- **lmstudio** (Domios Router) — chat backend over LM Studio, OpenAI-compatible APIs and Anthropic
 
 ## Authoring
 

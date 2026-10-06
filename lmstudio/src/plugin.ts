@@ -18,6 +18,25 @@ import { assembleChat, assembleMachine, type EngineMessage } from "@codeterm/cha
 import decisionModel from "./decision";
 import { createToolRuntime, type ToolCall, type PendingExec, type ToolParseEntry } from "./tools";
 import watcherOrchestrationCharter from "../prompts/watcher-orchestration.md";
+import {
+  applyAnthropicEvent,
+  applyOpenAiEvent,
+  applyWholeBody,
+  authHeaders,
+  chatRequest,
+  emptyDelta,
+  formatUsage,
+  mergeUsage,
+  redact,
+  splitSse,
+} from "./router/adapters";
+import { apiRoot, LMSTUDIO_PROVIDER_ID } from "./router/config";
+import { capabilityBadges } from "./router/models";
+import { presetModelId, presetParams, qualifyModel, resolveModelTarget } from "./router/routing";
+import { discoverModels, getKey, resetModelCache, snapshot } from "./router/store";
+import { runAgentVerb } from "./router/verbs";
+import { viewCall } from "./router/view";
+import type { ChatTurn, ProviderConfig, StreamDelta, Usage } from "./router/types";
 
 interface Preset {
   id: string;
@@ -29,6 +48,7 @@ interface Preset {
 }
 
 interface LmStudioSettings {
+  showUsage?: boolean;
   baseUrl?: string;
   model?: string;
   defaultPreset?: string;
@@ -76,6 +96,9 @@ interface StreamState {
   reasoning: string;
   buffer: string;
   responseId: string | null;
+  kind: ProviderConfig["kind"];
+  usage: Usage | null;
+  error: string | null;
 }
 
 interface Session {
@@ -91,6 +114,8 @@ interface Session {
   watcherVerdictEmitted: boolean;
   watcherLastAssistant: string;
   model: string;
+  provider: ProviderConfig | null;
+  routeError: string | null;
   params: Record<string, unknown>;
   previousResponseId: string | null;
   pendingInputs: string[];
@@ -280,7 +305,7 @@ export function describeModelSwitch(sessionId: string, targetModel: string): Mod
   const target = cleanModel(targetModel);
   if (!target) return { needsConfirm: false, message: "" };
   const s = sessions.get(sessionId);
-  const active = cleanModel(s && s.model);
+  const active = s ? sessionModelId(s) : "";
   if (!s || active === target) return { needsConfirm: false, message: "" };
   return { needsConfirm: true, message: describeSwitchMessage(target) };
 }
@@ -292,15 +317,12 @@ function baseUrl(): string {
 }
 
 function presets(): Preset[] {
-  const s = readSettings();
-  if (!Array.isArray(s.presets)) return [];
-  return s.presets.filter(
-    (p): p is Preset =>
-      !!p &&
-      typeof p.id === "string" &&
-      typeof p.name === "string" &&
-      (p.systemPrompt === undefined || typeof p.systemPrompt === "string"),
-  );
+  return snapshot().presets.map((p) => {
+    const preset: Preset = { id: p.id, name: p.name, model: presetModelId(p), params: presetParams(p) };
+    if (p.description) preset.description = p.description;
+    if (p.systemPrompt !== undefined) preset.systemPrompt = p.systemPrompt;
+    return preset;
+  });
 }
 
 function presetById(all: Preset[], id?: string): Preset | null {
@@ -371,12 +393,13 @@ function fetchJson(opts: {
   url: string;
   method: string;
   body?: string;
+  headers?: Record<string, string>;
 }): FetchResult {
   const raw = host.fetch(
     JSON.stringify({
       url: opts.url,
       method: opts.method,
-      headers: { "content-type": "application/json" },
+      headers: opts.headers || { "content-type": "application/json" },
       body: opts.body,
       timeoutMs: 120000,
     }),
@@ -384,11 +407,26 @@ function fetchJson(opts: {
   return parseJson<FetchResult>(raw, { error: "fetch returned non-JSON" });
 }
 
+function lmStudioHeaders(provider: ProviderConfig | null): Record<string, string> {
+  return provider ? authHeaders(provider, getKey(provider)) : { "content-type": "application/json" };
+}
+
+function lmStudioRoot(provider: ProviderConfig | null): string {
+  return provider ? apiRoot(provider) : baseUrl();
+}
+
+// Hosted APIs need an explicit model; take the first one the provider lists.
+function resolveRemoteModelId(provider: ProviderConfig): string {
+  const entry = discoverModels(provider);
+  return entry.models.length ? entry.models[0].id : "";
+}
+
 // Native /api/v1/chat requires a valid loaded model id; model:'' returns 404.
 // Resolve the empty case by probing the model catalog and taking the first
 // loaded instance's `key` (falling back to any listed model's `key`).
-function resolveModelId(): string {
-  const res = fetchJson({ url: `${baseUrl()}/api/v1/models`, method: "GET" });
+function resolveModelId(provider: ProviderConfig | null): string {
+  if (provider && provider.kind !== "lmstudio") return resolveRemoteModelId(provider);
+  const res = fetchJson({ url: `${lmStudioRoot(provider)}/api/v1/models`, method: "GET", headers: lmStudioHeaders(provider) });
   if (res.error || (res.status && res.status >= 400)) return "";
   const data = parseJson<{ models?: { key?: unknown; loaded_instances?: unknown[] }[] }>(res.body || "{}", {});
   const rows = Array.isArray(data.models) ? data.models : [];
@@ -404,15 +442,17 @@ function startFetchStream(opts: {
   url: string;
   method: string;
   body: string;
+  headers?: Record<string, string>;
+  timeoutMs?: number;
 }): { jobId?: string; error?: string } {
   return parseJson<{ jobId?: string; error?: string }>(
     host.fetchStream(
       JSON.stringify({
         url: opts.url,
         method: opts.method,
-        headers: { "content-type": "application/json" },
+        headers: opts.headers || { "content-type": "application/json" },
         body: opts.body,
-        timeoutMs: 120000,
+        timeoutMs: opts.timeoutMs || 120000,
       }),
     ),
     { error: "fetchStream returned non-JSON" },
@@ -513,9 +553,30 @@ function consumeSseEvent(stream: StreamState, segment: string): void {
   } else if (type.indexOf("reasoning.") === 0 && typeof data.content === "string") {
     stream.reasoning += data.content;
   } else if (type === "chat.end") {
-    const rid = data.result && (data.result as { response_id?: unknown }).response_id;
-    if (typeof rid === "string") stream.responseId = rid;
+    const result = (data.result || {}) as { response_id?: unknown; stats?: Record<string, unknown> };
+    if (typeof result.response_id === "string") stream.responseId = result.response_id;
+    const stats = result.stats;
+    if (stats && typeof stats === "object") {
+      const input = typeof stats.input_tokens === "number" ? stats.input_tokens : 0;
+      const output = typeof stats.total_output_tokens === "number" ? stats.total_output_tokens : 0;
+      if (input || output) stream.usage = { input, cachedInput: 0, cacheWrite: 0, output };
+    }
   }
+}
+
+function consumeRouterEvents(stream: StreamState, flush: boolean): void {
+  const { events, rest } = splitSse(stream.buffer, flush);
+  stream.buffer = rest;
+  const acc: StreamDelta = emptyDelta();
+  for (const ev of events) {
+    if (stream.kind === "anthropic") applyAnthropicEvent(acc, ev);
+    else applyOpenAiEvent(acc, ev);
+  }
+  stream.content += acc.content;
+  stream.reasoning += acc.reasoning;
+  if (acc.responseId && !stream.responseId) stream.responseId = acc.responseId;
+  if (acc.error) stream.error = acc.error;
+  stream.usage = mergeUsage(stream.usage, acc.usage);
 }
 
 // Drain complete SSE events from the buffer. Events are terminated by a blank
@@ -568,16 +629,102 @@ function requestInputFromMessages(messages: EngineMessage[]): string {
   return messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
 }
 
+function sessionModelId(s: Session): string {
+  return qualifyModel(s.provider ? s.provider.id : LMSTUDIO_PROVIDER_ID, s.model);
+}
+
+function providerLabel(s: Session): string {
+  return s.provider && s.provider.id !== LMSTUDIO_PROVIDER_ID ? s.provider.name : "LM Studio";
+}
+
+// Stateless APIs get the whole visible conversation each turn; tool results ride as user turns.
+function routerTurns(s: Session, input: string): ChatTurn[] {
+  const turns: ChatTurn[] = [];
+  for (const m of s.messages) {
+    if (m.type === "user") {
+      if (m.content.indexOf(SYSTEM_PROMPT_MARKER) === 0) continue;
+      turns.push({ role: "user", content: m.content });
+    } else if (m.type === "assistant") {
+      turns.push({ role: "assistant", content: m.content });
+    } else if (m.type === "tool_result") {
+      turns.push({ role: "user", content: `tool_result:\n${m.content}` });
+    }
+  }
+  const last = turns[turns.length - 1];
+  if (input && !(last && last.role === "user" && last.content === input)) turns.push({ role: "user", content: input });
+  return turns;
+}
+
+function engineToRouter(messages: EngineMessage[]): { system: string; turns: ChatTurn[] } {
+  const system: string[] = [];
+  const turns: ChatTurn[] = [];
+  for (const m of messages) {
+    if (m.role === "system") system.push(m.content);
+    else turns.push({ role: m.role === "assistant" ? "assistant" : "user", content: m.content });
+  }
+  return { system: system.join("\n\n"), turns };
+}
+
+function startRouterCall(s: Session, provider: ProviderConfig, input: string, opts?: { messages?: EngineMessage[]; watcher?: boolean }): void {
+  let system = s.systemPrompt;
+  let turns: ChatTurn[];
+  if (opts?.messages) {
+    const converted = engineToRouter(opts.messages);
+    system = converted.system;
+    turns = converted.turns;
+  } else if (s.engine && s.engine.kind === "chat" && s.engine.window?.maxMessages !== undefined) {
+    turns = engineToRouter(assembleChat(messagesAsEngineHistory(s), s.engine.window)).turns;
+  } else {
+    turns = routerTurns(s, input);
+  }
+  const key = getKey(provider);
+  const req = chatRequest(provider, key, { model: s.model, system, turns, params: s.params });
+  const started = startFetchStream({ url: req.url, method: req.method, headers: req.headers, body: req.body || "", timeoutMs: req.timeoutMs });
+  if (!started.jobId) {
+    append(s, "system", `${provider.name} stream error: ${redact(started.error || "missing jobId", key)}`);
+    s.done = true;
+    return;
+  }
+  beginStream(s, started.jobId, provider.kind, opts?.watcher);
+}
+
+function beginStream(s: Session, jobId: string, kind: ProviderConfig["kind"], watcher?: boolean): void {
+  s.stream = {
+    jobId,
+    messageId: nextId(s, "lmstudio-assistant"),
+    reasoningId: nextId(s, "lmstudio-reasoning"),
+    content: "",
+    reasoning: "",
+    buffer: "",
+    responseId: null,
+    kind,
+    usage: null,
+    error: null,
+  };
+  s.currentRun = watcher || s.mode === "watcher" ? "watcher" : "interactive";
+  s.done = false;
+}
+
 function startLmStudioCall(s: Session, input: string, opts?: { messages?: EngineMessage[]; watcher?: boolean }): void {
+  if (s.routeError) {
+    append(s, "system", `Router error: ${s.routeError}`);
+    s.done = true;
+    return;
+  }
   if (!s.model) {
-    const resolved = resolveModelId();
+    const resolved = resolveModelId(s.provider);
     if (!resolved) {
-      append(s, "system", "LM Studio error: no model configured and none could be auto-resolved from /api/v1/models.");
+      const where = s.provider && s.provider.kind !== "lmstudio" ? `${s.provider.name} /models` : "/api/v1/models";
+      append(s, "system", `${providerLabel(s)} error: no model configured and none could be auto-resolved from ${where}.`);
       s.done = true;
       return;
     }
     s.model = resolved;
-    rememberLastModel(resolved);
+    rememberLastModel(sessionModelId(s));
+  }
+  if (s.provider && s.provider.kind !== "lmstudio") {
+    startRouterCall(s, s.provider, input, opts);
+    return;
   }
 
   const needsFallbackContext =
@@ -598,10 +745,12 @@ function startLmStudioCall(s: Session, input: string, opts?: { messages?: Engine
     ...s.params,
   };
   if (!opts?.messages && s.previousResponseId) body.previous_response_id = s.previousResponseId;
+  if (typeof body.max_tokens === "number" && body.max_output_tokens === undefined) body.max_output_tokens = body.max_tokens;
 
   const started = startFetchStream({
-    url: `${baseUrl()}/api/v1/chat`,
+    url: `${lmStudioRoot(s.provider)}/api/v1/chat`,
     method: "POST",
+    headers: lmStudioHeaders(s.provider),
     body: JSON.stringify(body),
   });
   if (!started.jobId) {
@@ -610,17 +759,7 @@ function startLmStudioCall(s: Session, input: string, opts?: { messages?: Engine
     s.done = true;
     return;
   }
-  s.stream = {
-    jobId: started.jobId,
-    messageId: nextId(s, "lmstudio-assistant"),
-    reasoningId: nextId(s, "lmstudio-reasoning"),
-    content: "",
-    reasoning: "",
-    buffer: "",
-    responseId: null,
-  };
-  s.currentRun = opts?.watcher || s.mode === "watcher" ? "watcher" : "interactive";
-  s.done = false;
+  beginStream(s, started.jobId, "lmstudio", opts?.watcher);
 }
 
 function startNextIfIdle(s: Session): void {
@@ -851,6 +990,10 @@ function pollStream(s: Session): void {
   if (!s.stream) return;
   const stream = s.stream;
   const poll = pollFetchStream(stream.jobId);
+  if (stream.kind !== "lmstudio") {
+    pollRouterStream(s, stream, poll);
+    return;
+  }
   if (poll.error) {
     append(s, "system", isVramLoadFailure(poll.error) ? vramLoadFailureMessage(s.model) : `LM Studio stream error: ${poll.error}`);
     host.fetchStreamClose(stream.jobId);
@@ -877,6 +1020,60 @@ function pollStream(s: Session): void {
     parseSse(stream, false);
   }
   if (poll.done) parseSse(stream, true);
+  publishStream(s, stream, !!poll.done);
+}
+
+function failStream(s: Session, stream: StreamState, message: string): void {
+  if (stream.content) append(s, "assistant", stream.content, stream.messageId);
+  append(s, "system", message);
+  host.fetchStreamClose(stream.jobId);
+  s.stream = null;
+  if (s.currentRun === "watcher") completeWatcherTick(s, null);
+  else s.done = true;
+}
+
+function pollRouterStream(s: Session, stream: StreamState, poll: StreamPoll): void {
+  const name = s.provider ? s.provider.name : "Provider";
+  const key = s.provider ? getKey(s.provider) : null;
+  if (poll.error) {
+    failStream(s, stream, `${name} stream error: ${redact(poll.error, key)}`);
+    return;
+  }
+  if (poll.status && poll.status >= 400) {
+    const detail = redact(errorTextFromBody(poll.body || (poll.chunks || []).join("")), key).slice(0, 300);
+    const hint = poll.status === 401 || poll.status === 403 ? " — check the API key for this provider" : "";
+    failStream(s, stream, `${name} HTTP ${poll.status}${detail ? `: ${detail}` : ""}${hint}`);
+    return;
+  }
+  const chunks = Array.isArray(poll.chunks) ? poll.chunks : [];
+  if (chunks.length) stream.buffer += chunks.join("");
+  const looksSse = /(^|\n)(data|event):/.test(stream.buffer);
+  if (looksSse || !poll.done) consumeRouterEvents(stream, !!poll.done);
+  if (poll.done && !looksSse && stream.buffer.trim()) {
+    const acc = emptyDelta();
+    if (applyWholeBody(stream.kind, acc, stream.buffer)) {
+      stream.content += acc.content;
+      stream.reasoning += acc.reasoning;
+      if (acc.usage) stream.usage = acc.usage;
+    }
+    stream.buffer = "";
+  }
+  if (stream.error) {
+    failStream(s, stream, `${name} error: ${redact(stream.error, key)}`);
+    return;
+  }
+  publishStream(s, stream, !!poll.done);
+}
+
+function emitUsage(s: Session, usage: Usage | null, messageId: string): void {
+  if (!usage || s.currentRun === "watcher") return;
+  const target = s.messages.find((m) => m.id === messageId);
+  if (target) (target as unknown as Record<string, unknown>).usage = usage;
+  if (readSettings().showUsage === false) return;
+  append(s, "system", `${sessionModelId(s)} · ${formatUsage(usage)}`, undefined, { usage, collapsed: true });
+}
+
+function publishStream(s: Session, stream: StreamState, done: boolean): void {
 
   // Surface reasoning as its own growing 'thinking' entry (a valid
   // ChatMessageKind rendered as a collapsed thinking block); never fold it into
@@ -884,10 +1081,11 @@ function pollStream(s: Session): void {
   if (stream.reasoning) append(s, "thinking", stream.reasoning, stream.reasoningId);
   if (stream.content) append(s, "assistant", stream.content, stream.messageId);
 
-  if (poll.done) {
+  if (done) {
     host.fetchStreamClose(stream.jobId);
     s.stream = null;
-    finishAssistantMessage(s, stream.content, stream.responseId, stream.messageId);
+    emitUsage(s, stream.usage, stream.messageId);
+    finishAssistantMessage(s, stream.content, stream.kind === "lmstudio" ? stream.responseId : null, stream.messageId);
   }
 }
 
@@ -902,6 +1100,9 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
   const boundPreset = presetBoundToModel(allPresets, chosenModel);
   const preset = boundPreset || resolvePreset(ctx.preset, chosenModel);
   const model = chosenModel || cleanModel(preset && preset.model);
+  const router = snapshot();
+  const routerPreset = preset ? router.presets.find((p) => p.id === preset.id) : undefined;
+  const target = resolveModelTarget(model, router.providers, router.defaultProvider, model ? undefined : routerPreset && routerPreset.provider);
   const presetSystemPrompt = preset && typeof preset.systemPrompt === "string" ? preset.systemPrompt : "";
   const generalSystemPrompt =
     (boundPreset ? presetSystemPrompt || defaultSystemPrompt(allPresets) : ctx.systemPrompt || presetSystemPrompt) ||
@@ -938,7 +1139,9 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
     watcherTicks: 0,
     watcherVerdictEmitted: false,
     watcherLastAssistant: "",
-    model,
+    model: target.model,
+    provider: target.provider,
+    routeError: target.error || null,
     params,
     previousResponseId: null,
     pendingInputs: [],
@@ -977,7 +1180,7 @@ const plugin: ChatBackend & {
       append(s, "user", markSystemPrompt(s.systemPrompt), "system-prompt");
     }
     sessions.set(sid, s);
-    rememberLastModel(s.model);
+    rememberLastModel(sessionModelId(s));
     return { sessionId: sid };
   },
 
@@ -1065,25 +1268,18 @@ const plugin: ChatBackend & {
   },
 
   listModels(): Model[] {
-    const res = fetchJson({ url: `${baseUrl()}/api/v1/models`, method: "GET" });
-    if (res.error || (res.status && res.status >= 400)) return [];
-    // Native shape is { models: [{ key, display_name }] }; tolerate the
-    // OpenAI-compatible { data: [{ id }] } shape as a fallback.
-    const data = parseJson<{
-      models?: { key?: unknown; display_name?: unknown }[];
-      data?: { id?: unknown }[];
-    }>(res.body || "{}", {});
+    const router = snapshot();
     const models: Model[] = [];
-    if (Array.isArray(data.models)) {
-      for (const r of data.models) {
-        if (r && typeof r.key === "string") {
-          const displayName = typeof r.display_name === "string" ? r.display_name : r.key;
-          models.push({ id: r.key, displayName });
-        }
-      }
-    } else if (Array.isArray(data.data)) {
-      for (const r of data.data) {
-        if (r && typeof r.id === "string") models.push({ id: r.id, displayName: r.id });
+    for (const provider of router.providers) {
+      if (!provider.enabled) continue;
+      const entry = discoverModels(provider);
+      for (const m of entry.models) {
+        const badges = capabilityBadges(m.capabilities);
+        const info: Model = { id: qualifyModel(provider.id, m.id), displayName: m.displayName, group: provider.name };
+        if (m.loaded) info.badge = "loaded";
+        else if (badges.length) info.badge = badges[0];
+        if (badges.length) info.description = badges.join(" · ");
+        models.push(info);
       }
     }
     return models;
@@ -1095,7 +1291,7 @@ const plugin: ChatBackend & {
 
   sessionInfo(sid): ChatSessionInfo & { systemPrompt?: string } {
     const s = sessions.get(sid);
-    return { model: s ? s.model : undefined, systemPrompt: s ? s.systemPrompt : undefined };
+    return { model: s ? sessionModelId(s) || undefined : undefined, systemPrompt: s ? s.systemPrompt : undefined };
   },
 
   describeModelSwitch,
@@ -1103,7 +1299,7 @@ const plugin: ChatBackend & {
   authorSystemPrompt(sid: string, draft: string): void {
     const s = sessions.get(sid);
     if (!s || !s.model) return;
-    applyAuthoredPrompt(s, s.model, draft);
+    applyAuthoredPrompt(s, sessionModelId(s), draft);
   },
 
   // R6: hand the "tune this pane's system prompt for model X" task off to a
@@ -1130,7 +1326,7 @@ const plugin: ChatBackend & {
     }
 
     const spawned = host.agent.spawn(workspaceId, {
-      task: `Help tune the system prompt for the local LM Studio model "${s.model}".`,
+      task: `Help tune the system prompt for the ${providerLabel(s)} model "${sessionModelId(s)}".`,
     });
     const agentSessionId = spawned && spawned.sessionId;
     if (!agentSessionId) {
@@ -1138,7 +1334,7 @@ const plugin: ChatBackend & {
       return { ok: false, error: "spawn failed" };
     }
 
-    const sent = host.agent.send(agentSessionId, buildAuthoringRequest(s.model, s.systemPrompt, instruction));
+    const sent = host.agent.send(agentSessionId, buildAuthoringRequest(sessionModelId(s), s.systemPrompt, instruction));
     const ticket = sent && sent.ticket;
     if (!ticket) {
       try {
@@ -1150,18 +1346,26 @@ const plugin: ChatBackend & {
       return { ok: false, error: "send failed" };
     }
 
-    s.pendingAuthor = { ticket, agentSessionId, model: s.model };
+    s.pendingAuthor = { ticket, agentSessionId, model: sessionModelId(s) };
     s.done = false;
-    append(s, "system", `Handing off system-prompt authoring for ${s.model} to an agent…`);
+    append(s, "system", `Handing off system-prompt authoring for ${sessionModelId(s)} to an agent…`);
     return { ok: true };
   },
 
   setModel(sid, model) {
     const s = sessions.get(sid);
-    if (!s || typeof model !== "string" || !model) return;
-    if (s.model === model) return;
-    s.model = model;
-    rememberLastModel(model);
+    if (!s || typeof model !== "string" || !model.trim()) return;
+    const router = snapshot();
+    const target = resolveModelTarget(model, router.providers, router.defaultProvider);
+    if (!target.provider || !target.model) {
+      append(s, "system", `Router error: ${target.error || `cannot route ${model}`}`);
+      return;
+    }
+    if (s.provider && s.provider.id === target.provider.id && s.model === target.model) return;
+    s.provider = target.provider;
+    s.model = target.model;
+    s.routeError = null;
+    rememberLastModel(sessionModelId(s));
     // The previous_response_id chains to the OLD model's server-side state; a
     // different model can't continue it. Reset so the next turn re-seeds context
     // (assembledContext) under the new model instead of 400-ing on a stale id.
@@ -1169,4 +1373,18 @@ const plugin: ChatBackend & {
   },
 };
 
-export default { ...plugin, ...decisionModel };
+function onAgentCommand(ctx: { verb: string; args: string[] }): { result: string } | { error: string } {
+  try {
+    return runAgentVerb(ctx.verb, Array.isArray(ctx.args) ? ctx.args : []);
+  } catch (e) {
+    return { error: `router verb failed: ${String(e)}` };
+  }
+}
+
+export default {
+  ...plugin,
+  ...decisionModel,
+  viewCall,
+  onAgentCommand,
+  __test_resetRouter: resetModelCache,
+};

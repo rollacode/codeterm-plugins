@@ -22,6 +22,33 @@
   },
   {
     "kind": "section",
+    "title": "Router",
+    "description": "Providers, model sections and presets are managed in the Router view or with the agent verbs. config.yaml may also declare `providers: [{id, name, kind, baseUrl, apiKeySecret?}]`; those show as read-only.",
+    "fields": [
+      {
+        "kind": "text",
+        "key": "defaultProvider",
+        "label": "Default provider",
+        "placeholder": "lmstudio",
+        "description": "Provider id used for bare model ids when no LM Studio provider is enabled, and for presets without a provider."
+      },
+      {
+        "kind": "toggle",
+        "key": "showUsage",
+        "label": "Show token usage after each reply",
+        "description": "Appends input (cached vs fresh) and output token counts when the provider reports them.",
+        "default": true
+      },
+      {
+        "kind": "info",
+        "level": "info",
+        "title": "Declared providers",
+        "body": "config.yaml may list providers: [{ id, name, kind: openai|anthropic|lmstudio, baseUrl, apiKeySecret? }]. They appear read-only in the Router view. Keys never go in config.yaml."
+      }
+    ]
+  },
+  {
+    "kind": "section",
     "title": "Presets",
     "description": "Open-shell presets select the system prompt, model binding, and native LM Studio parameters for new sessions.",
     "fields": [
@@ -37,6 +64,93 @@
         "level": "info",
         "title": "Preset objects",
         "body": "Edit config.yaml for the presets array. Shape: presets: [{ id, name, systemPrompt?, model?, params? }]. A preset with model binds to that exact model id and wins at session init; if it has no systemPrompt, the default preset prompt is used."
+      }
+    ]
+  },
+  {
+    "kind": "section",
+    "title": "API key slots",
+    "description": "Keys live only in this plugin's secret store. Paste a key in the Router view, or pipe it: printf %s \"$KEY\" | codeterm plugin config lmstudio --secret <slot>. A provider uses <id>_api_key unless it names another slot.",
+    "fields": [
+      {
+        "kind": "api_key",
+        "env_var": "lmstudio_api_key",
+        "label": "LM Studio (optional API token)"
+      },
+      {
+        "kind": "api_key",
+        "env_var": "openai_api_key",
+        "label": "OpenAI"
+      },
+      {
+        "kind": "api_key",
+        "env_var": "anthropic_api_key",
+        "label": "Anthropic"
+      },
+      {
+        "kind": "api_key",
+        "env_var": "openrouter_api_key",
+        "label": "OpenRouter"
+      },
+      {
+        "kind": "api_key",
+        "env_var": "groq_api_key",
+        "label": "Groq"
+      },
+      {
+        "kind": "api_key",
+        "env_var": "together_api_key",
+        "label": "Together"
+      },
+      {
+        "kind": "api_key",
+        "env_var": "deepseek_api_key",
+        "label": "DeepSeek"
+      },
+      {
+        "kind": "api_key",
+        "env_var": "xai_api_key",
+        "label": "xAI"
+      },
+      {
+        "kind": "api_key",
+        "env_var": "mistral_api_key",
+        "label": "Mistral"
+      },
+      {
+        "kind": "api_key",
+        "env_var": "gemini_api_key",
+        "label": "Gemini"
+      },
+      {
+        "kind": "api_key",
+        "env_var": "mimo_api_key",
+        "label": "Xiaomi MiMo"
+      },
+      {
+        "kind": "api_key",
+        "env_var": "litellm_api_key",
+        "label": "LiteLLM proxy"
+      },
+      {
+        "kind": "api_key",
+        "env_var": "custom1_api_key",
+        "label": "Custom slot 1"
+      },
+      {
+        "kind": "api_key",
+        "env_var": "custom2_api_key",
+        "label": "Custom slot 2"
+      },
+      {
+        "kind": "api_key",
+        "env_var": "custom3_api_key",
+        "label": "Custom slot 3"
+      },
+      {
+        "kind": "api_key",
+        "env_var": "custom4_api_key",
+        "label": "Custom slot 4"
       }
     ]
   }

@@ -7,8 +7,8 @@
     {
       "id": "lmstudio",
       "path": "lmstudio",
-      "version": "0.2.3",
-      "minCodeterm": "1.12.3"
+      "version": "0.3.0",
+      "minCodeterm": "1.12.4"
     },
     {
       "id": "git",
