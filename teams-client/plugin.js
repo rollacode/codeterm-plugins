@@ -132,6 +132,9 @@ var PACKAGE = "@pnp/cli-microsoft365";
 var DEFAULT_APP_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
 var APP_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var ROOT = "~/.codeterm/teams-client";
+var STATUS_TIMEOUT_MS = 15e3;
+var GRAPH_TIMEOUT_MS = 3e4;
+var GRAPH_COMMANDS = ["request", "teams"];
 var GRAPH = "https://graph.microsoft.com/v1.0";
 var MAX_COUNT = 50;
 var MAX_BYTES = 32 * 1024;
@@ -228,10 +231,10 @@ function envFor(p) {
     M365_RUNTIME: nativePath(p.runtime)
   };
 }
-function runProcess(bin, args, env) {
+function runProcess(bin, args, env, timeoutMs = STATUS_TIMEOUT_MS) {
   let result;
   try {
-    result = parseJson(host.exec(JSON.stringify({ bin, args, env, timeoutMs: 4500 })));
+    result = parseJson(host.exec(JSON.stringify({ bin, args, env, timeoutMs })));
   } catch (error) {
     return { ok: false, error: String(error), stderr: "" };
   }
@@ -488,12 +491,27 @@ function runM365(args) {
   if (!host.fs.fileExists(p.binary)) return { ok: false, error: "m365 is not installed. Run `codeterm plugin teams-client login` (or Sign in in the view) to install the pinned CLI.", stderr: "" };
   const secured = protectStorage(p);
   if (secured.error) return { ok: false, error: secured.message || "Could not secure the m365 runtime.", stderr: "" };
-  const result = runProcess(nativePath(p.binary), args, envFor(p));
-  return result;
+  return runProcess(nativePath(p.binary), args, envFor(p), GRAPH_COMMANDS.includes(args[0]) ? GRAPH_TIMEOUT_MS : STATUS_TIMEOUT_MS);
+}
+function redactLine(line) {
+  return String(line || "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/eyJ[\w-]+\.[\w-]+(?:\.[\w-]*)?/g, "[redacted]").replace(/\b((?:code|access_token|refresh_token|id_token|client_secret)=)[^&\s"']+/gi, "$1[redacted]").replace(/\bBearer\s+[\w.~+/=-]{16,}/gi, "Bearer [redacted]").replace(/^Error:\s*/, "").trim().slice(0, 400);
 }
 function upstreamLine(text, pattern) {
-  const line = String(text || "").split(/\r?\n/).map((item) => item.trim()).find((item) => pattern.test(item)) || "";
-  return line.replace(/eyJ[\w-]+\.[\w-]+(?:\.[\w-]*)?/g, "[redacted]").replace(/\b((?:code|access_token|refresh_token|id_token|client_secret)=)[^&\s"']+/gi, "$1[redacted]").replace(/^Error:\s*/, "").slice(0, 400);
+  return redactLine(String(text || "").split(/\r?\n/).map((item) => item.trim()).find((item) => pattern.test(item)) || "");
+}
+function graphErrorMessage(value) {
+  const parsed = parseJson(value);
+  const error = parsed && parsed.error;
+  if (typeof error === "string" && error) return error;
+  if (error && typeof error.message === "string" && error.message) return error.code ? `${error.code}: ${error.message}` : error.message;
+  return value;
+}
+function upstreamMessage(text) {
+  const raw = String(text || "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").trim();
+  const whole = graphErrorMessage(raw);
+  const lines = raw.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+  const line = whole !== raw ? whole : lines.find((item) => /^Error:/.test(item)) || lines[0] || "";
+  return redactLine(graphErrorMessage(line.replace(/^Error:\s*/, "")));
 }
 function quoted(line) {
   return line ? ` Microsoft said: "${line}"` : "";
@@ -821,7 +839,7 @@ function status() {
 ${run.stderr}`, configuredAppId());
     if (reauth) return { ...reauth, accounts: [] };
     if (/timed out after \d+ms/i.test(run.error)) return { state: "status-unavailable", message: lifecycleMessage("status-unavailable"), accounts: [] };
-    return { state: "reauth-needed", message: lifecycleMessage("reauth-needed"), accounts: [] };
+    return { state: "reauth-needed", message: `${lifecycleMessage("reauth-needed")}${quoted(upstreamMessage(run.error))}`, accounts: [] };
   }
   const value = parseJson(run.stdout.trim());
   if (!value || !value.connectionName) {
@@ -861,7 +879,9 @@ function jsonCommand(args, appId = configuredAppId()) {
   if (!run.ok) {
     const auth = authState(`${run.error}
 ${run.stderr}`, appId);
-    return { error: auth ? auth.message : "The m365 command failed. Refresh status and try again.", reauth: auth || void 0 };
+    if (auth) return { error: auth.message, reauth: auth };
+    const detail = upstreamMessage(run.error);
+    return { error: detail ? `m365 ${args[0]} failed: ${detail}` : `m365 ${args[0]} failed without an error message (exit ${run.code ?? "unknown"}). Refresh status and try again.` };
   }
   const data = parseJson(run.stdout.trim());
   if (data === null) return { error: "m365 returned an unreadable JSON response." };
@@ -1124,28 +1144,33 @@ function failureForUpstream(message) {
     return { kind: "unknown", detail: "m365 may have retried this throttled send internally and may have delivered the message." };
   }
   if (/timeout|timed out|deadline exceeded|connection reset|connection closed|unexpected EOF|\bEOF\b|broken pipe|lost response|context cancel+ed|terminated|signal|killed|did not finish|could not confirm|unconfirmed/i.test(message)) return { kind: "unknown" };
-  if (/\bHTTP\s+(?:400|401|403|404|413)\b/i.test(message)) return { kind: "upstream-rejected", detail: "Microsoft Graph definitively rejected this request before delivery" };
+  if (/\bHTTP\s+(?:400|401|403|404|413)\b/i.test(message)) return { kind: "upstream-rejected", detail: `Microsoft Graph definitively rejected this request before delivery: ${upstreamMessage(message)}` };
   if (/exec denied|spawn .*?(?:ENOENT|EACCES)|binary .*?not found|not installed|node .*?missing/i.test(message)) {
     return { kind: "upstream-rejected", detail: "the local send prerequisite failed before m365 could run" };
   }
-  return { kind: "unknown", detail: "m365 returned an outcome that cannot prove whether the message was delivered." };
+  return { kind: "unknown", detail: `m365 returned an outcome that cannot prove whether the message was delivered.${quoted(upstreamMessage(message))}` };
 }
-function runTeamsSend(args, then) {
+function runTeamsSend(args) {
   const target = targetState();
-  if (!target.paths) return then({ ok: false, error: target.message, stderr: "" });
-  if (target.state !== "ready") return then({ ok: false, error: target.message, stderr: "" });
+  if (!target.paths) return { ok: false, error: target.message, stderr: "" };
+  if (target.state !== "ready") return { ok: false, error: target.message, stderr: "" };
   const p = target.paths;
-  if (!host.fs.fileExists(p.binary)) return then({ ok: false, error: "m365 is not installed. Run `codeterm plugin teams-client login` (or Sign in in the view) to install the pinned CLI.", stderr: "" });
+  if (!host.fs.fileExists(p.binary)) return { ok: false, error: "m365 is not installed. Run `codeterm plugin teams-client login` (or Sign in in the view) to install the pinned CLI.", stderr: "" };
   const secured = protectStorage(p);
-  if (secured.error) return then({ ok: false, error: secured.message || "Could not secure the m365 runtime.", stderr: "" });
-  return host.exec.async({ bin: nativePath(p.binary), args, env: envFor(p), timeoutMs: 5e3 }, (result) => {
-    const stdout = String(result.stdout || "");
-    const stderr = String(result.stderr || "");
-    if (result.error) return then({ ok: false, error: `m365 send process returned an unconfirmed result: ${String(result.error)}`, stderr, code: result.code });
-    if (result.done !== true || typeof result.code !== "number") return then({ ok: false, error: "m365 send process outcome is unknown.", stderr });
-    if (result.code !== 0) return then({ ok: false, error: stderr || stdout || `m365 exited ${result.code}`, stderr, code: result.code });
-    return then({ ok: true, stdout, stderr });
-  });
+  if (secured.error) return { ok: false, error: secured.message || "Could not secure the m365 runtime.", stderr: "" };
+  let result;
+  try {
+    result = parseJson(host.exec(JSON.stringify({ bin: nativePath(p.binary), args, env: envFor(p), timeoutMs: GRAPH_TIMEOUT_MS })));
+  } catch (error) {
+    return { ok: false, error: `m365 send process returned an unconfirmed result: ${String(error)}`, stderr: "" };
+  }
+  if (!result) return { ok: false, error: "m365 send process outcome is unknown.", stderr: "" };
+  const stdout = String(result.stdout || "");
+  const stderr = String(result.stderr || "");
+  if (result.error) return { ok: false, error: `m365 send process returned an unconfirmed result: ${String(result.error)}`, stderr, code: result.code };
+  if (typeof result.code !== "number") return { ok: false, error: "m365 send process outcome is unknown.", stderr };
+  if (result.code !== 0) return { ok: false, error: stderr || stdout || `m365 exited ${result.code}`, stderr, code: result.code };
+  return { ok: true, stdout, stderr };
 }
 function messageIdFromOutput(output) {
   const value = parseJson(output.trim());
@@ -1248,27 +1273,26 @@ function sendCommand(origin, args) {
   const bodyFile = writeSendBody(p, key, parsed.text);
   if (!bodyFile) return persistFailure(p, ledger, attempt, "upstream-rejected", "the message body could not be staged in the plugin data directory; m365 was not contacted");
   const url = `${GRAPH}/chats/${parsed.chatId}/messages`;
-  return runTeamsSend(["request", "--url", url, "--method", "post", "--content-type", "application/json", "--body", `@${nativePath(bodyFile)}`, "--output", "json"], (run) => {
-    try {
-      host.fs.removeFile(bodyFile);
-    } catch {
-    }
-    if (!run.ok) {
-      const upstream = failureForUpstream(`${run.error}
+  const run = runTeamsSend(["request", "--url", url, "--method", "post", "--content-type", "application/json", "--body", `@${nativePath(bodyFile)}`, "--output", "json"]);
+  try {
+    host.fs.removeFile(bodyFile);
+  } catch {
+  }
+  if (!run.ok) {
+    const upstream = failureForUpstream(`${run.error}
 ${run.stderr}`);
-      return persistFailure(p, ledger, attempt, upstream.kind, upstream.detail, upstream.cause);
-    }
-    const graphMessageId = messageIdFromOutput(run.stdout);
-    if (!graphMessageId) return persistFailure(p, ledger, attempt, "unknown", "m365 exited cleanly but Microsoft Graph returned no message id, so delivery is not confirmed.");
-    attempt.graphMessageId = graphMessageId;
-    attempt.state = "sent";
-    attempt.updatedAt = now();
-    delete attempt.failure;
-    delete attempt.failureCause;
-    delete attempt.failureMessage;
-    if (!persistOutbox(p, ledger)) return persistFailure(p, ledger, attempt, "unknown");
-    return attemptResult(attempt);
-  });
+    return persistFailure(p, ledger, attempt, upstream.kind, upstream.detail, upstream.cause);
+  }
+  const graphMessageId = messageIdFromOutput(run.stdout);
+  if (!graphMessageId) return persistFailure(p, ledger, attempt, "unknown", "m365 exited cleanly but Microsoft Graph returned no message id, so delivery is not confirmed.");
+  attempt.graphMessageId = graphMessageId;
+  attempt.state = "sent";
+  attempt.updatedAt = now();
+  delete attempt.failure;
+  delete attempt.failureCause;
+  delete attempt.failureMessage;
+  if (!persistOutbox(p, ledger)) return persistFailure(p, ledger, attempt, "unknown");
+  return attemptResult(attempt);
 }
 function logout() {
   const target = targetState();
@@ -1285,7 +1309,7 @@ function logout() {
     const reauth = authState(`${run.error}
 ${run.stderr}`, configuredAppId());
     if (reauth) return { error: reauth.message };
-    return { error: "m365 could not clear its plugin-owned session files. The files were kept so logout can be retried." };
+    return { error: `m365 could not clear its plugin-owned session files.${quoted(upstreamMessage(run.error))} The files were kept so logout can be retried.` };
   }
   for (const file of [p.msal, p.current, p.all]) {
     if (host.fs.fileExists(file) && !host.fs.removeFile(file)) return { error: "m365 logged out, but a plugin-owned cache file could not be removed. Retry logout." };
@@ -1436,7 +1460,9 @@ function loginPoll(jobId) {
 ${poll.stderr || ""}
 ${poll.stdout || ""}`;
     const auth = authState(reason, login.appId);
-    return finishLoginJob(jobId, auth ? auth.state : "install-failed", auth ? auth.message : lifecycleMessage("install-failed"));
+    const detail = upstreamMessage(`${poll.stderr || ""}
+${poll.error || ""}`);
+    return finishLoginJob(jobId, auth ? auth.state : "install-failed", auth ? auth.message : `${lifecycleMessage("install-failed")}${detail ? ` Details: "${detail}"` : ""}`);
   }
   if (login.stage === "pack") {
     const packed = packageFromPackResult(login.paths, login.target, String(poll.stdout || ""));
@@ -1485,6 +1511,10 @@ function viewCall(method, args) {
   const value = args || {};
   if (method === "status") return { ...statusView(), appId: configuredAppId(), loginJobId: activeLoginJobId };
   if (method === "loginStart") return loginStart(value.authType === "deviceCode" ? "deviceCode" : "browser");
+  if (method === "accounts") {
+    const listed = agentAccounts();
+    return "error" in listed ? listed : parseJson(listed.result) || { accounts: [] };
+  }
   if (method === "loginPoll") return loginPoll(String(value.jobId || ""));
   if (method === "useAccount") return useAccount(String(value.id || ""));
   if (method === "logout") return logout();
@@ -1551,6 +1581,8 @@ var plugin = {
   __test_signInTtlMs: SIGN_IN_TTL_MS,
   __test_signInWrapper: SIGN_IN_WRAPPER,
   __test_defaultAppId: DEFAULT_APP_ID,
-  __test_metadataReader: METADATA_READER
+  __test_metadataReader: METADATA_READER,
+  __test_timeouts: { status: STATUS_TIMEOUT_MS, graph: GRAPH_TIMEOUT_MS },
+  __test_upstreamMessage: upstreamMessage
 };
 var plugin_default = plugin;

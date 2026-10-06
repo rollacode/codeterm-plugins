@@ -7,6 +7,10 @@ const PACKAGE = "@pnp/cli-microsoft365";
 const DEFAULT_APP_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
 const APP_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ROOT = "~/.codeterm/teams-client";
+// Failure deadlines only: on a Windows host `m365 status` takes about 3 s and a Graph request about 3.5 s.
+const STATUS_TIMEOUT_MS = 15000;
+const GRAPH_TIMEOUT_MS = 30000;
+const GRAPH_COMMANDS = ["request", "teams"];
 const GRAPH = "https://graph.microsoft.com/v1.0";
 const MAX_COUNT = 50;
 const MAX_BYTES = 32 * 1024;
@@ -25,6 +29,7 @@ const METADATA_READER = "const path=require('node:path');const {pathToFileURL}=r
 type Paths = { root: string; home: string; runtime: string; binary: string; npmCache: string; msal: string; current: string; all: string; outbox: string; scope: string };
 type RunResult = { ok: true; stdout: string; stderr: string } | { ok: false; error: string; stderr: string; code?: number };
 type Target = { platform: string; arch: string; node: string; npm: string; m365: string; integrity: string };
+type AuthFailure = { state: string; message: string };
 type StateResult = { state: string; message: string; accountId?: string | null; upn?: string | null; tenantId?: string | null; expiresOn?: string | null; accounts?: any[] };
 type LoginAuthType = "browser" | "deviceCode";
 // The loopback link needs one click and no code; device code is the fallback when the link is refused.
@@ -43,7 +48,7 @@ export type SignInLog =
   | { state: "awaiting-device-code"; signInUrl: string; deviceCode: string }
   | { state: "cancelled" }
   | { state: "expired" }
-  | { state: "failed"; failure: { state: string; message: string } };
+  | { state: "failed"; failure: AuthFailure };
 
 const loginJobs: Record<string, LoginJob> = {};
 let activeLoginJobId: string | null = null;
@@ -127,9 +132,9 @@ function envFor(p: Paths): Record<string, string> {
   };
 }
 
-function runProcess(bin: string, args: string[], env: Record<string, string>): RunResult {
+function runProcess(bin: string, args: string[], env: Record<string, string>, timeoutMs = STATUS_TIMEOUT_MS): RunResult {
   let result: { code?: number; stdout?: string; stderr?: string; error?: string } | null;
-  try { result = parseJson(host.exec(JSON.stringify({ bin, args, env, timeoutMs: 4500 }))); }
+  try { result = parseJson(host.exec(JSON.stringify({ bin, args, env, timeoutMs }))); }
   catch (error) { return { ok: false, error: String(error), stderr: "" }; }
   if (!result) return { ok: false, error: `${bin} returned an unreadable process result.`, stderr: "" };
   const stdout = String(result.stdout || "");
@@ -328,7 +333,7 @@ function startBrowserLogin(p: Paths, target: Target, authType: LoginAuthType = "
   return startLoginProcess(p, target, "browser", args, undefined, authType, lease, appId);
 }
 
-function signInLogFailure(text: string, appId?: string): { state: string; message: string } | null {
+function signInLogFailure(text: string, appId?: string): AuthFailure | null {
   const known = authState(text, appId);
   if (known) return known;
   const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -386,18 +391,40 @@ function runM365(args: string[]): RunResult {
   if (!host.fs.fileExists(p.binary)) return { ok: false, error: "m365 is not installed. Run `codeterm plugin teams-client login` (or Sign in in the view) to install the pinned CLI.", stderr: "" };
   const secured = protectStorage(p);
   if (secured.error) return { ok: false, error: secured.message || "Could not secure the m365 runtime.", stderr: "" };
-  const result = runProcess(nativePath(p.binary), args, envFor(p));
-  return result;
+  return runProcess(nativePath(p.binary), args, envFor(p), GRAPH_COMMANDS.includes(args[0]) ? GRAPH_TIMEOUT_MS : STATUS_TIMEOUT_MS);
 }
 
 // Microsoft's own error line, without anything shaped like a token or an authorization code.
-function upstreamLine(text: string, pattern: RegExp): string {
-  const line = String(text || "").split(/\r?\n/).map((item) => item.trim()).find((item) => pattern.test(item)) || "";
-  return line
+function redactLine(line: string): string {
+  return String(line || "")
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/eyJ[\w-]+\.[\w-]+(?:\.[\w-]*)?/g, "[redacted]")
     .replace(/\b((?:code|access_token|refresh_token|id_token|client_secret)=)[^&\s"']+/gi, "$1[redacted]")
+    .replace(/\bBearer\s+[\w.~+/=-]{16,}/gi, "Bearer [redacted]")
     .replace(/^Error:\s*/, "")
+    .trim()
     .slice(0, 400);
+}
+
+function upstreamLine(text: string, pattern: RegExp): string {
+  return redactLine(String(text || "").split(/\r?\n/).map((item) => item.trim()).find((item) => pattern.test(item)) || "");
+}
+
+function graphErrorMessage(value: string): string {
+  const parsed = parseJson<any>(value);
+  const error = parsed && parsed.error;
+  if (typeof error === "string" && error) return error;
+  if (error && typeof error.message === "string" && error.message) return error.code ? `${error.code}: ${error.message}` : error.message;
+  return value;
+}
+
+// m365 prints `Error: <message>`; a Graph JSON error body is reduced to its code and message.
+function upstreamMessage(text: string): string {
+  const raw = String(text || "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").trim();
+  const whole = graphErrorMessage(raw);
+  const lines = raw.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+  const line = whole !== raw ? whole : lines.find((item) => /^Error:/.test(item)) || lines[0] || "";
+  return redactLine(graphErrorMessage(line.replace(/^Error:\s*/, "")));
 }
 
 function quoted(line: string): string {
@@ -408,7 +435,7 @@ const REDIRECT_REFUSED = /AADSTS50011|AADSTS500113|redirect_uri_mismatch|redirec
 const CONSENT_REQUIRED = /AADSTS65001|AADSTS65004|AADSTS90094|AADSTS90095|consent_required|consent[^\n]*(?:not granted|withdrawn|revoked|removed)|(?:withdrawn|revoked|removed)[^\n]*consent|admin(?:istrator)? (?:consent|approval)|has not consented|Missing scope permissions|API requires one of/i;
 const LOOPBACK_UNAVAILABLE = /listen (?:EADDRINUSE|EACCES|EADDRNOTAVAIL)|EADDRINUSE[^\n]*(?:127\.0\.0\.1|localhost|::1)/i;
 
-function authState(text: string, appId?: string): { state: string; message: string } | null {
+function authState(text: string, appId?: string): AuthFailure | null {
   const value = String(text || "");
   if (REDIRECT_REFUSED.test(value)) {
     return { state: "wrong-client-redirect", message: `Microsoft refused the localhost sign-in link because app id ${appId || "in use"} has no http://localhost redirect registered.${quoted(upstreamLine(value, REDIRECT_REFUSED))} Run login --device-code, or set Sign-in app id to ${DEFAULT_APP_ID} (Microsoft Graph Command Line Tools) in Teams Client settings and sign in again.` };
@@ -669,7 +696,7 @@ function status(): StateResult {
     const reauth = authState(`${run.error}\n${run.stderr}`, configuredAppId());
     if (reauth) return { ...reauth, accounts: [] };
     if (/timed out after \d+ms/i.test(run.error)) return { state: "status-unavailable", message: lifecycleMessage("status-unavailable"), accounts: [] };
-    return { state: "reauth-needed", message: lifecycleMessage("reauth-needed"), accounts: [] };
+    return { state: "reauth-needed", message: `${lifecycleMessage("reauth-needed")}${quoted(upstreamMessage(run.error))}`, accounts: [] };
   }
   const value = parseJson<any>(run.stdout.trim());
   if (!value || !value.connectionName) {
@@ -708,11 +735,13 @@ function statusView(): StateResult {
   return value;
 }
 
-function jsonCommand(args: string[], appId = configuredAppId()): { data?: any; error?: string; reauth?: { state: string; message: string } } {
+function jsonCommand(args: string[], appId = configuredAppId()): { data?: any; error?: string; reauth?: AuthFailure } {
   const run = runM365(args.concat(["--output", "json"]));
   if (!run.ok) {
     const auth = authState(`${run.error}\n${run.stderr}`, appId);
-    return { error: auth ? auth.message : "The m365 command failed. Refresh status and try again.", reauth: auth || undefined };
+    if (auth) return { error: auth.message, reauth: auth };
+    const detail = upstreamMessage(run.error);
+    return { error: detail ? `m365 ${args[0]} failed: ${detail}` : `m365 ${args[0]} failed without an error message (exit ${run.code ?? "unknown"}). Refresh status and try again.` };
   }
   const data = parseJson(run.stdout.trim());
   if (data === null) return { error: "m365 returned an unreadable JSON response." };
@@ -1009,29 +1038,32 @@ function failureForUpstream(message: string): { kind: SendFailure; detail?: stri
     return { kind: "unknown", detail: "m365 may have retried this throttled send internally and may have delivered the message." };
   }
   if (/timeout|timed out|deadline exceeded|connection reset|connection closed|unexpected EOF|\bEOF\b|broken pipe|lost response|context cancel+ed|terminated|signal|killed|did not finish|could not confirm|unconfirmed/i.test(message)) return { kind: "unknown" };
-  if (/\bHTTP\s+(?:400|401|403|404|413)\b/i.test(message)) return { kind: "upstream-rejected", detail: "Microsoft Graph definitively rejected this request before delivery" };
+  if (/\bHTTP\s+(?:400|401|403|404|413)\b/i.test(message)) return { kind: "upstream-rejected", detail: `Microsoft Graph definitively rejected this request before delivery: ${upstreamMessage(message)}` };
   if (/exec denied|spawn .*?(?:ENOENT|EACCES)|binary .*?not found|not installed|node .*?missing/i.test(message)) {
     return { kind: "upstream-rejected", detail: "the local send prerequisite failed before m365 could run" };
   }
-  return { kind: "unknown", detail: "m365 returned an outcome that cannot prove whether the message was delivered." };
+  return { kind: "unknown", detail: `m365 returned an outcome that cannot prove whether the message was delivered.${quoted(upstreamMessage(message))}` };
 }
 
-function runTeamsSend(args: string[], then: (run: RunResult) => unknown): any {
+// Blocking on purpose: host.exec.async gives up after 5 s whatever timeoutMs says, shorter than a Graph send on a slow host.
+function runTeamsSend(args: string[]): RunResult {
   const target = targetState();
-  if (!target.paths) return then({ ok: false, error: target.message, stderr: "" });
-  if (target.state !== "ready") return then({ ok: false, error: target.message, stderr: "" });
+  if (!target.paths) return { ok: false, error: target.message, stderr: "" };
+  if (target.state !== "ready") return { ok: false, error: target.message, stderr: "" };
   const p = target.paths;
-  if (!host.fs.fileExists(p.binary)) return then({ ok: false, error: "m365 is not installed. Run `codeterm plugin teams-client login` (or Sign in in the view) to install the pinned CLI.", stderr: "" });
+  if (!host.fs.fileExists(p.binary)) return { ok: false, error: "m365 is not installed. Run `codeterm plugin teams-client login` (or Sign in in the view) to install the pinned CLI.", stderr: "" };
   const secured = protectStorage(p);
-  if (secured.error) return then({ ok: false, error: secured.message || "Could not secure the m365 runtime.", stderr: "" });
-  return host.exec.async({ bin: nativePath(p.binary), args, env: envFor(p), timeoutMs: 5000 }, (result) => {
-    const stdout = String(result.stdout || "");
-    const stderr = String(result.stderr || "");
-    if (result.error) return then({ ok: false, error: `m365 send process returned an unconfirmed result: ${String(result.error)}`, stderr, code: result.code });
-    if (result.done !== true || typeof result.code !== "number") return then({ ok: false, error: "m365 send process outcome is unknown.", stderr });
-    if (result.code !== 0) return then({ ok: false, error: stderr || stdout || `m365 exited ${result.code}`, stderr, code: result.code });
-    return then({ ok: true, stdout, stderr });
-  });
+  if (secured.error) return { ok: false, error: secured.message || "Could not secure the m365 runtime.", stderr: "" };
+  let result: { code?: number; stdout?: string; stderr?: string; error?: string } | null;
+  try { result = parseJson(host.exec(JSON.stringify({ bin: nativePath(p.binary), args, env: envFor(p), timeoutMs: GRAPH_TIMEOUT_MS }))); }
+  catch (error) { return { ok: false, error: `m365 send process returned an unconfirmed result: ${String(error)}`, stderr: "" }; }
+  if (!result) return { ok: false, error: "m365 send process outcome is unknown.", stderr: "" };
+  const stdout = String(result.stdout || "");
+  const stderr = String(result.stderr || "");
+  if (result.error) return { ok: false, error: `m365 send process returned an unconfirmed result: ${String(result.error)}`, stderr, code: result.code };
+  if (typeof result.code !== "number") return { ok: false, error: "m365 send process outcome is unknown.", stderr };
+  if (result.code !== 0) return { ok: false, error: stderr || stdout || `m365 exited ${result.code}`, stderr, code: result.code };
+  return { ok: true, stdout, stderr };
 }
 
 function messageIdFromOutput(output: string): string | undefined {
@@ -1144,23 +1176,22 @@ function sendCommand(origin: SendOrigin, args: string[]): { result: string } | {
   if (!bodyFile) return persistFailure(p, ledger, attempt, "upstream-rejected", "the message body could not be staged in the plugin data directory; m365 was not contacted");
 
   const url = `${GRAPH}/chats/${parsed.chatId}/messages`;
-  return runTeamsSend(["request", "--url", url, "--method", "post", "--content-type", "application/json", "--body", `@${nativePath(bodyFile)}`, "--output", "json"], (run) => {
-    try { host.fs.removeFile(bodyFile); } catch { }
-    if (!run.ok) {
-      const upstream = failureForUpstream(`${run.error}\n${run.stderr}`);
-      return persistFailure(p, ledger, attempt!, upstream.kind, upstream.detail, upstream.cause);
-    }
-    const graphMessageId = messageIdFromOutput(run.stdout);
-    if (!graphMessageId) return persistFailure(p, ledger, attempt!, "unknown", "m365 exited cleanly but Microsoft Graph returned no message id, so delivery is not confirmed.");
-    attempt!.graphMessageId = graphMessageId;
-    attempt!.state = "sent";
-    attempt!.updatedAt = now();
-    delete attempt!.failure;
-    delete attempt!.failureCause;
-    delete attempt!.failureMessage;
-    if (!persistOutbox(p, ledger)) return persistFailure(p, ledger, attempt!, "unknown");
-    return attemptResult(attempt!);
-  });
+  const run = runTeamsSend(["request", "--url", url, "--method", "post", "--content-type", "application/json", "--body", `@${nativePath(bodyFile)}`, "--output", "json"]);
+  try { host.fs.removeFile(bodyFile); } catch { }
+  if (!run.ok) {
+    const upstream = failureForUpstream(`${run.error}\n${run.stderr}`);
+    return persistFailure(p, ledger, attempt, upstream.kind, upstream.detail, upstream.cause);
+  }
+  const graphMessageId = messageIdFromOutput(run.stdout);
+  if (!graphMessageId) return persistFailure(p, ledger, attempt, "unknown", "m365 exited cleanly but Microsoft Graph returned no message id, so delivery is not confirmed.");
+  attempt.graphMessageId = graphMessageId;
+  attempt.state = "sent";
+  attempt.updatedAt = now();
+  delete attempt.failure;
+  delete attempt.failureCause;
+  delete attempt.failureMessage;
+  if (!persistOutbox(p, ledger)) return persistFailure(p, ledger, attempt, "unknown");
+  return attemptResult(attempt);
 }
 
 function logout(): { result: string } | { error: string } {
@@ -1177,7 +1208,7 @@ function logout(): { result: string } | { error: string } {
   if (!run.ok) {
     const reauth = authState(`${run.error}\n${run.stderr}`, configuredAppId());
     if (reauth) return { error: reauth.message };
-    return { error: "m365 could not clear its plugin-owned session files. The files were kept so logout can be retried." };
+    return { error: `m365 could not clear its plugin-owned session files.${quoted(upstreamMessage(run.error))} The files were kept so logout can be retried.` };
   }
   for (const file of [p.msal, p.current, p.all]) {
     if (host.fs.fileExists(file) && !host.fs.removeFile(file)) return { error: "m365 logged out, but a plugin-owned cache file could not be removed. Retry logout." };
@@ -1267,7 +1298,7 @@ function signInPending(jobId: string, log: SignInLog, login?: LoginJob): any {
 }
 
 // One fallback per sign-in: the code job never falls back again.
-function fallBackToDeviceCode(jobId: string, login: LoginJob, failure: { state: string; message: string }): any {
+function fallBackToDeviceCode(jobId: string, login: LoginJob, failure: AuthFailure): any {
   try { host.exec.close(jobId); } catch { }
   finishLoginJob(jobId, failure.state);
   const started = startBrowserLogin(login.paths, login.target, "deviceCode");
@@ -1278,7 +1309,7 @@ function fallBackToDeviceCode(jobId: string, login: LoginJob, failure: { state: 
 }
 
 // m365 asks for graph/.default, so a sign-in can succeed while the app still lacks the chat scopes.
-function missingChatConsent(login: LoginJob): { state: string; message: string } | null {
+function missingChatConsent(login: LoginJob): AuthFailure | null {
   const probe = jsonCommand(["request", "--url", `${GRAPH}/me/chats?$top=1`], login.appId);
   return probe.reauth?.state === "consent-required" ? probe.reauth : null;
 }
@@ -1319,7 +1350,8 @@ function loginPoll(jobId: string): any {
 ${poll.stderr || ""}
 ${poll.stdout || ""}`;
     const auth = authState(reason, login.appId);
-    return finishLoginJob(jobId, auth ? auth.state : "install-failed", auth ? auth.message : lifecycleMessage("install-failed"));
+    const detail = upstreamMessage(`${poll.stderr || ""}\n${poll.error || ""}`);
+    return finishLoginJob(jobId, auth ? auth.state : "install-failed", auth ? auth.message : `${lifecycleMessage("install-failed")}${detail ? ` Details: "${detail}"` : ""}`);
   }
   if (login.stage === "pack") {
     const packed = packageFromPackResult(login.paths, login.target, String(poll.stdout || ""));
@@ -1357,6 +1389,10 @@ function viewCall(method: string, args: any): unknown {
   const value = args || {};
   if (method === "status") return { ...statusView(), appId: configuredAppId(), loginJobId: activeLoginJobId };
   if (method === "loginStart") return loginStart(value.authType === "deviceCode" ? "deviceCode" : "browser");
+  if (method === "accounts") {
+    const listed = agentAccounts();
+    return "error" in listed ? listed : parseJson(listed.result) || { accounts: [] };
+  }
   if (method === "loginPoll") return loginPoll(String(value.jobId || ""));
   if (method === "useAccount") return useAccount(String(value.id || ""));
   if (method === "logout") return logout();
@@ -1424,6 +1460,8 @@ const plugin: PluginModule = {
   __test_signInWrapper: SIGN_IN_WRAPPER,
   __test_defaultAppId: DEFAULT_APP_ID,
   __test_metadataReader: METADATA_READER,
+  __test_timeouts: { status: STATUS_TIMEOUT_MS, graph: GRAPH_TIMEOUT_MS },
+  __test_upstreamMessage: upstreamMessage,
 };
 
 export default plugin;

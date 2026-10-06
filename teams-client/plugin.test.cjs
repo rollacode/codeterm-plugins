@@ -437,7 +437,7 @@ test("Windows sign-in protects the plugin root using the blocking whoami result 
     assert.ok(result.jobId, result.error || "sign-in launch started");
     assert.ok(env.calls.some((call) => call.bin === "whoami.exe"), "host.exec returned the Windows principal synchronously");
     assert.ok(env.calls.some((call) => call.bin === "icacls.exe"), "plugin root ACL was applied before sign-in launch");
-    assert.equal(env.calls.find((call) => call.bin === "whoami.exe").timeoutMs, 4500);
+    assert.equal(env.calls.find((call) => call.bin === "whoami.exe").timeoutMs, plugin.__test_timeouts.status);
     assert.equal(plugin.__test_loginPoll(result.jobId).state, "logged-in");
     plugin.__test_status();
     assert.equal(env.calls.filter((call) => call.bin === "whoami.exe").length, 1, "the cached storage protection avoids another identity subprocess per status");
@@ -1634,6 +1634,69 @@ test("the view labels the new sign-in states and shows a device code", () => {
   const page = renderToStaticMarkup(React.createElement(SignInLink, { url: "https://microsoft.com/devicelogin", code: "ABCD-EFGH" }));
   assert.ok(page.includes("ABCD-EFGH"));
   assert.ok(page.includes("https://microsoft.com/devicelogin"));
+});
+
+// Verbatim from the owner DEV machine: m365 request against /me/chats with a token minted from graph/.default.
+const OWNER_MISSING_SCOPE = "Error: Missing scope permissions on the request. API requires one of 'Chat.ReadBasic, Chat.Read, Chat.ReadWrite'. Scopes on the request 'Group.ReadWrite.All, openid, profile, User.Read, User.Read.All, email'";
+test("m365 calls use realistic failure deadlines: 15 s for status and local steps, 30 s for Graph", () => {
+  assert.deepEqual(plugin.__test_timeouts, { status: 15000, graph: 30000 });
+  const env = mockHost({ platform: "win32", arch: "x64", isWindows: true });
+  try {
+    assert.equal(plugin.__test_status().state, "logged-in");
+    assert.equal(command("chats").error, undefined);
+    const sent = command("send", ["19:chat-a@thread.v2", "--key", "deadline-key", "hello"]);
+    assert.equal(JSON.parse(sent.result).graphMessageId, "1700000000001");
+    const m365 = env.calls.filter((call) => call.bin === "m365.cmd");
+    for (const call of m365.filter((item) => item.args[0] === "status" || item.args[0] === "connection")) assert.equal(call.timeoutMs, 15000, call.args.join(" "));
+    const graph = m365.filter((call) => call.args[0] === "request");
+    assert.equal(graph.length >= 2, true, "a chat list and a send both ran");
+    for (const call of graph) assert.equal(call.timeoutMs, 30000, call.args.join(" "));
+    for (const call of env.calls) assert.equal(call.timeoutMs >= 15000, true, `${call.bin} ${call.args[0]} keeps a realistic deadline`);
+  } finally { env.cleanup(); }
+});
+
+test("Graph's missing-scope 403 from the owner's tenant is consent-required, not the generic m365 error", () => {
+  const env = mockHost({ platform: "win32", arch: "x64", isWindows: true, chatsError: OWNER_MISSING_SCOPE });
+  try {
+    const chats = command("chats", ["Alexander Kouznetsov"]);
+    assert.doesNotMatch(chats.error, /The m365 command failed/);
+    assert.match(chats.error, /Microsoft Graph consent is missing for app id 14d82eec-204b-4c2f-b7e8-296a70dab67e/);
+    assert.ok(chats.error.includes(OWNER_MISSING_SCOPE.slice("Error: ".length)), "Microsoft's line is quoted verbatim");
+  } finally { env.cleanup(); }
+});
+
+test("an unmapped m365 failure surfaces Microsoft's exact message, redacted, never only generic text", () => {
+  const exotic = "Error: The chat service is temporarily unavailable in region EUR (UnknownError 500)";
+  const env = mockHost({ platform: "darwin", chatsError: exotic });
+  try {
+    assert.equal(command("chats").error, "m365 request failed: The chat service is temporarily unavailable in region EUR (UnknownError 500)");
+  } finally { env.cleanup(); }
+  const statusEnv = mockHost({ platform: "darwin", statusError: "Error: Unexpected token in .cli-m365-connection.json" });
+  try {
+    const health = JSON.parse(command("health").result);
+    assert.equal(health.state, "reauth-needed");
+    assert.ok(health.message.includes('Microsoft said: "Unexpected token in .cli-m365-connection.json"'), health.message);
+  } finally { statusEnv.cleanup(); }
+  const sendEnv = mockHost({ platform: "darwin" });
+  try {
+    sendEnv.setSendMode("rejected");
+    assert.match(command("send", ["19:chat-a@thread.v2", "--key", "rejected-key", "hello"]).error, /^upstream-rejected: .*HTTP 403 Forbidden/);
+  } finally { sendEnv.cleanup(); }
+  assert.equal(plugin.__test_upstreamMessage('{"error":{"code":"BadRequest","message":"Invalid chat id."}}'), "BadRequest: Invalid chat id.");
+  assert.equal(plugin.__test_upstreamMessage('Error: {"error":{"code":"BadRequest","message":"Invalid chat id."}}'), "BadRequest: Invalid chat id.");
+  assert.equal(plugin.__test_upstreamMessage('{"error":"Resource not found"}'), "Resource not found");
+  assert.equal(plugin.__test_upstreamMessage("\u001b[31mError: Forbidden\u001b[39m\nRun 'm365 request -h' for help."), "Forbidden");
+  const leaked = plugin.__test_upstreamMessage("Error: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJvd25lciJ9.c2lnbmF0dXJl rejected; access_token=plainsecret Bearer abcdefghijklmnopqrstuvwxyz0123");
+  for (const secret of ["eyJhbGciOiJSUzI1NiJ9", "plainsecret", "abcdefghijklmnopqrstuvwxyz0123"]) assert.equal(leaked.includes(secret), false, secret);
+});
+
+test("the view's accounts call is served, so it no longer masks a chats error", () => {
+  const env = mockHost({ platform: "darwin" });
+  try {
+    const listed = plugin.viewCall("accounts", {});
+    assert.equal(listed.error, undefined);
+    assert.equal(listed.accounts.some((account) => account.active && account.upn === "jordan@north.example"), true);
+  } finally { env.cleanup(); }
 });
 
 for (const [name, fn] of tests) {
