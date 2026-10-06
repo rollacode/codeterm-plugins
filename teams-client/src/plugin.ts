@@ -371,6 +371,7 @@ function lifecycleMessage(state: string, detail?: string): string {
     "logged-out": "You are signed out. Run `codeterm plugin teams-client login` (or Sign in in the view) to sign in.",
     "logged-in": "Microsoft Teams is connected.",
     "reauth-needed": "The Microsoft session needs a new sign-in. Sign in again with `codeterm plugin teams-client login` (or Sign in in the view).",
+    "status-unavailable": "m365 did not answer in time, so the sign-in state is unknown. Refresh in a moment; sign in again only if this keeps happening.",
   };
   return messages[state] || detail || "Teams Client could not determine its current state.";
 }
@@ -615,6 +616,7 @@ function status(): StateResult {
   if (!run.ok) {
     const reauth = authState(`${run.error}\n${run.stderr}`);
     if (reauth) return { ...reauth, accounts: [] };
+    if (/timed out after \d+ms/i.test(run.error)) return { state: "status-unavailable", message: lifecycleMessage("status-unavailable"), accounts: [] };
     return { state: "reauth-needed", message: lifecycleMessage("reauth-needed"), accounts: [] };
   }
   const value = parseJson<any>(run.stdout.trim());

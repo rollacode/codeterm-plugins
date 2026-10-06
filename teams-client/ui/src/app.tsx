@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Actions, Btn, codeBlock, Disclosure, Field, inputStyle, Notice, pageStyle, Section, StatusBar } from "./kit";
-import { isSignedIn, sendGate, statusView } from "./status";
+import { Actions, Btn, codeBlock, Disclosure, Field, inputStyle, Notice, pageStyle, Section, StatusBar, type Tone } from "./kit";
+import { isSignedIn, primarySection, sendGate, setupRows, statusView } from "./status";
 
 declare global {
   interface Window {
@@ -213,6 +213,7 @@ export function App() {
   }
 
   const signedIn = isSignedIn(health?.state);
+  const section = primarySection(health?.state);
   const status = statusView(health?.state);
   const { previewMatches, policyMatches, sendEnabled } = sendGate({ preview, chatId, draft, health, policy, busy, blockedKey, sendResult });
 
@@ -220,20 +221,21 @@ export function App() {
     <main style={pageStyle}>
       <StatusBar label={status.label} tone={status.tone} detail={health?.message} busy={busy} onRefresh={() => void refresh()} />
       {message && <Notice>{message}</Notice>}
+      <SetupSummary health={health} />
 
-      {signedIn ? (
+      {section === "account" ? (
         <Section title="Account">
-          <dl style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "4px 12px", margin: 0, fontSize: 12.5 }}>
-            {health?.upn && <><dt style={termStyle}>Account</dt><dd style={{ margin: 0 }}><strong>{health.upn}</strong></dd></>}
-            {health?.tenantId && <><dt style={termStyle}>Tenant</dt><dd style={{ margin: 0, overflowWrap: "anywhere" }}>{health.tenantId}</dd></>}
-            {health?.expiresOn && <><dt style={termStyle}>Token expires</dt><dd style={{ margin: 0 }}>{health.expiresOn}</dd></>}
-          </dl>
+          {health?.expiresOn && (
+            <dl style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "4px 12px", margin: 0, fontSize: 12.5 }}>
+              <dt style={termStyle}>Token expires</dt><dd style={{ margin: 0 }}>{health.expiresOn}</dd>
+            </dl>
+          )}
           {accounts.length > 1 && <div style={{ marginTop: 12 }}><AccountList accounts={accounts} busy={busy} onUse={(id) => void useAccount(id)} /></div>}
           <Actions>
             <Btn kind="danger" disabled={busy} onClick={() => void logout()}>Sign out</Btn>
           </Actions>
         </Section>
-      ) : (
+      ) : section === "unknown" ? null : (
         <Section title="Sign in" hint="Use your Microsoft 365 work or school account. Sign-in opens in your browser.">
           {accounts.length > 0 && <AccountList accounts={accounts} busy={busy} onUse={(id) => void useAccount(id)} />}
           <Actions>
@@ -337,5 +339,26 @@ function AccountList({ accounts, busy, onUse }: { accounts: Account[]; busy: boo
         </li>
       ))}
     </ul>
+  );
+}
+
+const ROW_TONE: Record<Tone, string> = {
+  ok: "var(--ct-ok, var(--ct-green, #4caf50))",
+  warn: "var(--ct-warn, #e0a030)",
+  danger: "var(--ct-err, var(--ct-red, #e57373))",
+  accent: "var(--ct-accent, #5b8cff)",
+  muted: "var(--ct-muted, #9aa)",
+};
+
+export function SetupSummary({ health }: { health: Health | null }) {
+  return (
+    <dl aria-label="Setup" style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "4px 14px", margin: "0 0 4px", fontSize: 12.5 }}>
+      {setupRows(health).map((row) => (
+        <div key={row.label} style={{ display: "contents" }}>
+          <dt style={termStyle}>{row.label}</dt>
+          <dd data-tone={row.tone} style={{ margin: 0, overflowWrap: "anywhere", color: ROW_TONE[row.tone] }}>{row.value}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }

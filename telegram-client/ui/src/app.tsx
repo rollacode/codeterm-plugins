@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
-import { Actions, Btn, codeBlock, Disclosure, Field, inputStyle, Notice, pageStyle, Section, StatusBar } from "./kit";
-import { isSignedIn, sendStateLabel, statusView } from "./status";
+import { useEffect, useRef, useState } from "react";
+import { Actions, Btn, codeBlock, Disclosure, Field, inputStyle, Notice, pageStyle, Section, StatusBar, type Tone } from "./kit";
+import { accountLine, isSignedIn, sendStateLabel, setupRows, statusView, viewLayout, type AccountInfo, type LoginStepInfo, type SetupInfo, type ViewHealth } from "./status";
 
 declare global {
   interface Window {
@@ -16,7 +16,9 @@ type Health = {
   accounts?: Account[];
   currentAccount?: string | null;
   loginJobId?: string | null;
-  resolvedAccount?: unknown;
+  setup?: SetupInfo;
+  account?: AccountInfo | null;
+  loginStep?: LoginStepInfo | null;
   sendPolicy?: { configured: boolean; mode?: string | null; senderAccountId?: string; allowedDestinations?: Array<{ id: string; label: string }> };
   sendState?: { state: string; failure?: string | null; message?: string | null; retryAfter?: number | null; destination?: unknown } | null;
 };
@@ -37,6 +39,8 @@ export function App() {
   const [confirmed, setConfirmed] = useState(false);
   const [jobId, setJobId] = useState("");
   const [loginOutput, setLoginOutput] = useState("");
+  const [polledStep, setPolledStep] = useState<LoginStepInfo | null>(null);
+  const [replaceCredentials, setReplaceCredentials] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [chatId, setChatId] = useState("");
@@ -69,13 +73,17 @@ export function App() {
     setBusy(true);
     setMessage("");
     try {
-      const result = await window.ct!.invoke("loginStart", { apiId, apiHash, accountLabel, twoFactorPassword }) as { jobId?: string; error?: string; message?: string };
+      const credentials = showCredentialInputs ? { apiId, apiHash } : { apiId: "", apiHash: "" };
+      const result = await window.ct!.invoke("loginStart", { ...credentials, accountLabel, twoFactorPassword }) as { jobId?: string; error?: string; message?: string };
       if (result.error) throw new Error(result.error);
       setJobId(result.jobId || "");
+      setPolledStep(null);
+      setReplaceCredentials(false);
       setLoginOutput("");
       setApiId("");
       setApiHash("");
       setTwoFactorPassword("");
+      setHealth((current) => current ? { ...current, loginStep: null } : current);
       setMessage(result.message || "Login started. Select Show QR to view the code.");
     } catch (error) {
       setMessage(String(error));
@@ -84,24 +92,63 @@ export function App() {
     }
   }
 
+  async function applyLoginProgress(result: LoginProgress) {
+    if (result.step) {
+      setJobId("");
+      setLoginOutput("");
+      setPolledStep(result.step);
+      setMessage("");
+      return;
+    }
+    setPolledStep(null);
+    setHealth((current) => current ? { ...current, loginStep: null } : current);
+    setLoginOutput(result.output || "");
+    if (result.error) {
+      setJobId("");
+      setMessage(result.error);
+    } else if (result.done) {
+      setJobId("");
+      setMessage("Login finished. Refreshing the resolved Telegram account.");
+      await refresh();
+    } else {
+      if (result.jobId) setJobId(result.jobId);
+      setMessage("Login is running. Scan the QR; this page checks progress automatically.");
+    }
+  }
+
   async function pollLogin() {
-    if (!jobId) return;
+    if (!jobId || busy) return;
     setBusy(true);
     try {
-      const result = await window.ct!.invoke("loginPoll", { jobId }) as { done?: boolean; output?: string; error?: string; state?: string };
-      setLoginOutput(result.output || "");
-      if (result.error) setMessage(result.error);
-      else if (result.done) {
-        setJobId("");
-        setMessage("Login finished. Refreshing the resolved Telegram account.");
-        await refresh();
-      } else setMessage("Login is still running. Scan the QR, then select Show QR again.");
+      await applyLoginProgress(await window.ct!.invoke("loginPoll", { jobId }) as LoginProgress);
     } catch (error) {
       setMessage(String(error));
     } finally {
       setBusy(false);
     }
   }
+
+  async function submitPassword(password: string) {
+    setBusy(true);
+    setMessage("");
+    try {
+      const result = await window.ct!.invoke("loginPassword", { password }) as LoginProgress;
+      if (result.error && !result.step && !result.jobId) setMessage(result.error);
+      else await applyLoginProgress(result);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const pollRef = useRef(pollLogin);
+  pollRef.current = pollLogin;
+  useEffect(() => {
+    if (!jobId || polledStep) return;
+    const timer = setInterval(() => { void pollRef.current(); }, 3000);
+    return () => clearInterval(timer);
+  }, [jobId, polledStep]);
 
   async function selectAccount(id: string) {
     setBusy(true);
@@ -126,6 +173,7 @@ export function App() {
       setMessage(result.result || "Logged out.");
       setLoginOutput("");
       setJobId("");
+      setPolledStep(null);
       setPreview(null);
       setSendReceipt("");
       await refresh();
@@ -198,8 +246,10 @@ export function App() {
   }
 
   const accounts = health?.accounts || [];
-  const signedIn = isSignedIn(health?.state);
-  const status = statusView(health?.state);
+  const layout = viewLayout(health, polledStep);
+  const signedIn = isSignedIn(health?.state) && layout.primary === "account";
+  const status = polledStep ? statusView(polledStep.kind === "password" ? "password-required" : "input-required") : statusView(health?.state);
+  const showCredentialInputs = layout.credentialsNeeded || replaceCredentials;
   const policyAllowsPreview = !!preview && !!health?.sendPolicy?.configured &&
     health.sendPolicy.senderAccountId === preview.sender.id &&
     health.sendPolicy.allowedDestinations?.some((item) => item.id === preview.destination.id);
@@ -217,12 +267,21 @@ export function App() {
         </ol>
       </Disclosure>
       <div style={{ height: 12 }} />
-      <Field label="Telegram API ID">
-        <input style={inputStyle} value={apiId} inputMode="numeric" autoComplete="off" onChange={(event) => setApiId(event.target.value)} />
-      </Field>
-      <Field label="Telegram API hash">
-        <input style={inputStyle} type="password" autoComplete="new-password" value={apiHash} onChange={(event) => setApiHash(event.target.value)} />
-      </Field>
+      {showCredentialInputs ? (
+        <>
+          <Field label="Telegram API ID">
+            <input style={inputStyle} value={apiId} inputMode="numeric" autoComplete="off" onChange={(event) => setApiId(event.target.value)} />
+          </Field>
+          <Field label="Telegram API hash">
+            <input style={inputStyle} type="password" autoComplete="new-password" value={apiHash} onChange={(event) => setApiHash(event.target.value)} />
+          </Field>
+        </>
+      ) : (
+        <p style={{ display: "flex", alignItems: "center", gap: 10, margin: "0 0 10px", fontSize: 12.5 }}>
+          <span style={{ flex: 1 }}>Using the stored API ID and API hash.</span>
+          <Btn onClick={() => setReplaceCredentials(true)}>Use different credentials</Btn>
+        </p>
+      )}
       <Field label="Account label">
         <input style={inputStyle} value={accountLabel} autoComplete="off" onChange={(event) => setAccountLabel(event.target.value)} />
       </Field>
@@ -234,7 +293,7 @@ export function App() {
         <span>I understand this client appears as Telegram Desktop (Windows), and I am entering my own Telegram API ID and hash.</span>
       </label>
       <Actions>
-        <Btn kind="primary" disabled={busy || !apiId || !apiHash || !confirmed} onClick={() => void startLogin()}>
+        <Btn kind="primary" disabled={busy || (showCredentialInputs && (!apiId || !apiHash)) || !confirmed} onClick={() => void startLogin()}>
           {busy ? "Working…" : "Start QR login"}
         </Btn>
         {jobId && <Btn disabled={busy} onClick={() => void pollLogin()}>Show QR</Btn>}
@@ -247,15 +306,17 @@ export function App() {
     <main style={pageStyle}>
       <StatusBar label={status.label} tone={status.tone} detail={health?.message} busy={busy} onRefresh={() => void refresh()} />
       {message && <Notice>{message}</Notice>}
+      <SetupSummary health={health} />
 
-      {signedIn ? (
+      {layout.primary === "step" && layout.step ? (
+        <Section title="Finish signing in" hint="Telegram accepted the QR scan and needs one more step for this account.">
+          <LoginStepForm step={layout.step} busy={busy} onSubmit={(password) => void submitPassword(password)} />
+          <Disclosure summary="Start over with a new QR">{loginForm}</Disclosure>
+        </Section>
+      ) : signedIn ? (
         <Section title="Account" hint="Messages are sent from the account marked current.">
+          {health?.account && <AccountSummary account={health.account} />}
           <AccountList accounts={accounts} busy={busy} onUse={(id) => void selectAccount(id)} />
-          {!!health?.resolvedAccount && (
-            <Disclosure summary="Resolved account details">
-              <pre style={codeBlock}>{JSON.stringify(health.resolvedAccount, null, 2)}</pre>
-            </Disclosure>
-          )}
           <Disclosure summary="Sign in another account">{loginForm}</Disclosure>
           <Actions>
             <Btn kind="danger" disabled={busy || !health?.currentAccount} onClick={() => void logout()}>Sign out</Btn>
@@ -305,7 +366,8 @@ export function App() {
         {health?.storage && <p style={{ margin: "0 0 6px" }}>Session storage: {health.storage.name}. {health.storage.note}</p>}
         <p style={{ margin: "0 0 6px" }}>The pinned release identifies this device as Telegram Desktop (Windows) in Telegram’s Devices list. Your own API ID and hash replace the release binary’s shared application credentials for this account; the hash is kept in the host secret store, never in a file or a command line.</p>
         <p style={{ margin: "0 0 6px" }}>Sending is locked until you review a resolved sender and immutable destination. The initial owner policy permits Saved Messages only.</p>
-        <p style={{ margin: 0 }}>Agent verbs: accounts, use, chats, history, health, logout, preview, send.</p>
+        <p style={{ margin: "0 0 6px" }}>A two-step verification password typed here goes straight to the sign-in process and is never stored.</p>
+        <p style={{ margin: 0 }}>Agent verbs: accounts, use, chats, history, health, login, login-status, login-password, logout, preview, send.</p>
       </Disclosure>
     </main>
   );
@@ -324,5 +386,60 @@ function AccountList({ accounts, busy, onUse }: { accounts: Account[]; busy: boo
         </li>
       ))}
     </ul>
+  );
+}
+
+type LoginProgress = { done?: boolean; output?: string; error?: string; state?: string; jobId?: string; step?: LoginStepInfo | null };
+
+const ROW_TONE: Record<Tone, string> = {
+  ok: "var(--ct-ok, var(--ct-green, #4caf50))",
+  warn: "var(--ct-warn, #e0a030)",
+  danger: "var(--ct-err, var(--ct-red, #e57373))",
+  accent: "var(--ct-accent, #5b8cff)",
+  muted: "var(--ct-muted, #9aa)",
+};
+
+export function SetupSummary({ health }: { health: ViewHealth | null }) {
+  return (
+    <dl aria-label="Setup" style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "4px 14px", margin: "0 0 4px", fontSize: 12.5 }}>
+      {setupRows(health).map((row) => (
+        <div key={row.label} style={{ display: "contents" }}>
+          <dt style={{ color: "var(--ct-muted, #9aa)" }}>{row.label}</dt>
+          <dd data-tone={row.tone} style={{ margin: 0, color: ROW_TONE[row.tone] }}>{row.value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+export function AccountSummary({ account }: { account: AccountInfo }) {
+  const detail = accountLine({ ...account, name: null });
+  return (
+    <p aria-label="Signed-in account" style={{ margin: "0 0 10px", fontSize: 12.5 }}>
+      <strong>{account.name || account.label}</strong>
+      {detail && detail !== account.label && <span style={{ color: "var(--ct-muted, #9aa)" }}> {detail}</span>}
+    </p>
+  );
+}
+
+export function LoginStepForm({ step, busy, onSubmit }: { step: LoginStepInfo; busy: boolean; onSubmit: (value: string) => void }) {
+  const [value, setValue] = useState("");
+  if (!step.submittable) {
+    return (
+      <p role="alert" style={{ margin: 0, fontSize: 12.5 }}>
+        Telegram asked: <strong>{step.prompt}</strong>. This sign-in client cannot take that step outside an interactive terminal, so start over with a new QR.
+      </p>
+    );
+  }
+  return (
+    <form onSubmit={(event) => { event.preventDefault(); if (value) { onSubmit(value); setValue(""); } }}>
+      {step.hint && <p role="alert" style={{ margin: "0 0 8px", fontSize: 12.5, color: ROW_TONE.warn }}>{step.hint}</p>}
+      <Field label={step.prompt}>
+        <input style={inputStyle} type="password" autoComplete="current-password" value={value} onChange={(event) => setValue(event.target.value)} />
+      </Field>
+      <Actions>
+        <Btn kind="primary" type="submit" disabled={busy || !value}>{busy ? "Working…" : "Continue"}</Btn>
+      </Actions>
+    </form>
   );
 }

@@ -1,11 +1,12 @@
 import type { GlanceView, PluginModule, ViewNode } from "@codeterm/plugin-sdk";
 import { qrSvg } from "./qr";
+import { classifyLoginOutput, loginStateForStep, maskPhone, nextLoginAction, type LoginStep } from "./login-steps";
 
 const VERSION = "0.11.0";
 const ROOT = "~/.codeterm/telegram-client";
 const BUNDLE = "~/.codeterm/plugins/telegram-client";
 const CONFIG_NAME = "gotd.cli.yaml";
-const SCAN_MESSAGE = "Render qrSvg in chat as a scannable QR and show tgLink as text. Scan it in Telegram Settings → Devices → Link Desktop Device, then poll login-status.";
+const SCAN_MESSAGE = "Render qrSvg in chat as a scannable QR and show tgLink as text. Scan it in Telegram Settings → Devices → Link Desktop Device, then poll login-status and follow its `next` field.";
 const INITIAL_SEND_POLICY_MODE = "saved-messages-only";
 const MAX_COUNT = 50;
 const MAX_BYTES = 32 * 1024;
@@ -18,7 +19,7 @@ const previewTokens: Record<string, any> = {};
 let injectedClock: (() => number) | null = null;
 let transientSendFailure: { state: string; message: string; updatedAt: number } | null = null;
 
-type RunResult = { ok: true; stdout: string; stderr: string } | { ok: false; error: string; stderr: string };
+type RunResult = { ok: true; stdout: string; stderr: string; raw: string } | { ok: false; error: string; stderr: string };
 type TgJob = { jobId?: string; error?: string; ambiguousStart?: boolean };
 type PollResult = { done: boolean; code?: number; stdout?: string; stderr?: string; error?: string };
 type Paths = { root: string; binDir: string; binary: string; config: string; install: string; failure: string; outbox: string; policy: string };
@@ -73,6 +74,16 @@ function redact(text: string): string {
   return out;
 }
 
+// Redacting raw stdout would corrupt JSON wherever the numeric api_id appears, so JSON is redacted after parsing.
+function redactDeep(value: any): any {
+  if (typeof value === "string") return redact(value);
+  if (Array.isArray(value)) return value.map(redactDeep);
+  if (!value || typeof value !== "object") return value;
+  const out: any = {};
+  for (const key of Object.keys(value)) if (key !== "app_id" && key !== "app_hash") out[key] = redactDeep(value[key]);
+  return out;
+}
+
 function telegramLoginArtifacts(text: string): { qrPayload?: string; tgLink?: string; qrSvg?: string } {
   const safe = redact(String(text || "")).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, " ");
   const match = safe.match(/tg:\/\/login\?token=[A-Za-z0-9_%=-]+/i);
@@ -85,9 +96,8 @@ function telegramLoginArtifacts(text: string): { qrPayload?: string; tgLink?: st
 
 // The login runs detached, so tg's exit is visible only as its final `tg: <error>` log line.
 function loginFailure(output: string): string | null {
-  const lines = String(output || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const last = lines[lines.length - 1] || "";
-  return /^tg: /.test(last) ? last.slice(4).trim() : null;
+  const outcome = classifyLoginOutput(output);
+  return outcome.phase === "failed" ? outcome.failure : null;
 }
 
 function rejectedCredentials(failure: string): boolean {
@@ -153,17 +163,17 @@ function runTg(args: string[], env?: Record<string, string>): RunResult {
   const stderr = redact(result.stderr || "");
   if (result.error) return { ok: false, error: redact(result.error), stderr };
   if (result.code !== 0) return { ok: false, error: stderr || stdout || `tg exited ${result.code}`, stderr };
-  return { ok: true, stdout, stderr };
+  return { ok: true, stdout, stderr, raw: String(result.stdout || "") };
 }
 
 function jsonCommand(args: string[]): { data?: any; error?: string; stderr?: string } {
   const run = runTg(["--output", "json"].concat(args));
   if (!run.ok) return { error: safeError(run), stderr: run.stderr };
-  const parsed = parseJson(run.stdout.trim());
+  const parsed = parseJson(run.raw.trim());
   if (!parsed || parsed.schema !== 1 || parsed.data === undefined) {
     return { error: "tg returned an unreadable JSON response." };
   }
-  return { data: parsed.data, stderr: run.stderr };
+  return { data: redactDeep(parsed.data), stderr: run.stderr };
 }
 
 function settings(): { historyCount: number; historyMaxBytes: number } {
@@ -783,6 +793,12 @@ function status(): any {
     id: String(a.label || ""), label: String(a.label || ""), hasSession: !!a.has_session, current: !!a.default,
   }));
   const active = accountRows.find((a: any) => a.current) || null;
+  if (result.error || !(active && active.hasSession)) {
+    const pending = pendingLoginStep();
+    if (pending) {
+      return { state: loginStateForStep(pending.step), message: stepMessage(pending.step), loginStep: pending.step, storage, accounts: accountRows, currentAccount: active && active.label, resolvedAccount: null };
+    }
+  }
   if (result.error) {
     const hasSession = active && active.hasSession;
     const state = authFailure(result.error) ? "reauth-needed" : (hasSession ? "logged-in" : "logged-out");
@@ -840,17 +856,18 @@ function loginStart(args: any, fromAgent = false): any {
   const p = paths();
   if (!p || !host.fs.fileExists(p.binary)) return { error: notInstalledMessage(p) };
   if (activeLoginJobId && loginJobs[activeLoginJobId]) return { jobId: activeLoginJobId, state: "login-in-progress", message: "Telegram login is already running. Poll its progress for the QR." };
-  const apiId = String(fromAgent ? host.secretGet("api_id") || "" : args.apiId || "").trim();
-  const apiHash = String(fromAgent ? host.secretGet("api_hash") || "" : args.apiHash || "").trim();
+  const useStored = fromAgent || (!String(args.apiId || "").trim() && !String(args.apiHash || "").trim());
+  const apiId = String(useStored ? host.secretGet("api_id") || "" : args.apiId || "").trim();
+  const apiHash = String(useStored ? host.secretGet("api_hash") || "" : args.apiHash || "").trim();
   const label = String(args.accountLabel || "default").trim();
   const twoFactorPassword = String(args.twoFactorPassword || "");
   if (!/^[0-9]{1,12}$/.test(apiId) || !/^[A-Fa-f0-9]{32}$/.test(apiHash)) {
-    if (!fromAgent) return { error: "Enter your own numeric Telegram API ID and 32-character API hash." };
+    if (!fromAgent) return { error: useStored ? "No valid Telegram API ID and hash are stored yet. Enter your own numeric Telegram API ID and 32-character API hash." : "Enter your own numeric Telegram API ID and 32-character API hash." };
     const stored = apiId || apiHash ? "The stored Telegram API ID or hash is malformed (expected a numeric API ID and a 32-character hex API hash)." : "No Telegram API ID and hash are stored.";
     return { error: `${stored} Store them from stdin: printf '%s' "<API_ID>" | codeterm plugin config telegram-client --secret api_id, then the same for api_hash.` };
   }
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(label) || label === "all") return { error: "Account label must use letters, numbers, hyphens, or underscores." };
-  if (!fromAgent && (!host.secretSet("api_id", apiId) || !host.secretSet("api_hash", apiHash))) return { error: "Could not store Telegram API credentials in the host secret store." };
+  if (!useStored && (!host.secretSet("api_id", apiId) || !host.secretSet("api_hash", apiHash))) return { error: "Could not store Telegram API credentials in the host secret store." };
   const setup = ensureAccount(label, apiId, apiHash);
   if (setup.error) return { error: setup.error };
   const logFile = childPath(p.root, `login-${label}.log`);
@@ -863,6 +880,64 @@ function loginStart(args: any, fromAgent = false): any {
   loginLogPaths[job.jobId] = logFile;
   if (twoFactorPassword) loginPasswords[job.jobId] = twoFactorPassword;
   return { jobId: job.jobId, accountLabel: label, state: "login-in-progress", message: "Login is running. Poll progress here and scan the QR shown below." };
+}
+
+const PASSWORD_SUBMIT = "printf '%s' '<password>' | codeterm plugin config telegram-client --secret login_password && codeterm plugin telegram-client login-password";
+
+function stepMessage(step: LoginStep): string {
+  if (step.kind === "password") {
+    return `${step.retry ? "Telegram rejected that two-step verification password. " : "Telegram needs this account's two-step verification (cloud) password to finish the QR sign-in. "}Ask the user for it in chat and submit it from stdin only: ${PASSWORD_SUBMIT}. Never pass it as an argument and never repeat it back. A password typed in chat stays in the provider's session history, so offer the Telegram Client view's password field as the private alternative. Then poll login-status.`;
+  }
+  return `Telegram asked for one more sign-in step (${step.prompt}). The pinned tg release cannot accept it outside an interactive terminal, so tell the user, then start login again or finish in the Telegram Client view.`;
+}
+
+function forgetLoginJob(jobId: string): void {
+  delete loginJobs[jobId];
+  delete loginPasswords[jobId];
+  delete loginLogPaths[jobId];
+  delete loginLaunchPending[jobId];
+  if (activeLoginJobId === jobId) activeLoginJobId = null;
+}
+
+// The waiting step outlives the exited tg process and a plugin reload: its login log stays on disk.
+function pendingLoginStep(): { label: string; step: LoginStep } | null {
+  const p = paths();
+  if (!p) return null;
+  let entries: Array<{ name: string; path: string }> = [];
+  try { entries = host.fs.readDir(p.root) || []; } catch { return null; }
+  const running = activeLoginJobId ? loginJobs[activeLoginJobId] : null;
+  for (const entry of entries) {
+    const match = /^login-([A-Za-z0-9_-]{1,64})\.log$/.exec(entry.name);
+    if (!match || match[1] === running) continue;
+    const outcome = classifyLoginOutput(host.fs.readFileTail(entry.path, 8192) || "");
+    if (outcome.phase === "input-required") return { label: match[1], step: outcome.step };
+  }
+  return null;
+}
+
+function stepResult(step: LoginStep, label: string, output?: string): any {
+  return { done: false, output, state: loginStateForStep(step), step, accountLabel: label, message: stepMessage(step) };
+}
+
+function takeOneShotSecret(name: string): string {
+  let value = "";
+  try { value = host.secretGet(name) || ""; } catch { value = ""; }
+  try { if (value) host.secretDelete(name); } catch { }
+  return value;
+}
+
+function submitLoginPassword(password: string): any {
+  if (!password) return { error: `No password was received. Pipe it on stdin, never as an argument: ${PASSWORD_SUBMIT}` };
+  if (activeLoginJobId && loginJobs[activeLoginJobId]) {
+    return { error: "Telegram login is still running and has not asked for a password. Poll login-status and submit the password when it reports password-required." };
+  }
+  const pending = pendingLoginStep();
+  if (pending && pending.step.kind !== "password") return { error: `Telegram is waiting for a different step (${pending.step.prompt}), not a password.` };
+  const label = pending ? pending.label : "default";
+  const started = loginStart({ accountLabel: label, twoFactorPassword: password }, true);
+  if (started.error) return { error: started.error };
+  const current = loginPoll(started.jobId);
+  return { ...current, jobId: started.jobId };
 }
 
 function loginPoll(jobId: string): any {
@@ -894,14 +969,15 @@ function loginPoll(jobId: string): any {
   if (twoFactorPassword) output = output.split(twoFactorPassword).join("[redacted]");
   output = redact(output);
   const label = loginJobs[jobId];
-  const failure = loginFailure(output);
-  if (failure) {
-    delete loginJobs[jobId];
-    delete loginPasswords[jobId];
-    delete loginLogPaths[jobId];
-    if (activeLoginJobId === jobId) activeLoginJobId = null;
-    if (rejectedCredentials(failure)) resetRejectedConfig(p, label);
-    return { done: true, output, state: "logged-out", error: loginFailureMessage(failure) };
+  const outcome = classifyLoginOutput(output);
+  if (outcome.phase === "input-required") {
+    forgetLoginJob(jobId);
+    return stepResult(outcome.step, label, output);
+  }
+  if (outcome.phase === "failed") {
+    forgetLoginJob(jobId);
+    if (rejectedCredentials(outcome.failure)) resetRejectedConfig(p, label);
+    return { done: true, output, state: "logged-out", error: loginFailureMessage(outcome.failure), credentialsRejected: rejectedCredentials(outcome.failure) };
   }
   const verified = jsonCommand(["--account", label, "whoami"]);
   const artifacts = telegramLoginArtifacts(output);
@@ -967,29 +1043,26 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
       if (started.error) return { error: `Telegram login could not start: ${started.error}` };
       const current = loginPoll(started.jobId);
       if (current.error) return { error: `Telegram login needs attention: ${current.error}` };
-      return { result: JSON.stringify({
-        state: String(current.state || started.state),
-        jobId: started.jobId,
-        qrPayload: current.qrPayload,
-        tgLink: current.tgLink,
-        qrSvg: current.qrSvg,
-        message: current.qrPayload ? SCAN_MESSAGE : "Telegram login started. Poll login-status for the QR and tg:// link.",
-      }) };
+      return { result: JSON.stringify(agentLoginView({ ...current, state: current.state || started.state }, started.jobId)) };
     }
     case "login-status": {
       if (args.length) return { error: "Usage: login-status." };
-      if (!activeLoginJobId) return { result: JSON.stringify({ state: status().state, done: true }) };
-      const current = loginPoll(activeLoginJobId);
+      if (!activeLoginJobId) {
+        const pending = pendingLoginStep();
+        if (pending) return { result: JSON.stringify(agentLoginView(stepResult(pending.step, pending.label))) };
+        const state = status().state;
+        return { result: JSON.stringify({ state, done: true, next: nextLoginAction({ state }) }) };
+      }
+      const jobId = activeLoginJobId;
+      const current = loginPoll(jobId);
       if (current.error) return { error: `Telegram login needs attention: ${current.error}` };
-      return { result: JSON.stringify({
-        done: current.done === true,
-        state: String(current.state || "login-in-progress"),
-        currentAccount: current.currentAccount,
-        qrPayload: current.qrPayload,
-        tgLink: current.tgLink,
-        qrSvg: current.done ? undefined : current.qrSvg,
-        message: current.done ? "Telegram login status is complete." : current.qrPayload ? SCAN_MESSAGE : "Login is still pending; poll again for the QR and tg:// link.",
-      }) };
+      return { result: JSON.stringify(agentLoginView(current, jobId)) };
+    }
+    case "login-password": {
+      if (args.length) return { error: `Usage: login-password. It takes no arguments; the password travels only on stdin: ${PASSWORD_SUBMIT}` };
+      const submitted = submitLoginPassword(takeOneShotSecret("login_password"));
+      if (submitted.error) return { error: `Telegram password was not submitted: ${submitted.error}` };
+      return { result: JSON.stringify(agentLoginView(submitted, submitted.jobId)) };
     }
     case "accounts": return agentAccounts();
     case "use": return args.length === 1 ? useAccount(args[0]) : { error: "Usage: use <configured-account-id>." };
@@ -997,6 +1070,8 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
     case "history": return agentHistory(args);
     case "health": {
       const current = status();
+      current.setup = setupSummary();
+      current.account = accountSummary(current);
       delete current.resolvedAccount;
       current.runtimeDir = paths()?.root || null;
       current.sendPolicy = policySummary();
@@ -1008,6 +1083,40 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
     case "preview": return previewCommand(args, "agent");
     default: return { error: `Unknown Telegram verb: ${ctx.verb}` };
   }
+}
+
+function agentLoginView(current: any, jobId?: string): any {
+  const step: LoginStep | null = current.step || null;
+  const qr = !current.done && !step && !!current.qrPayload;
+  return {
+    done: current.done === true,
+    state: String(current.state || "login-in-progress"),
+    next: nextLoginAction({ state: current.state, qr, step, credentialsRejected: current.credentialsRejected }),
+    jobId,
+    currentAccount: current.currentAccount,
+    passwordRequired: step ? step.kind === "password" : undefined,
+    step: step ? { kind: step.kind, prompt: step.prompt, hint: step.hint, retry: step.retry } : undefined,
+    qrPayload: qr ? current.qrPayload : undefined,
+    tgLink: qr ? current.tgLink : undefined,
+    qrSvg: qr ? current.qrSvg : undefined,
+    message: step ? stepMessage(step) : current.done ? "Telegram login status is complete." : qr ? SCAN_MESSAGE : "Login is still pending; poll login-status again for the QR and tg:// link.",
+  };
+}
+
+function setupSummary(): { runtimeInstalled: boolean; apiIdSet: boolean; apiHashStored: boolean } {
+  const p = paths();
+  const stored = (name: string) => { try { return !!host.secretGet(name); } catch { return false; } };
+  let runtimeInstalled = false;
+  try { runtimeInstalled = !!p && host.fs.fileExists(p.binary); } catch { runtimeInstalled = false; }
+  return { runtimeInstalled, apiIdSet: stored("api_id"), apiHashStored: stored("api_hash") };
+}
+
+function accountSummary(current: any): { label: string; name: string | null; username: string | null; phone: string | null; resolved: boolean } | null {
+  if (!current || !current.currentAccount) return null;
+  const identity = current.resolvedAccount || null;
+  const name = identity ? [identity.first_name, identity.last_name].map((part: any) => String(part || "").trim()).filter(Boolean).join(" ") : "";
+  const username = identity && identity.username ? `@${String(identity.username).replace(/^@/, "")}` : null;
+  return { label: String(current.currentAccount), name: name || null, username, phone: identity ? maskPhone(identity.phone) : null, resolved: !!identity };
 }
 
 function latestSendState(): any {
@@ -1041,6 +1150,9 @@ function renderGlance(): GlanceView {
   } else if (host.secretGet("config_initialized") !== "true") {
     nodes.push({ kind: "badge", label: "Not signed in", tone: "warn" });
     nodes.push({ kind: "text", text: "Use Configure with AI or the Telegram Client view to sign in.", style: { tone: "muted" } });
+  } else if (pendingLoginStep()) {
+    nodes.push({ kind: "badge", label: "Sign-in needs one more step", tone: "warn" });
+    nodes.push({ kind: "text", text: "Open the Telegram Client view or ask the agent to finish signing in.", style: { tone: "muted" } });
   } else {
     nodes.push({ kind: "badge", label: "Configured", tone: "ok" });
     nodes.push({ kind: "text", text: storageBackend().name, style: { tone: "muted" } });
@@ -1059,6 +1171,9 @@ function viewCall(method: string, args: any): unknown {
   args = args || {};
   if (method === "status") {
     const current = status();
+    current.setup = setupSummary();
+    current.account = accountSummary(current);
+    delete current.resolvedAccount;
     current.loginJobId = activeLoginJobId;
     current.sendPolicy = policySummary();
     current.sendState = latestSendState();
@@ -1079,6 +1194,7 @@ function viewCall(method: string, args: any): unknown {
   }
   if (method === "loginStart") return loginStart(args);
   if (method === "loginPoll") return loginPoll(String(args.jobId || ""));
+  if (method === "loginPassword") return submitLoginPassword(String(args.password || ""));
   if (method === "useAccount") return useAccount(String(args.id || ""));
   if (method === "logout") return logout();
   return { error: `Unknown Telegram view method: ${method}` };
@@ -1101,6 +1217,10 @@ const plugin: PluginModule = {
   __test_loginStart: loginStart,
   __test_loginPoll: loginPoll,
   __test_loginFailure: loginFailure,
+  __test_pendingLoginStep: pendingLoginStep,
+  __test_resetLoginJobs: () => { for (const jobId of Object.keys(loginJobs)) forgetLoginJob(jobId); activeLoginJobId = null; },
+  __test_setupSummary: setupSummary,
+  __test_accountSummary: accountSummary,
   __test_loginFailureMessage: loginFailureMessage,
   __test_logout: logout,
   __test_agentHistory: agentHistory,

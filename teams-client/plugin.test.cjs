@@ -106,6 +106,7 @@ function mockHost(options = {}) {
     if (bin === "m365" || bin === "m365.cmd") {
       if (args[0] === "--version") return { code: 0, stdout: "11.11.0", stderr: "" };
       if (options.statusError && args[0] === "status") return { code: 1, stdout: "", stderr: options.statusError };
+      if (options.statusTimeout && args[0] === "status") return { error: `${bin} timed out after 4500ms` };
       if (args[0] === "status") {
         const body = options.status === "logged-out" || !currentName
           ? "Logged out, signed in connections available"
@@ -588,6 +589,7 @@ test("lifecycle states have distinct actionable messages", () => {
     ["logged-out", /Sign in/i],
     ["logged-in", /connected/i],
     ["reauth-needed", /Sign in again/i],
+    ["status-unavailable", /did not answer in time.*Refresh/i],
   ];
   const messages = cases.map(([state]) => plugin.__test_lifecycleMessage(state, state === "unsupported-platform" ? "Unsupported darwin/ppc64" : undefined));
   assert.equal(new Set(messages).size, cases.length);
@@ -603,6 +605,7 @@ test("lifecycle detection returns each installed and session state", () => {
     [{ platform: "darwin", status: "logged-out" }, "logged-out"],
     [{ platform: "darwin" }, "logged-in"],
     [{ platform: "darwin", statusError: "transient status failure" }, "reauth-needed"],
+    [{ platform: "darwin", statusTimeout: true }, "status-unavailable"],
   ];
   for (const [options, expected] of cases) {
     const env = mockHost(options);
@@ -1170,6 +1173,45 @@ test("an installed package whose manifest version differs from the pin fails ins
     assert.equal(installed.state, "install-failed");
     assert.match(installed.error, /did not match the pinned release/);
   } finally { env.cleanup(); }
+});
+
+test("view status after an agent sign-in carries the signed-in account and tenant", () => {
+  const env = mockHost({ platform: "darwin" });
+  try {
+    const status = plugin.viewCall("status", {});
+    assert.equal(status.state, "logged-in");
+    assert.equal(status.upn, "jordan@north.example");
+    assert.equal(status.tenantId, "tenant-a");
+    assert.match(status.message, /Signed in as jordan@north\.example in tenant tenant-a/);
+    const health = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "health", args: [] }).result);
+    assert.deepEqual([health.state, health.upn, health.tenantId], [status.state, status.upn, status.tenantId], "the view and the agent read the same state");
+  } finally { env.cleanup(); }
+});
+
+test("view setup rows and section choice follow the reported state", () => {
+  const { setupRows, primarySection, statusView } = require("./ui/src/status.ts");
+  const signedIn = { state: "logged-in", upn: "jordan@north.example", tenantId: "tenant-a", expiresOn: null };
+  assert.deepEqual(setupRows(signedIn).map((row) => row.value), ["Installed", "jordan@north.example", "tenant-a"]);
+  assert.deepEqual(setupRows({ state: "installed-not-configured" }).map((row) => row.value), ["Installed", "Not signed in", "—"]);
+  assert.deepEqual(setupRows({ state: "not-installed" }).map((row) => row.value), ["Not installed", "Not signed in", "—"]);
+  assert.deepEqual(setupRows(null).map((row) => row.value), ["Checking", "Not signed in", "—"]);
+  assert.equal(setupRows({ state: "logged-in", upn: "jordan@north.example", tenantId: null })[2].value, "Not reported yet");
+  assert.equal(primarySection("logged-in"), "account");
+  for (const state of ["installed-not-configured", "logged-out", "reauth-needed", "not-installed", "mfa-required"]) assert.equal(primarySection(state), "sign-in", state);
+  assert.equal(primarySection("status-unavailable"), "unknown", "a timed-out status never asks for a needless sign-in");
+  assert.equal(primarySection(null), "unknown");
+  assert.equal(statusView("status-unavailable").label, "Status unavailable");
+});
+
+test("view renders the signed-in account and tenant in its setup summary", () => {
+  const React = require("react");
+  const { renderToStaticMarkup } = require("react-dom/server");
+  const { SetupSummary } = require("./ui/src/app.tsx");
+  const html = renderToStaticMarkup(React.createElement(SetupSummary, { health: { state: "logged-in", message: "", upn: "jordan@north.example", tenantId: "tenant-a" } }));
+  for (const text of ["m365 runtime", "Installed", "jordan@north.example", "tenant-a"]) assert.ok(html.includes(text), text);
+  const signedOut = renderToStaticMarkup(React.createElement(SetupSummary, { health: { state: "logged-out", message: "" } }));
+  assert.ok(signedOut.includes("Not signed in"));
+  assert.equal(signedOut.includes("jordan"), false);
 });
 
 for (const [name, fn] of tests) {

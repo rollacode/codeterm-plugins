@@ -9,6 +9,7 @@ const STATES: Record<string, { label: string; tone: Tone }> = {
   "login-in-progress": { label: "Signing in", tone: "accent" },
   "install-in-progress": { label: "Installing", tone: "accent" },
   "reauth-needed": { label: "Sign in again", tone: "warn" },
+  "status-unavailable": { label: "Status unavailable", tone: "warn" },
   "token-expired": { label: "Sign in again", tone: "warn" },
   "refresh-token-revoked": { label: "Sign in again", tone: "warn" },
   "mfa-required": { label: "MFA required", tone: "warn" },
@@ -46,4 +47,24 @@ export function sendGate({ preview, chatId, draft, health, policy, busy, blocked
     policy.senderTenantId === preview.sender.tenantId && policy.allowedDestinations.some((item) => item.id === preview.destination.id);
   const sendEnabled = !busy && previewMatches && policyMatches && blockedKey !== preview?.idempotencyKey && !sendResult;
   return { previewMatches, policyMatches, sendEnabled };
+}
+
+const RUNTIME_MISSING = ["not-installed", "install-failed", "install-in-progress", "unsupported-platform"];
+
+export type SetupRow = { label: string; value: string; tone: Tone };
+
+export function setupRows(health: Pick<Health, "state" | "upn" | "tenantId" | "expiresOn"> | null | undefined): SetupRow[] {
+  const state = health?.state;
+  const runtimeReady = !!state && !RUNTIME_MISSING.includes(state);
+  const signedIn = isSignedIn(state);
+  return [
+    { label: "m365 runtime", value: !state ? "Checking" : runtimeReady ? "Installed" : "Not installed", tone: runtimeReady ? "ok" : "warn" },
+    { label: "Account", value: signedIn ? health?.upn || "Signed in" : "Not signed in", tone: signedIn ? "ok" : "muted" },
+    { label: "Tenant", value: signedIn && health?.tenantId ? health.tenantId : signedIn ? "Not reported yet" : "—", tone: signedIn && health?.tenantId ? "ok" : "muted" },
+  ];
+}
+
+export function primarySection(state: string | null | undefined): "account" | "sign-in" | "unknown" {
+  if (isSignedIn(state)) return "account";
+  return state === "status-unavailable" || !state ? "unknown" : "sign-in";
 }

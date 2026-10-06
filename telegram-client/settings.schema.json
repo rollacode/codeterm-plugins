@@ -14,6 +14,12 @@
         "env_var": "api_hash",
         "label": "Telegram API hash",
         "description": "Secret-store field for the API hash from my.telegram.org API development tools."
+      },
+      {
+        "kind": "api_key",
+        "env_var": "login_password",
+        "label": "Two-step verification password (one-time)",
+        "description": "Only when sign-in reports password-required: pipe it on stdin with --secret login_password, then run login-password, which reads and deletes it immediately."
       }
     ]
   },

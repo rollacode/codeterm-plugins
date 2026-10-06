@@ -320,7 +320,9 @@ test("manifest exposes only Telegram capabilities and the helper binary", () => 
   assert.equal(manifest.configHelp.includes("0123456789abcdef"), false);
   const settings = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));
   const fields = settings.flatMap((section) => section.fields || []);
-  assert.deepEqual(fields.filter((field) => field.kind === "api_key").map((field) => field.env_var), ["api_id", "api_hash"]);
+  assert.deepEqual(fields.filter((field) => field.kind === "api_key").map((field) => field.env_var), ["api_id", "api_hash", "login_password"]);
+  assert.match(manifest.configHelp, /printf .%s. .<PASSWORD>. \| codeterm plugin config telegram-client --secret login_password && codeterm plugin telegram-client login-password/);
+  assert.match(manifest.configHelp, /session history/);
   assert.deepEqual(manifest.credentials.map((entry) => entry.file), ["~/.codeterm/telegram-client/gotd.cli.yaml"]);
   assert.equal(manifest.credentials.some((entry) => entry.file.includes("gotd.session")), false, "no guessed dynamic session-file credential");
 });
@@ -718,7 +720,8 @@ test("view login flow reads the QR log and confirms the selected account", () =>
     assert.equal(existsSync(join(env.root, "login-default.log")), false);
     const current = plugin.viewCall("status");
     assert.equal(current.currentAccount, "default");
-    assert.match(JSON.stringify(current.resolvedAccount), /Owner/);
+    assert.equal(current.account.name, "Owner");
+    assert.equal(current.resolvedAccount, undefined, "the raw identity with the full phone number never reaches the view");
   } finally { env.cleanup(); }
 });
 
@@ -872,6 +875,255 @@ test("installer root comes from --root or from an installed plugin bundle, never
   assert.deepEqual(installer.resolveRuntimeRoot(["--root", explicit], scripts), { root: explicit });
   assert.ok(installer.resolveRuntimeRoot([], path.join(data, "checkout", "telegram-client", "scripts")).error);
   assert.ok(installer.resolveRuntimeRoot(["--root"], scripts).error);
+});
+
+// Verbatim tail of a detached tg v0.11.0 QR login whose account has two-step verification:
+// tg prints the prompt to stderr, reads the null stdin, and exits with its error on the same line.
+const TG_2FA_PROMPT_LOG = [
+  "Scan this QR in Telegram: Settings → Devices → Link Desktop Device",
+  "█████████████████████████████████████████",
+  "████ ▄▄▄▄▄ ██▄▀▀  █   █▀█▀█ ▀█ ▄▄▄▄▄ ████",
+  "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+  "or open: tg://login?token=fixture-qr-2fa",
+  "2FA password: tg: callback: EOF",
+  "",
+].join("\n");
+const TG_2FA_REJECTED_LOG = "tg: callback: 2fa password: invalid password\n";
+const steps = require("./src/login-steps.ts");
+
+test("tg's 2FA prompt after the QR scan is a typed password step, not a failure or an endless login", () => {
+  const outcome = steps.classifyLoginOutput(TG_2FA_PROMPT_LOG);
+  assert.equal(outcome.phase, "input-required");
+  assert.deepEqual(outcome.step, { kind: "password", prompt: "Enter your two-step verification password", hint: null, retry: false, submittable: true });
+  assert.equal(steps.loginStateForStep(outcome.step), "password-required");
+  assert.equal(plugin.__test_loginFailure(TG_2FA_PROMPT_LOG), null);
+  const rejected = steps.classifyLoginOutput(TG_2FA_REJECTED_LOG);
+  assert.equal(rejected.phase, "input-required");
+  assert.equal(rejected.step.retry, true);
+  assert.match(rejected.step.hint, /rejected/);
+});
+
+test("other prompts tg can stop on surface as their own typed steps; real failures and live QR stay distinct", () => {
+  const code = steps.classifyLoginOutput("Code (sent via Telegram): tg: callback: EOF\n");
+  assert.deepEqual(code, { phase: "input-required", step: { kind: "code", prompt: "Enter the code sent via Telegram", hint: null, retry: false, submittable: false } });
+  assert.equal(steps.classifyLoginOutput("Phone (international, e.g. +123456789): tg: EOF").step.kind, "phone");
+  const other = steps.classifyLoginOutput("Recovery email code: tg: callback: unexpected EOF");
+  assert.deepEqual(other.step && [other.step.kind, other.step.prompt, other.step.submittable], ["input", "Recovery email code", false]);
+  assert.deepEqual(steps.classifyLoginOutput("tg: callback: qr login: export: rpc error code 400: API_ID_INVALID"), { phase: "failed", failure: "callback: qr login: export: rpc error code 400: API_ID_INVALID" });
+  assert.deepEqual(steps.classifyLoginOutput("or open: tg://login?token=t1\n"), { phase: "running" });
+  assert.deepEqual(steps.classifyLoginOutput(""), { phase: "running" });
+});
+
+test("login state maps to exactly one next step for the agent", () => {
+  const password = steps.classifyLoginOutput(TG_2FA_PROMPT_LOG).step;
+  const code = steps.classifyLoginOutput("Code (sent via Telegram): tg: callback: EOF").step;
+  const cases = [
+    [{ state: "logged-in", done: true }, "done"],
+    [{ state: "password-required", step: password }, "ask-password"],
+    [{ state: "input-required", step: code }, "unsupported-step"],
+    [{ state: "login-in-progress", qr: true }, "show-qr"],
+    [{ state: "login-in-progress", qr: false }, "wait"],
+    [{ state: "logged-out", credentialsRejected: true }, "fix-credentials"],
+    [{ state: "logged-out" }, "start-login"],
+    [{ state: "installed-but-not-configured" }, "start-login"],
+  ];
+  for (const [input, expected] of cases) assert.equal(steps.nextLoginAction(input), expected, JSON.stringify(input));
+});
+
+test("phone numbers are masked to country prefix and last two digits", () => {
+  assert.equal(steps.maskPhone("37129123456"), "+371••••••56");
+  assert.equal(steps.maskPhone("+1 (555) 010-9988"), "+155••••••88");
+  assert.equal(steps.maskPhone("1234"), "+••••");
+  assert.equal(steps.maskPhone(""), null);
+  assert.equal(steps.maskPhone(undefined), null);
+});
+
+function passwordPendingFixture(extra = {}) {
+  const options = { loginLog: TG_2FA_PROMPT_LOG, whoamiError: "not logged in: run tg login", secrets: { api_id: "887766", api_hash: "1234567890abcdef1234567890abcdef" }, ...extra };
+  plugin.__test_resetLoginJobs();
+  const env = mockHost(options);
+  return { env, options };
+}
+
+test("agent login reports password-required with the stdin submit command and no stale QR", () => {
+  const { env } = passwordPendingFixture();
+  try {
+    const started = plugin.onAgentCommand({ sessionId: "s", verb: "login", args: [] });
+    assert.equal(started.error, undefined, started.error);
+    const login = JSON.parse(started.result);
+    assert.equal(login.state, "password-required");
+    assert.equal(login.next, "ask-password");
+    assert.equal(login.passwordRequired, true);
+    assert.equal(login.step.prompt, "Enter your two-step verification password");
+    assert.equal(login.qrSvg, undefined);
+    assert.equal(login.qrPayload, undefined);
+    assert.match(login.message, /printf '%s' '<password>' \| codeterm plugin config telegram-client --secret login_password && codeterm plugin telegram-client login-password/);
+    assert.match(login.message, /session history/);
+    assert.match(login.message, /view/);
+    const status = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login-status", args: [] }).result);
+    assert.equal(status.state, "password-required");
+    assert.equal(status.next, "ask-password");
+    assert.equal(status.done, false);
+    const health = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "health", args: [] }).result);
+    assert.equal(health.state, "password-required");
+    assert.equal(health.loginStep.kind, "password");
+  } finally { env.cleanup(); }
+});
+
+test("login-password reads the one-shot stdin secret, deletes it, and hands it to tg only through its environment", () => {
+  const password = "correct horse battery staple";
+  const { env, options } = passwordPendingFixture();
+  try {
+    plugin.onAgentCommand({ sessionId: "s", verb: "login", args: [] });
+    const withArgs = plugin.onAgentCommand({ sessionId: "s", verb: "login-password", args: [password] });
+    assert.match(withArgs.error, /takes no arguments/);
+    assert.doesNotMatch(withArgs.error, /battery/);
+    const missing = plugin.onAgentCommand({ sessionId: "s", verb: "login-password", args: [] });
+    assert.match(missing.error, /--secret login_password/);
+
+    env.secrets.login_password = password;
+    options.loginLog = undefined;
+    env.setWhoamiError("");
+    const callsBefore = env.calls.length;
+    const submitted = plugin.onAgentCommand({ sessionId: "s", verb: "login-password", args: [] });
+    assert.equal(submitted.error, undefined, submitted.error);
+    assert.equal(env.secrets.login_password, undefined, "the one-shot secret is deleted as soon as it is read");
+    assert.doesNotMatch(submitted.result, /battery/);
+    const result = JSON.parse(submitted.result);
+    assert.equal(result.state, "logged-in");
+    assert.equal(result.next, "done");
+    const login = env.calls.slice(callsBefore).find((call) => call.words[0] === "login");
+    assert.equal(login.env.TG_PASSWORD, password);
+    assert.ok(login.args.includes("default"), "the pending account label is reused");
+    for (const call of env.calls) for (const arg of call.args) assert.equal(arg.includes(password), false, "password never in argv");
+    assert.equal(existsSync(join(env.root, "login-default.log")), false);
+    for (const entry of fs.readdirSync(env.root)) {
+      const file = join(env.root, entry);
+      if (statSync(file).isFile()) assert.equal(readFileSync(file, "utf8").includes(password), false, `${entry} never holds the password`);
+    }
+  } finally { env.cleanup(); }
+});
+
+test("a rejected password returns the step again with a retry hint", () => {
+  const { env, options } = passwordPendingFixture();
+  try {
+    plugin.onAgentCommand({ sessionId: "s", verb: "login", args: [] });
+    options.loginLog = TG_2FA_REJECTED_LOG;
+    env.secrets.login_password = "wrong";
+    const result = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login-password", args: [] }).result);
+    assert.equal(result.state, "password-required");
+    assert.equal(result.next, "ask-password");
+    assert.equal(result.step.retry, true);
+    assert.match(result.message, /rejected/);
+  } finally { env.cleanup(); }
+});
+
+test("the pending password step survives a plugin reload because it is read from the login log", () => {
+  const { env } = passwordPendingFixture();
+  try {
+    writeFileSync(join(env.root, "login-work.log"), TG_2FA_PROMPT_LOG);
+    configureLoggedInFixture(env);
+    assert.deepEqual(plugin.__test_pendingLoginStep(), { label: "work", step: steps.classifyLoginOutput(TG_2FA_PROMPT_LOG).step });
+    const status = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login-status", args: [] }).result);
+    assert.equal(status.state, "password-required");
+    assert.equal(status.next, "ask-password");
+  } finally { env.cleanup(); }
+});
+
+test("view password step submits through loginPassword without storing the password", () => {
+  const password = "view-only-secret";
+  const { env, options } = passwordPendingFixture();
+  try {
+    plugin.onAgentCommand({ sessionId: "s", verb: "login", args: [] });
+    const status = plugin.viewCall("status");
+    assert.equal(status.state, "password-required");
+    assert.equal(status.loginStep.prompt, "Enter your two-step verification password");
+    options.loginLog = undefined;
+    env.setWhoamiError("");
+    const result = plugin.viewCall("loginPassword", { password });
+    assert.equal(result.state, "logged-in");
+    assert.equal(Object.values(env.secrets).includes(password), false);
+    assert.equal(JSON.stringify(result).includes(password), false);
+  } finally { env.cleanup(); }
+});
+
+test("tg JSON stays readable when the stored api_id appears in it; the id never leaves redacted output", () => {
+  const env = mockHost({
+    accounts: [{ label: "default", app_id: 32298479, has_session: true, default: true }],
+    secrets: { api_id: "32298479", api_hash: "1234567890abcdef1234567890abcdef" },
+  });
+  try {
+    configureLoggedInFixture(env);
+    const accounts = plugin.onAgentCommand({ sessionId: "s", verb: "accounts", args: [] });
+    assert.equal(accounts.error, undefined, accounts.error);
+    assert.equal(JSON.parse(accounts.result).accounts[0].current, true);
+    const health = plugin.onAgentCommand({ sessionId: "s", verb: "health", args: [] }).result;
+    assert.equal(JSON.parse(health).state, "logged-in");
+    assert.doesNotMatch(health, /32298479/);
+  } finally { env.cleanup(); }
+});
+
+test("health and view status report setup made by the agent, without secret values", () => {
+  const apiHash = "1234567890abcdef1234567890abcdef";
+  const env = mockHost({ secrets: { api_id: "887766", api_hash: apiHash } });
+  try {
+    const before = plugin.viewCall("status");
+    assert.equal(before.state, "installed-but-not-configured");
+    assert.deepEqual(before.setup, { runtimeInstalled: true, apiIdSet: true, apiHashStored: true });
+    configureLoggedInFixture(env);
+    const original = host.exec;
+    const exec = (json) => {
+      const opts = JSON.parse(json);
+      if (opts.args.includes("whoami")) return JSON.stringify({ code: 0, stdout: envelope({ id: 777, first_name: "Owner", last_name: "Name", username: "owner", phone: "37129123456" }), stderr: "" });
+      return original(json);
+    };
+    Object.assign(exec, original);
+    host.exec = exec;
+    for (const current of [plugin.viewCall("status"), JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "health", args: [] }).result)]) {
+      assert.equal(current.state, "logged-in");
+      assert.deepEqual(current.account, { label: "default", name: "Owner Name", username: "@owner", phone: "+371••••••56", resolved: true });
+      const text = JSON.stringify(current);
+      assert.doesNotMatch(text, /37129123456/);
+      assert.doesNotMatch(text, new RegExp(apiHash));
+      assert.doesNotMatch(text, /887766/);
+    }
+  } finally { env.cleanup(); }
+});
+
+test("view setup rows and section choice follow the reported state", () => {
+  const ui = require("./ui/src/status.ts");
+  const setup = { runtimeInstalled: true, apiIdSet: true, apiHashStored: true };
+  const account = { label: "default", name: "Owner Name", username: "@owner", phone: "+371••••••56", resolved: true };
+  const password = steps.classifyLoginOutput(TG_2FA_PROMPT_LOG).step;
+  assert.deepEqual(ui.setupRows({ state: "logged-in", setup, account }).map((row) => row.value), ["Installed", "API ID set", "API hash stored", "Owner Name · @owner · +371••••••56"]);
+  assert.deepEqual(ui.setupRows(null).map((row) => row.value), ["Not installed", "Not set", "Not stored", "Not signed in"]);
+  assert.deepEqual(ui.viewLayout({ state: "logged-in", setup, account }), { primary: "account", credentialsNeeded: false, step: null });
+  assert.deepEqual(ui.viewLayout({ state: "installed-but-not-configured", setup }), { primary: "sign-in", credentialsNeeded: false, step: null });
+  assert.deepEqual(ui.viewLayout({ state: "installed-but-not-configured", setup: { runtimeInstalled: true } }), { primary: "sign-in", credentialsNeeded: true, step: null });
+  assert.deepEqual(ui.viewLayout({ state: "password-required", setup, loginStep: password }), { primary: "step", credentialsNeeded: false, step: password });
+  assert.equal(ui.viewLayout({ state: "logged-out", setup }, password).primary, "step");
+  assert.equal(ui.statusView("password-required").label, "Password needed");
+});
+
+test("view renders configured setup, the signed-in account, and a masked input for the exact login step", () => {
+  const React = require("react");
+  const { renderToStaticMarkup } = require("react-dom/server");
+  const { SetupSummary, AccountSummary, LoginStepForm } = require("./ui/src/app.tsx");
+  const account = { label: "default", name: "Owner Name", username: "@owner", phone: "+371••••••56", resolved: true };
+  const setupHtml = renderToStaticMarkup(React.createElement(SetupSummary, { health: { state: "logged-in", setup: { runtimeInstalled: true, apiIdSet: true, apiHashStored: true }, account } }));
+  for (const text of ["API ID set", "API hash stored", "Installed", "Owner Name · @owner · +371••••••56"]) assert.ok(setupHtml.includes(text), text);
+  const accountHtml = renderToStaticMarkup(React.createElement(AccountSummary, { account }));
+  assert.match(accountHtml, /Owner Name/);
+  assert.match(accountHtml, /\+371••••••56/);
+  const password = steps.classifyLoginOutput(TG_2FA_PROMPT_LOG).step;
+  const form = renderToStaticMarkup(React.createElement(LoginStepForm, { step: password, busy: false, onSubmit() {} }));
+  assert.match(form, /Enter your two-step verification password/);
+  assert.match(form, /<input[^>]*type="password"/);
+  const retry = renderToStaticMarkup(React.createElement(LoginStepForm, { step: steps.classifyLoginOutput(TG_2FA_REJECTED_LOG).step, busy: false, onSubmit() {} }));
+  assert.match(retry, /rejected that password/);
+  const code = renderToStaticMarkup(React.createElement(LoginStepForm, { step: steps.classifyLoginOutput("Code (sent via Telegram): tg: callback: EOF").step, busy: false, onSubmit() {} }));
+  assert.match(code, /Enter the code sent via Telegram/);
+  assert.doesNotMatch(code, /<input/);
 });
 
 async function main() {
