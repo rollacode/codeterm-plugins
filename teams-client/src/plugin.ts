@@ -90,17 +90,26 @@ function paths(): Paths | null {
   }
 }
 
-function toolsFor(platform: string): Tools {
-  // certutil prints a localized header in the OEM code page, which the host's UTF-8 stdout reader drops entirely.
-  if (platform === "win32") return { curl: "curl.exe", tar: "tar.exe", hash: ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "(Get-FileHash -Algorithm SHA256 -LiteralPath $env:CT_HASH_FILE).Hash"], icacls: "icacls.exe", whoami: "whoami.exe", kill: ["taskkill.exe", "/PID", "{pid}", "/T", "/F"] };
+// Windows tools come from System32 by path: a Git for Windows PATH puts GNU tar first, which reads "C:" as a remote host.
+// certutil is avoided because its localized OEM-code-page header makes the host's UTF-8 stdout reader drop all output.
+function toolsFor(platform: string, systemRoot = "C:/Windows"): Tools {
+  const sys = (name: string) => nativePath(`${systemRoot}/System32/${name}`);
+  if (platform === "win32") return { curl: sys("curl.exe"), tar: sys("tar.exe"), hash: [sys("WindowsPowerShell/v1.0/powershell.exe"), "-NoProfile", "-NonInteractive", "-Command", "(Get-FileHash -Algorithm SHA256 -LiteralPath $env:CT_HASH_FILE).Hash"], icacls: sys("icacls.exe"), whoami: sys("whoami.exe"), kill: [sys("taskkill.exe"), "/PID", "{pid}", "/T", "/F"] };
   if (platform === "darwin") return { curl: "curl", tar: "tar", hash: ["shasum", "-a", "256", "{file}"], icacls: "", whoami: "", kill: ["kill", "{pid}"] };
   return { curl: "curl", tar: "tar", hash: ["sha256sum", "{file}"], icacls: "", whoami: "", kill: ["kill", "{pid}"] };
 }
 
-function resolveTarget(platform: string, arch: string): Target | { state: string; message: string } {
+function resolveTarget(platform: string, arch: string, systemRoot?: string): Target | { state: string; message: string } {
   const archive = GO_ARCHIVES[`${platform}/${arch}`];
   if (!archive) return { state: "unsupported-platform", message: `exo-teams is built here with a pinned Go toolchain, which is pinned for macOS, Linux and Windows on x64 or arm64, not ${platform || "this system"}/${arch || "unknown"}.` };
-  return { platform, arch, archive, exe: exeName(platform, "exo-teams"), tools: toolsFor(platform) };
+  return { platform, arch, archive, exe: exeName(platform, "exo-teams"), tools: toolsFor(platform, systemRoot) };
+}
+
+function windowsRoot(): string | undefined {
+  try {
+    const value = String(host.envGet("SystemRoot") || host.envGet("windir") || "");
+    return /^[A-Za-z]:[\\/][^\r\n"]*$/.test(value) ? host.path.normalize(value) : undefined;
+  } catch { return undefined; }
 }
 
 let cachedTarget: Target | { state: string; message: string } | null = null;
@@ -115,7 +124,7 @@ function detectTarget(p: Paths): Target | { state: string; message: string } {
     const probe = runProcess("uname", ["-m"], {}, TIMEOUTS.probe);
     arch = probe.ok ? normalizeArch(probe.stdout) : "";
   }
-  cachedTarget = resolveTarget(platform, arch);
+  cachedTarget = resolveTarget(platform, arch, windowsRoot());
   return cachedTarget;
 }
 
@@ -182,7 +191,7 @@ function applyStorageProtection(p: Paths): { error?: string; message?: string } 
   if (host.path.isWindows) {
     const marker = joinPath(p.root, ACL_MARKER);
     if (host.fs.fileExists(marker)) return {};
-    const tools = toolsFor("win32");
+    const tools = toolsFor("win32", windowsRoot());
     const who = runProcess(tools.whoami, [], {}, TIMEOUTS.probe);
     const principal = who.ok ? who.stdout.trim() : "";
     if (!principal || /[\r\n]/.test(principal)) return { error: "storage-protection-failed", message: "Could not identify the Windows account for the plugin storage ACL." };

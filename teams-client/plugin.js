@@ -395,15 +395,24 @@ function paths() {
     return null;
   }
 }
-function toolsFor(platform) {
-  if (platform === "win32") return { curl: "curl.exe", tar: "tar.exe", hash: ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "(Get-FileHash -Algorithm SHA256 -LiteralPath $env:CT_HASH_FILE).Hash"], icacls: "icacls.exe", whoami: "whoami.exe", kill: ["taskkill.exe", "/PID", "{pid}", "/T", "/F"] };
+function toolsFor(platform, systemRoot = "C:/Windows") {
+  const sys = (name) => nativePath(`${systemRoot}/System32/${name}`);
+  if (platform === "win32") return { curl: sys("curl.exe"), tar: sys("tar.exe"), hash: [sys("WindowsPowerShell/v1.0/powershell.exe"), "-NoProfile", "-NonInteractive", "-Command", "(Get-FileHash -Algorithm SHA256 -LiteralPath $env:CT_HASH_FILE).Hash"], icacls: sys("icacls.exe"), whoami: sys("whoami.exe"), kill: [sys("taskkill.exe"), "/PID", "{pid}", "/T", "/F"] };
   if (platform === "darwin") return { curl: "curl", tar: "tar", hash: ["shasum", "-a", "256", "{file}"], icacls: "", whoami: "", kill: ["kill", "{pid}"] };
   return { curl: "curl", tar: "tar", hash: ["sha256sum", "{file}"], icacls: "", whoami: "", kill: ["kill", "{pid}"] };
 }
-function resolveTarget(platform, arch) {
+function resolveTarget(platform, arch, systemRoot) {
   const archive = GO_ARCHIVES[`${platform}/${arch}`];
   if (!archive) return { state: "unsupported-platform", message: `exo-teams is built here with a pinned Go toolchain, which is pinned for macOS, Linux and Windows on x64 or arm64, not ${platform || "this system"}/${arch || "unknown"}.` };
-  return { platform, arch, archive, exe: exeName(platform, "exo-teams"), tools: toolsFor(platform) };
+  return { platform, arch, archive, exe: exeName(platform, "exo-teams"), tools: toolsFor(platform, systemRoot) };
+}
+function windowsRoot() {
+  try {
+    const value = String(host.envGet("SystemRoot") || host.envGet("windir") || "");
+    return /^[A-Za-z]:[\\/][^\r\n"]*$/.test(value) ? host.path.normalize(value) : void 0;
+  } catch {
+    return void 0;
+  }
 }
 var cachedTarget = null;
 function detectTarget(p) {
@@ -419,7 +428,7 @@ function detectTarget(p) {
     const probe = runProcess("uname", ["-m"], {}, TIMEOUTS.probe);
     arch = probe.ok ? normalizeArch(probe.stdout) : "";
   }
-  cachedTarget = resolveTarget(platform, arch);
+  cachedTarget = resolveTarget(platform, arch, windowsRoot());
   return cachedTarget;
 }
 function runProcess(bin, args, env, timeoutMs) {
@@ -483,7 +492,7 @@ function applyStorageProtection(p) {
   if (host.path.isWindows) {
     const marker = joinPath(p.root, ACL_MARKER);
     if (host.fs.fileExists(marker)) return {};
-    const tools = toolsFor("win32");
+    const tools = toolsFor("win32", windowsRoot());
     const who = runProcess(tools.whoami, [], {}, TIMEOUTS.probe);
     const principal = who.ok ? who.stdout.trim() : "";
     if (!principal || /[\r\n]/.test(principal)) return { error: "storage-protection-failed", message: "Could not identify the Windows account for the plugin storage ACL." };

@@ -205,7 +205,7 @@ function mockHost(options = {}) {
   function run(opts) {
     const bin = normalize(opts.bin || "").split("/").pop();
     const args = (opts.args || []).map(String);
-    calls.push({ bin, args, env: { ...(opts.env || {}) }, detach: !!opts.detach, timeoutMs: opts.timeoutMs, logFile: opts.logFile });
+    calls.push({ bin, raw: String(opts.bin), args, env: { ...(opts.env || {}) }, detach: !!opts.detach, timeoutMs: opts.timeoutMs, logFile: opts.logFile });
     if (bin === "whoami.exe") return { code: 0, stdout: "FIXTURE\\owner\n", stderr: "" };
     if (bin === "icacls.exe" || bin === "chmod" || bin === "taskkill.exe" || bin === "kill") return { code: 0, stdout: "", stderr: "" };
     if (bin === "uname") return { code: 0, stdout: "arm64\n", stderr: "" };
@@ -244,7 +244,7 @@ function mockHost(options = {}) {
   }
   globalThis.host = {
     platform: () => (platform === "darwin" ? "macos" : platform === "win32" ? "windows" : platform),
-    envGet: (name) => (name === "PROCESSOR_ARCHITECTURE" ? "AMD64" : null),
+    envGet: (name) => (name === "PROCESSOR_ARCHITECTURE" ? "AMD64" : name === "SystemRoot" ? "D:\\Win" : null),
     settingsJson: () => JSON.stringify(options.settings || {}),
     path: {
       isWindows: windows,
@@ -307,6 +307,9 @@ test("first login installs the pinned toolchain and module stage by stage, then 
   const hash = env.calls.find((call) => call.bin === "powershell.exe");
   assert.ok(hash.env.CT_HASH_FILE.endsWith(C.GO_ARCHIVES["win32/x64"].file), "the archive path travels in the environment, not in a command string");
   const curl = env.calls.find((call) => call.bin === "curl.exe");
+  for (const tool of ["curl.exe", "tar.exe", "powershell.exe", "icacls.exe", "whoami.exe"]) {
+    assert.match(env.calls.find((call) => call.bin === tool).raw, /^D:\\Win\\System32\\/,`${tool} runs from System32, never a PATH lookup that could find Git's GNU tar`);
+  }
   assert.equal(curl.args[curl.args.length - 1], `https://go.dev/dl/${C.GO_ARCHIVES["win32/x64"].file}`);
   assert.ok(curl.args.includes("=https"));
   const [mod, build] = env.calls.filter((call) => call.bin === "go.exe");
