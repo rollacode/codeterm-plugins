@@ -92,7 +92,10 @@ function mockHost(options = {}) {
       case "history": return words.length >= 2 && words.includes("--limit");
       case "whoami": return words.length === 1;
       case "logout": return words.length === 1;
-      case "send": return (words[1] === "--" && words.length === 3) || (words[1] === "--peer" && /^id:-?[0-9]+$/.test(words[2]) && words[3] === "--" && words.length === 5);
+      case "send": {
+        words = words.filter((word, index) => word !== "--html" || index > words.indexOf("--"));
+        return (words[1] === "--" && words.length === 3) || (words[1] === "--peer" && /^id:-?[0-9]+$/.test(words[2]) && words[3] === "--" && words.length === 5);
+      }
       case "login": return words.includes("--output") && words.includes("json");
       default: return false;
     }
@@ -129,6 +132,7 @@ function mockHost(options = {}) {
     if (words[0] === "send") {
       if (sendMode === "timeout") return { code: 0, stdout: "", stderr: "", simulatedTimeout: true };
       if (sendMode === "rate-limited") return { code: 1, stdout: "", stderr: "FLOOD_WAIT_30" };
+      if (sendMode === "invalid-markup") return { code: 1, stdout: "", stderr: 'tg: send: style text: parse: expected tag "b", got "i"\n' };
       if (sendMode === "rejected") return { code: 1, stdout: "", stderr: "MESSAGE_TOO_LONG" };
       if (sendMode === "no-id") return { code: 0, stdout: envelope({ ok: true }), stderr: "" };
       return { code: 0, stdout: envelope({ message: { id: 9001 } }), stderr: "" };
@@ -510,6 +514,61 @@ test("an idempotent retry with the same key returns the recorded message id with
     const rebound = plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["id:5005", "--key", "retry-1", "test"] });
     assert.match(rebound.error, /^invalid-request:.*different chat or text/i);
     assert.equal(sendCalls(env).length, 1);
+  } finally { env.cleanup(); }
+});
+
+test("formats default to plain and map HTML to the native flag", () => {
+  const parse = plugin.__test_parseSendArgs;
+  assert.equal(parse(["id:777", "<b>hello</b>"]).format, "plain");
+  for (const flags of [["--format", "html", "--key", "key"], ["--key", "key", "--format", "html"]]) {
+    assert.equal(parse(["id:777", ...flags, "<b>hello</b>"]).format, "html");
+  }
+  assert.equal(parse(["id:777", "--", "--format", "html"]).text, "--format html");
+  for (const tail of [["--format"], ["--format", "bad", "body"], ["--format", "html"], ["--format", "html", "--format", "plain", "body"]]) {
+    assert.match(parse(["id:777", ...tail]).error, /^invalid-request:/);
+  }
+  assert.deepEqual(plugin.__test_sendFormatArgs("plain"), []);
+  assert.deepEqual(plugin.__test_sendFormatArgs("html"), ["--html"]);
+  assert.throws(() => plugin.__test_sendFormatArgs("markdown"), /no native Markdown/);
+  assert.equal(plugin.__test_sendPayloadHash("body", "plain"), plugin.__test_sha256Hex("body"));
+  assert.notEqual(plugin.__test_sendPayloadHash("body", "html"), plugin.__test_sendPayloadHash("body", "plain"));
+});
+
+test("send and send-to forward HTML and bind retry keys to format", () => {
+  for (const verb of ["send", "send-to"]) {
+    const env = mockHost();
+    try {
+      configureLoggedInFixture(env);
+      const args = ["id:777", "--key", "formatted", "--format", "html", "<b>Аня 👋</b>"];
+      assert.equal(JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb, args }).result).status, "sent");
+      assert.deepEqual(sendCalls(env)[0].words, ["send", "--html", "--", "<b>Аня 👋</b>"]);
+      assert.equal(JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb, args }).result).status, "sent");
+      assert.match(plugin.onAgentCommand({ sessionId: "s", verb, args: ["id:777", "--key", "formatted", "<b>Аня 👋</b>"] }).error, /^invalid-request:/);
+      assert.equal(sendCalls(env).length, 1);
+    } finally { env.cleanup(); }
+  }
+});
+
+test("native parse failure preserves the client message and records no acceptance", () => {
+  const env = mockHost({ sendMode: "invalid-markup" });
+  try {
+    configureLoggedInFixture(env);
+    const result = plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["id:777", "--format", "html", "<b>bad</i>"] });
+    assert.equal(result.error, 'invalid-markup: tg: send: style text: parse: expected tag "b", got "i"');
+    const attempt = JSON.parse(readFileSync(plugin.__test_paths().outbox, "utf8")).attempts[0];
+    assert.equal(attempt.state, "failed");
+    assert.equal(attempt.failure, "invalid-markup");
+    assert.equal(attempt.telegramMessageId, undefined);
+  } finally { env.cleanup(); }
+});
+
+test("unsupported Markdown invokes no client and writes no outbox", () => {
+  const env = mockHost();
+  try {
+    configureLoggedInFixture(env);
+    assert.match(plugin.onAgentCommand({ sessionId: "s", verb: "send-to", args: ["id:777", "--format", "markdown", "**hi**"] }).error, /no native Markdown/);
+    assert.equal(env.calls.length, 0);
+    assert.equal(existsSync(plugin.__test_paths().outbox), false);
   } finally { env.cleanup(); }
 });
 

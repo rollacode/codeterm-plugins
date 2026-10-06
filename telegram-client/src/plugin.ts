@@ -483,8 +483,9 @@ function previewCommand(args: string[], origin: SendOrigin = "agent"): { result:
 }
 
 type AttemptState = "pending" | "sent" | "rate_limited" | "failed" | "unknown";
-type SendFailure = "invalid-request" | "not-logged-in" | "reauth-needed" | "chat-not-found" | "chat-not-allowed" | "rate-limited" | "upstream-rejected" | "unknown";
-const SEND_FAILURES: SendFailure[] = ["invalid-request", "not-logged-in", "reauth-needed", "chat-not-found", "chat-not-allowed", "rate-limited", "upstream-rejected", "unknown"];
+type SendFormat = "plain" | "html" | "markdown";
+type SendFailure = "invalid-markup" | "invalid-request" | "not-logged-in" | "reauth-needed" | "chat-not-found" | "chat-not-allowed" | "rate-limited" | "upstream-rejected" | "unknown";
+const SEND_FAILURES: SendFailure[] = ["invalid-markup", "invalid-request", "not-logged-in", "reauth-needed", "chat-not-found", "chat-not-allowed", "rate-limited", "upstream-rejected", "unknown"];
 type Attempt = {
   idempotencyKey: string;
   sender: any;
@@ -503,7 +504,8 @@ type Outbox = { schema: 1; attempts: Attempt[] };
 
 function failureMessage(kind: SendFailure, detail?: any): string {
   switch (kind) {
-    case "invalid-request": return `invalid-request: ${String(detail || "Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>.")} Find the chat id with \`chats <name>\`, then send again.`;
+    case "invalid-markup": return `invalid-markup: ${String(detail || "tg rejected the markup")}`;
+    case "invalid-request": return `invalid-request: ${String(detail || "Usage: send <immutable-chat-id> [--key <idempotency-key>] [--format plain|html|markdown] [--] <text>.")} Find the chat id with \`chats <name>\`, then send again.`;
     case "not-logged-in": return "not-logged-in: Sign in to Telegram Client and confirm the sender account, then send again.";
     case "reauth-needed": return "reauth-needed: Telegram authorization expired or was revoked. Complete QR login in Telegram Client before sending again.";
     case "chat-not-found": return `chat-not-found: No chat among this account's 100 most recent dialogs has id ${String(detail || "unavailable")}. Look it up with \`chats <name>\` and use an id from that result.`;
@@ -545,21 +547,46 @@ function rememberPrefixedFailure(message: string): { error: string } {
   return SEND_FAILURES.indexOf(state) >= 0 ? rememberSendFailure(state, message) : rememberSendFailure("unknown", "The command result could not be classified safely. Inspect Telegram before retrying.");
 }
 
-function parseSendArgs(args: string[]): { chatId: string; text: string; key?: string } | { error: string } {
-  if (args.length < 2 || !validChatId(args[0])) return { error: failureMessage("invalid-request", "Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>; display names are not accepted.") };
+function sendFormatArgs(format: SendFormat): string[] {
+  if (format === "html") return ["--html"];
+  if (format === "plain") return [];
+  throw new Error("Pinned tg has no native Markdown parse mode");
+}
+
+// Preserve hashes for existing plain attempts; formatting changes the payload identity.
+function sendPayloadHash(text: string, format: SendFormat): string {
+  return sha256Hex(format === "plain" ? text : `${format}\u0000${text}`);
+}
+
+function parseSendArgs(args: string[]): { chatId: string; text: string; key?: string; format: SendFormat } | { error: string } {
+  if (args.length < 2 || !validChatId(args[0])) return { error: failureMessage("invalid-request", "Usage: send <immutable-chat-id> [--key <idempotency-key>] [--format plain|html|markdown] [--] <text>; display names are not accepted.") };
   let start = 1;
   let key: string | undefined;
-  if (args[1] === "--key") {
-    if (args.length < 4 || !/^[A-Za-z0-9._:-]{1,160}$/.test(args[2])) return { error: failureMessage("invalid-request", "--key needs a 1–160 character idempotency key ([A-Za-z0-9._:-]), followed by message text.") };
-    key = args[2];
-    start = 3;
+  let format: SendFormat = "plain";
+  let seenFormat = false;
+  while (start < args.length) {
+    const flag = args[start];
+    if (flag === "--") { start++; break; }
+    if (flag !== "--key" && flag !== "--format") break;
+    const value = args[start + 1];
+    if (flag === "--key") {
+      if (key !== undefined || !value || !/^[A-Za-z0-9._:-]{1,160}$/.test(value)) return { error: failureMessage("invalid-request", "--key needs one 1–160 character idempotency key ([A-Za-z0-9._:-]).") };
+      key = value;
+    } else {
+      if (seenFormat || !["plain", "html", "markdown"].includes(value)) return { error: failureMessage("invalid-request", "--format needs one of plain, html, markdown.") };
+      format = value as SendFormat;
+      seenFormat = true;
+    }
+    start += 2;
   }
   const text = args.slice(start).join(" ");
   if (!text.length) return { error: failureMessage("invalid-request", "Message text must not be empty.") };
-  return { chatId: args[0], text, key };
+  if (format === "markdown") return { error: failureMessage("invalid-request", "The pinned tg v0.11.0 client has no native Markdown parse mode. Use --format html or plain; nothing was sent.") };
+  return { chatId: args[0], text, key, format };
 }
 
 function failureForUpstream(message: string): SendFailure {
+  if (/parse: (?:unexpected end tag|expected tag)/.test(message)) return "invalid-markup";
   if (authFailure(message)) return "reauth-needed";
   if (/not logged in|no active session|run tg login/i.test(message)) return "not-logged-in";
   if (waitSeconds(message) !== null) return "rate-limited";
@@ -608,15 +635,15 @@ function failAttempt(p: Paths, ledger: Outbox, attempt: Attempt, kind: SendFailu
   return rememberSendFailure(kind, attempt.failureMessage);
 }
 
-function recordedByCallerKey(key: string, chatId: string, text: string): { result: string } | { error: string } | null {
+function recordedByCallerKey(key: string, chatId: string, text: string, format: SendFormat): { result: string } | { error: string } | null {
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
   const loaded = loadOutbox(p);
   if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error);
   const attempt = loaded.ledger.attempts.find((item) => item.idempotencyKey === key);
   if (!attempt) return null;
-  if (attempt.payloadHash !== sha256Hex(text) || attempt.destination.id !== chatId) {
-    return sendFailureResult("invalid-request", "This idempotency key is already bound to a different chat or text; choose a new key.");
+  if (attempt.payloadHash !== sendPayloadHash(text, format) || attempt.destination.id !== chatId) {
+    return sendFailureResult("invalid-request", "This idempotency key is already bound to a different chat or text (including format); choose a new key.");
   }
   if (attempt.state === "sent") return attemptResult(attempt);
   if (attempt.state === "unknown") return sendFailureResult("unknown");
@@ -636,10 +663,10 @@ function serverMessageId(data: any): string | null {
 function sendCommand(origin: SendOrigin, args: string[]): { result: string } | { error: string } {
   const parsed = parseSendArgs(args);
   if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
-  const matchingPreview = Object.values(previewTokens).reverse().find((token: any) => token.destination.id === parsed.chatId && token.text === parsed.text);
+  const matchingPreview = parsed.format === "plain" ? Object.values(previewTokens).reverse().find((token: any) => token.destination.id === parsed.chatId && token.text === parsed.text) : undefined;
   let key = parsed.key || matchingPreview?.previewNonce;
   if (key) {
-    const recorded = recordedByCallerKey(key, parsed.chatId, parsed.text);
+    const recorded = recordedByCallerKey(key, parsed.chatId, parsed.text, parsed.format);
     if (recorded) return recorded;
   }
   const resolved = resolveSender();
@@ -650,7 +677,7 @@ function sendCommand(origin: SendOrigin, args: string[]): { result: string } | {
   if (!decision.allow) return sendFailureResult("chat-not-allowed", decision.message);
   if (!key) key = sha256Hex(`send\u0000${now()}\u0000${++previewSequence}\u0000${parsed.chatId}`).slice(0, 32);
 
-  const payloadHash = sha256Hex(parsed.text);
+  const payloadHash = sendPayloadHash(parsed.text, parsed.format);
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
   const loaded = loadOutbox(p);
@@ -658,7 +685,7 @@ function sendCommand(origin: SendOrigin, args: string[]): { result: string } | {
   const ledger = loaded.ledger;
   let attempt = ledger.attempts.find((item) => item.idempotencyKey === key);
   if (attempt && (attempt.payloadHash !== payloadHash || attempt.sender.id !== resolved.sender.id || attempt.destination.id !== found.destination.id)) {
-    return sendFailureResult("invalid-request", "This idempotency key is already bound to a different sender, chat, or text; choose a new key.");
+    return sendFailureResult("invalid-request", "This idempotency key is already bound to a different sender, chat, or text (including format); choose a new key.");
   }
   if (attempt && attempt.state === "sent") return attemptResult(attempt);
   if (attempt && attempt.state === "unknown") return sendFailureResult("unknown");
@@ -690,7 +717,7 @@ function sendCommand(origin: SendOrigin, args: string[]): { result: string } | {
   if (!persistOutbox(p, ledger)) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; Telegram was not contacted");
 
   const peer = found.destination.savedMessages ? [] : ["--peer", found.destination.id];
-  const opts = options(["--account", resolved.sender.id, "--output", "json", "send", ...peer, "--", parsed.text], undefined, { timeoutMs: 5000 });
+  const opts = options(["--account", resolved.sender.id, "--output", "json", "send", ...peer, ...sendFormatArgs(parsed.format), "--", parsed.text], undefined, { timeoutMs: 5000 });
   if (!opts) return failAttempt(p, ledger, attempt, "upstream-rejected", "tg binary is unavailable before send");
   return host.exec.async(opts as any, (result: PollResult) => {
     const output = redact(result.stdout || "");
@@ -1089,6 +1116,7 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
       return { result: JSON.stringify(current) };
     }
     case "logout": return logout();
+    case "send-to":
     case "send": return sendCommand("agent", args);
     case "preview": return previewCommand(args, "agent");
     default: return { error: `Unknown Telegram verb: ${ctx.verb}` };
@@ -1241,6 +1269,9 @@ const plugin: PluginModule = {
   __test_latestSendState: latestSendState,
   __test_failureMessage: failureMessage,
   __test_failureForUpstream: failureForUpstream,
+  __test_parseSendArgs: parseSendArgs,
+  __test_sendFormatArgs: sendFormatArgs,
+  __test_sendPayloadHash: sendPayloadHash,
 };
 
 export default plugin;

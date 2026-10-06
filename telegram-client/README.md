@@ -38,7 +38,15 @@ On macOS, `tg` stores the MTProto session in the login Keychain by default. Exis
 | `health` | Report install, account, and session-storage state, including whether the session is in Keychain or a file. |
 | `logout` | Log out configured accounts where possible, remove local session and peer-cache files, remove the YAML config, and clear API credentials from the host secret store. |
 | `preview <chat-id> <text>` | Optional dry run: resolve the sender, the recipient (title, type, @username), and the exact text, and say whether the owner's restriction would allow it. It writes no attempt and issues no send. |
-| `send <chat-id> [--key <idempotency-key>] <text>` | Send to any chat the signed-in account can write to and return the Telegram server `telegramMessageId`. The sender's own id sends to Saved Messages. |
+| `send <chat-id> [--key <idempotency-key>] [--format plain|html|markdown] [--] <text>` | Send to any chat the signed-in account can write to and return the Telegram server `telegramMessageId`. The sender's own id sends to Saved Messages. |
+
+`send-to` is an alias of `send`. Plain is the default and preserves literal tags and Markdown characters. Put flags before the body; `--` starts a literal body that begins with a flag.
+
+```sh
+codeterm plugin telegram-client send id:12345 --key html-greeting-1 --format html -- '<b>Аня, привет! 👋</b> <i>Тестируем HTML-оформление через Domios.</i>'
+```
+
+HTML uses the pinned client's native `tg send --html` parser; the plugin never computes entity offsets. Parse failures return `invalid-markup:` followed by the client's exact error and are recorded as failed. Validation follows that parser: unsupported tags are ignored and unclosed tags can be tolerated. The pinned v0.11.0 client has no Markdown parse mode, so `--format markdown` returns `invalid-request` before invoking tg and sends nothing. Native Markdown and stricter malformed-markup validation require an upstream client change. A retry key is bound to the format as well as the chat and text; changing format requires a new key.
 
 Message bodies are returned as untrusted text. They are not interpreted as instructions, sent elsewhere, or exported to `codeterm mem`.
 
