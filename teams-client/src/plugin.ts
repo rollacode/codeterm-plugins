@@ -162,6 +162,12 @@ function protectStorage(p: Paths): { error?: string; message?: string } {
 
 // `/inheritance:r` with `/T` strips each file's inherited ACEs while `(OI)(CI)` grants never apply to files,
 // leaving existing files with an empty ACL; reset children to inherit, then restrict only the root.
+// `m365 --version` prints a banner plus help and can take tens of seconds cold, so read the installed manifest.
+function installedPackageVersion(p: Paths): string {
+  const manifest = host.fs.readJson(joinPath(p.runtime, `node_modules/${PACKAGE}/package.json`)) as { name?: string; version?: string } | null;
+  return manifest?.name === PACKAGE ? String(manifest.version || "") : "";
+}
+
 function windowsAclCommands(root: string, principal: string): string[][] {
   return [
     [root, "/reset", "/T", "/C", "/Q"],
@@ -1177,8 +1183,7 @@ function loginPoll(jobId: string): any {
     return { done: false, jobId: install.jobId, state: "install-in-progress", message: "The local package checksum passed; npm is installing the verified tarball." };
   }
   if (login.stage === "install") {
-    const version = runProcess(nativePath(login.paths.binary), ["--version"], envFor(login.paths));
-    if (!version.ok || version.stdout.trim() !== VERSION) {
+    if (installedPackageVersion(login.paths) !== VERSION) {
       return finishLoginJob(jobId, "install-failed", lifecycleMessage("install-failed", "The installed m365 CLI version did not match the pinned release."));
     }
     if (login.packagePath) {

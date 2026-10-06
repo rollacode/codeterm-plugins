@@ -80,6 +80,7 @@ function mockHost(options = {}) {
         if (!args.includes("--ignore-scripts")) return { code: 1, stdout: "", stderr: "install scripts must be disabled" };
         const p = plugin.__test_paths();
         files.set(normalize(p.binary), "pinned m365 shim");
+        files.set(normalize(`${p.runtime}/node_modules/@pnp/cli-microsoft365/package.json`), JSON.stringify({ name: "@pnp/cli-microsoft365", version: options.installedVersion || "11.11.0" }));
         return { code: 0, stdout: "installed", stderr: "" };
       }
       return { code: 1, stdout: "", stderr: "unexpected npm args" };
@@ -370,7 +371,7 @@ test("install verifies npm pack locally before ignore-scripts installation", () 
       assert.equal(env.calls.some((call) => call.args[0] === "view"), false, "integrity is not fetched separately from the registry");
       const browser = plugin.__test_loginPoll(packed.jobId);
       assert.equal(browser.state, "login-in-progress");
-      assert.ok(env.calls.some((call) => call.args[0] === "--version" && (call.bin === "m365" || call.bin === "m365.cmd")), "installed binary version is checked");
+      assert.equal(env.calls.some((call) => call.args[0] === "--version" && (call.bin === "m365" || call.bin === "m365.cmd")), false, "installed version comes from the package manifest, not a slow CLI start");
       assert.ok(env.calls.some((call) => call.args[0] === "login" && call.detach), "browser login is detached and polled");
       assert.ok(env.calls.filter((call) => ["pack", "install"].includes(call.args[0])).every((call) => !call.detach), "npm stages run attached so their result is observable");
       const complete = plugin.__test_loginPoll(browser.jobId);
@@ -1108,6 +1109,17 @@ test("Windows ACL plan restricts only the root and never strips inheritance recu
   assert.equal(restrict[0], "C:\\root");
   assert.ok(restrict.includes("/inheritance:r") && restrict.includes("HOST\\owner:(OI)(CI)F") && restrict.includes("*S-1-5-18:(OI)(CI)F"));
   assert.equal(restrict.includes("/T"), false);
+});
+
+test("an installed package whose manifest version differs from the pin fails installation", () => {
+  const env = mockHost({ platform: "linux", arch: "x64", noInstalledBinary: true, installedVersion: "11.10.0" });
+  try {
+    const started = plugin.__test_loginStart();
+    const packed = plugin.__test_loginPoll(started.jobId);
+    const installed = plugin.__test_loginPoll(packed.jobId);
+    assert.equal(installed.state, "install-failed");
+    assert.match(installed.error, /did not match the pinned release/);
+  } finally { env.cleanup(); }
 });
 
 for (const [name, fn] of tests) {

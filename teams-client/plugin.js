@@ -171,6 +171,10 @@ function protectStorage(p) {
   storageProtectionCache[p.root] = result;
   return result;
 }
+function installedPackageVersion(p) {
+  const manifest = host.fs.readJson(joinPath(p.runtime, `node_modules/${PACKAGE}/package.json`));
+  return manifest?.name === PACKAGE ? String(manifest.version || "") : "";
+}
 function windowsAclCommands(root, principal) {
   return [
     [root, "/reset", "/T", "/C", "/Q"],
@@ -1224,8 +1228,7 @@ ${poll.stdout || ""}`;
     return { done: false, jobId: install.jobId, state: "install-in-progress", message: "The local package checksum passed; npm is installing the verified tarball." };
   }
   if (login.stage === "install") {
-    const version = runProcess(nativePath(login.paths.binary), ["--version"], envFor(login.paths));
-    if (!version.ok || version.stdout.trim() !== VERSION) {
+    if (installedPackageVersion(login.paths) !== VERSION) {
       return finishLoginJob(jobId, "install-failed", lifecycleMessage("install-failed", "The installed m365 CLI version did not match the pinned release."));
     }
     if (login.packagePath) {
