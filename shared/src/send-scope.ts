@@ -50,21 +50,30 @@ export function decideSend(scope: SendScope, chatId: string, origin: SendOrigin)
 export type MatchableChat = { id: string; title: string; username?: string | null };
 export type ChatMatch<T extends MatchableChat> = { match: T | null; ambiguous: boolean; candidates: T[] };
 
-function fold(value: string): string {
-  return value.toLowerCase().replace(/^@/, "").replace(/\s+/g, " ").trim();
+const CYRILLIC: Record<string, string> = {
+  а: "a", б: "b", в: "v", г: "g", д: "d", е: "e", ё: "e", ж: "zh", з: "z", и: "i", й: "y", к: "k", л: "l", м: "m",
+  н: "n", о: "o", п: "p", р: "r", с: "s", т: "t", у: "u", ф: "f", х: "kh", ц: "ts", ч: "ch", ш: "sh", щ: "shch",
+  ъ: "", ы: "y", ь: "", э: "e", ю: "yu", я: "ya", і: "i", ї: "yi", є: "ye", ґ: "g",
+};
+
+// Owners type names in Latin for contacts saved in Cyrillic, so both sides are folded to Latin words.
+function words(value: string): string[] {
+  const latin = Array.from(value.toLowerCase().normalize("NFC")).map((ch) => CYRILLIC[ch] ?? ch).join("");
+  return latin.normalize("NFD").replace(/[̀-ͯ]/g, "").split(/[^a-z0-9]+/).filter(Boolean);
 }
 
 export function matchChats<T extends MatchableChat>(chats: T[], query: string, limit = 20): ChatMatch<T> {
-  const q = fold(query);
-  if (!q) return { match: null, ambiguous: false, candidates: [] };
-  const byId = chats.filter((chat) => chat.id.toLowerCase() === q);
+  const raw = query.trim().toLowerCase();
+  const tokens = words(raw);
+  if (!tokens.length) return { match: null, ambiguous: false, candidates: [] };
+  const byId = chats.filter((chat) => chat.id.toLowerCase() === raw);
   if (byId.length === 1) return { match: byId[0], ambiguous: false, candidates: byId };
-  const tokens = q.split(" ");
   const hits = chats.filter((chat) => {
-    const haystack = `${fold(chat.title)} ${fold(chat.username || "")}`;
-    return tokens.every((token) => haystack.includes(token));
+    const haystack = words(`${chat.title} ${chat.username || ""}`);
+    return tokens.every((token) => haystack.some((word) => word.startsWith(token)));
   });
-  const exact = hits.filter((chat) => fold(chat.title) === q || (!!chat.username && fold(chat.username) === q));
+  const key = tokens.join(" ");
+  const exact = hits.filter((chat) => words(chat.title).join(" ") === key || (!!chat.username && words(chat.username).join(" ") === key));
   const match = exact.length === 1 ? exact[0] : hits.length === 1 ? hits[0] : null;
   return { match, ambiguous: !match && hits.length > 1, candidates: hits.slice(0, limit) };
 }

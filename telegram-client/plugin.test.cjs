@@ -609,6 +609,18 @@ test("chat matching prefers one exact title, matches all words in any order, and
   assert.equal(ambiguous.ambiguous, true);
   assert.equal(ambiguous.candidates.length, 3);
   assert.deepEqual(matchChats(chats, "   "), { match: null, ambiguous: false, candidates: [] });
+  const cyrillic = [
+    { id: "id:10", title: "Анна Иванова", username: null },
+    { id: "id:11", title: "Саня Саевец", username: null },
+    { id: "id:12", title: "Jānis Bērziņš", username: null },
+    { id: "id:13", title: "Андрей Ковалёв", username: null },
+  ];
+  assert.equal(matchChats(cyrillic, "Anna Ivanova").match.id, "id:10", "a Latin name finds a contact saved in Cyrillic");
+  assert.equal(matchChats(cyrillic, "Анна").match.id, "id:10");
+  assert.equal(matchChats(cyrillic, "Anya").match, null, "words match by prefix, so Anya does not hit Sanya");
+  assert.equal(matchChats(cyrillic, "Аня").candidates.length, 0);
+  assert.equal(matchChats(cyrillic, "janis berzins").match.id, "id:12");
+  assert.equal(matchChats(cyrillic, "Andrey Kovalev").match.id, "id:13");
 });
 
 test("view: Restrict agent sends defaults to all chats and toggles chats in and out of the list", () => {

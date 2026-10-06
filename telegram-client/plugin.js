@@ -1853,20 +1853,61 @@ function decideSend(scope, chatId2, origin) {
     message: `chat-not-allowed: The owner's "Restrict agent sends" setting permits only these chats: ${allowed}. ${chatId2} is not one of them. Ask the owner to add it in the plugin view (Restrict agent sends) or to switch the setting back to all chats.`
   };
 }
-function fold(value) {
-  return value.toLowerCase().replace(/^@/, "").replace(/\s+/g, " ").trim();
+var CYRILLIC = {
+  \u0430: "a",
+  \u0431: "b",
+  \u0432: "v",
+  \u0433: "g",
+  \u0434: "d",
+  \u0435: "e",
+  \u0451: "e",
+  \u0436: "zh",
+  \u0437: "z",
+  \u0438: "i",
+  \u0439: "y",
+  \u043A: "k",
+  \u043B: "l",
+  \u043C: "m",
+  \u043D: "n",
+  \u043E: "o",
+  \u043F: "p",
+  \u0440: "r",
+  \u0441: "s",
+  \u0442: "t",
+  \u0443: "u",
+  \u0444: "f",
+  \u0445: "kh",
+  \u0446: "ts",
+  \u0447: "ch",
+  \u0448: "sh",
+  \u0449: "shch",
+  \u044A: "",
+  \u044B: "y",
+  \u044C: "",
+  \u044D: "e",
+  \u044E: "yu",
+  \u044F: "ya",
+  \u0456: "i",
+  \u0457: "yi",
+  \u0454: "ye",
+  \u0491: "g"
+};
+function words(value) {
+  const latin = Array.from(value.toLowerCase().normalize("NFC")).map((ch) => CYRILLIC[ch] ?? ch).join("");
+  return latin.normalize("NFD").replace(/[̀-ͯ]/g, "").split(/[^a-z0-9]+/).filter(Boolean);
 }
 function matchChats(chats, query, limit = 20) {
-  const q = fold(query);
-  if (!q) return { match: null, ambiguous: false, candidates: [] };
-  const byId = chats.filter((chat) => chat.id.toLowerCase() === q);
+  const raw = query.trim().toLowerCase();
+  const tokens = words(raw);
+  if (!tokens.length) return { match: null, ambiguous: false, candidates: [] };
+  const byId = chats.filter((chat) => chat.id.toLowerCase() === raw);
   if (byId.length === 1) return { match: byId[0], ambiguous: false, candidates: byId };
-  const tokens = q.split(" ");
   const hits = chats.filter((chat) => {
-    const haystack = `${fold(chat.title)} ${fold(chat.username || "")}`;
-    return tokens.every((token) => haystack.includes(token));
+    const haystack = words(`${chat.title} ${chat.username || ""}`);
+    return tokens.every((token) => haystack.some((word) => word.startsWith(token)));
   });
-  const exact = hits.filter((chat) => fold(chat.title) === q || !!chat.username && fold(chat.username) === q);
+  const key = tokens.join(" ");
+  const exact = hits.filter((chat) => words(chat.title).join(" ") === key || !!chat.username && words(chat.username).join(" ") === key);
   const match = exact.length === 1 ? exact[0] : hits.length === 1 ? hits[0] : null;
   return { match, ambiguous: !match && hits.length > 1, candidates: hits.slice(0, limit) };
 }
@@ -2163,25 +2204,25 @@ function sha256Hex(text) {
     3329325298
   ];
   const state = [1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225];
-  const words = new Array(64);
+  const words2 = new Array(64);
   const rotate = (value, bits) => value >>> bits | value << 32 - bits;
   for (let offset = 0; offset < bytes.length; offset += 64) {
     for (let i = 0; i < 16; i++) {
       const at = offset + i * 4;
-      words[i] = (bytes[at] << 24 | bytes[at + 1] << 16 | bytes[at + 2] << 8 | bytes[at + 3]) >>> 0;
+      words2[i] = (bytes[at] << 24 | bytes[at + 1] << 16 | bytes[at + 2] << 8 | bytes[at + 3]) >>> 0;
     }
     for (let i = 16; i < 64; i++) {
-      const x = words[i - 15];
-      const y = words[i - 2];
+      const x = words2[i - 15];
+      const y = words2[i - 2];
       const s0 = rotate(x, 7) ^ rotate(x, 18) ^ x >>> 3;
       const s1 = rotate(y, 17) ^ rotate(y, 19) ^ y >>> 10;
-      words[i] = words[i - 16] + s0 + words[i - 7] + s1 >>> 0;
+      words2[i] = words2[i - 16] + s0 + words2[i - 7] + s1 >>> 0;
     }
     let [a, b, c, d, e, f, g, h] = state;
     for (let i = 0; i < 64; i++) {
       const sum1 = rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25);
       const choice = e & f ^ ~e & g;
-      const t1 = h + sum1 + choice + constants[i] + words[i] >>> 0;
+      const t1 = h + sum1 + choice + constants[i] + words2[i] >>> 0;
       const sum0 = rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22);
       const majority = a & b ^ a & c ^ b & c;
       const t2 = sum0 + majority >>> 0;
