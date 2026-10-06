@@ -15,6 +15,24 @@ process.on("exit", () => rmSync(testBundle, { force: true }));
 const tests = [];
 const unexpectedCommands = [];
 function test(name, fn) { tests.push([name, fn]); }
+
+test("plugin view does not repeat the plugin name and shows status as a label, not a slug", () => {
+  const React = require("react");
+  const { renderToStaticMarkup } = require("react-dom/server");
+  const { App } = require("./ui/src/app.tsx");
+  const { StatusBar } = require("./ui/src/kit.tsx");
+  const { statusView } = require("./ui/src/status.ts");
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "plugin.json"), "utf8"));
+  const page = renderToStaticMarkup(React.createElement(App));
+  assert.equal(page.includes(manifest.displayName), false, "the host header already names the plugin");
+  assert.match(page, /<h2[^>]*>/, "the view is organized into titled sections");
+  for (const state of [undefined, "installed-but-not-configured", "logged-in", "brand-new_state"]) {
+    const view = statusView(state);
+    assert.doesNotMatch(view.label, /[-_]/, `${state} renders as words`);
+    const bar = renderToStaticMarkup(React.createElement(StatusBar, { ...view, busy: false, onRefresh() {} }));
+    if (state) assert.equal(bar.includes(state), false, `${state} is never shown raw`);
+  }
+});
 function assertOk(value, message) { assert.equal(!!value, true, message); }
 function writeJson(file, value) {
   mkdirSync(path.dirname(file), { recursive: true });

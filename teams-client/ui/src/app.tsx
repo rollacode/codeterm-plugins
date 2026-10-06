@@ -1,0 +1,341 @@
+import { useEffect, useState } from "react";
+import { Actions, Btn, codeBlock, Disclosure, Field, inputStyle, Notice, pageStyle, Section, StatusBar } from "./kit";
+import { isSignedIn, sendGate, statusView } from "./status";
+
+declare global {
+  interface Window {
+    ct?: { invoke(method: string, args?: unknown): Promise<unknown>; close?(): void };
+  }
+}
+
+type Account = {
+  id: string;
+  accountId: string;
+  tenantId: string | null;
+  upn: string;
+  active: boolean;
+  expiresOn?: string | null;
+};
+
+export type Health = {
+  state: string;
+  message: string;
+  accountId?: string | null;
+  tenantId?: string | null;
+  upn?: string | null;
+  expiresOn?: string | null;
+  loginJobId?: string | null;
+};
+
+type Chat = { id: string; topic?: string | null };
+export type SendPolicy = { configured: boolean; mode?: string | null; senderAccountId?: string | null; senderTenantId?: string | null; allowedDestinations: Array<{ id: string; label: string }> };
+export type SendPreview = {
+  previewId: string;
+  idempotencyKey: string;
+  sender: { id: string; accountId: string; upn: string; tenantId: string; identityKey: string };
+  tenant: { id: string };
+  destination: { id: string; label: string };
+  text: string;
+  policy: SendPolicy;
+};
+
+export function App() {
+  const [health, setHealth] = useState<Health | null>(null);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [chatId, setChatId] = useState("");
+  const [draft, setDraft] = useState("");
+  const [preview, setPreview] = useState<SendPreview | null>(null);
+  const [policy, setPolicy] = useState<SendPolicy>({ configured: false, allowedDestinations: [] });
+  const [sendResult, setSendResult] = useState("");
+  const [blockedKey, setBlockedKey] = useState("");
+  const [sendInProgress, setSendInProgress] = useState(false);
+  const [jobId, setJobId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  async function refresh() {
+    setBusy(true);
+    try {
+      const current = await window.ct!.invoke("status") as Health;
+      setHealth(current);
+      if (current.loginJobId) setJobId(current.loginJobId);
+      const listed = await window.ct!.invoke("accounts") as { accounts?: Account[]; error?: string };
+      setAccounts(Array.isArray(listed.accounts) ? listed.accounts : []);
+      const chatResult = await window.ct!.invoke("chats") as { result?: string; error?: string };
+      const parsedChats = chatResult.result ? JSON.parse(chatResult.result) as { chats?: Chat[] } : { chats: [] };
+      const nextChats = Array.isArray(parsedChats.chats) ? parsedChats.chats : [];
+      setChats(nextChats);
+      setChatId((currentId) => nextChats.some((chat) => chat.id === currentId) ? currentId : "");
+      if (chatResult.error) setMessage(chatResult.error);
+      const currentPolicy = await window.ct!.invoke("policy") as SendPolicy;
+      setPolicy(currentPolicy || { configured: false, allowedDestinations: [] });
+      if (listed.error && current.state === "logged-in") setMessage(listed.error);
+      else if (!chatResult.error) setMessage("");
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => { void refresh(); }, []);
+
+  async function startLogin() {
+    setBusy(true);
+    setMessage("");
+    try {
+      const result = await window.ct!.invoke("loginStart") as { jobId?: string; error?: string; message?: string };
+      if (result.error) throw new Error(result.error);
+      setJobId(result.jobId || "");
+      setMessage(result.message || "Microsoft browser sign-in started.");
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function checkLogin() {
+    if (!jobId) return;
+    setBusy(true);
+    try {
+      const result = await window.ct!.invoke("loginPoll", { jobId }) as {
+        done?: boolean;
+        jobId?: string;
+        state?: string;
+        error?: string;
+        message?: string;
+      };
+      if (result.done) setJobId("");
+      else if (result.jobId) setJobId(result.jobId);
+      if (result.error) setMessage(result.error);
+      else setMessage(result.message || "Sign-in is still running. Complete it in the browser, then check again.");
+      if (result.done) await refresh();
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function useAccount(id: string) {
+    setBusy(true);
+    try {
+      const result = await window.ct!.invoke("useAccount", { id }) as { error?: string };
+      if (result.error) throw new Error(result.error);
+      await refresh();
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function logout() {
+    setBusy(true);
+    try {
+      const result = await window.ct!.invoke("logout") as { result?: string; error?: string };
+      if (result.error) throw new Error(result.error);
+      setMessage(result.result || "Signed out.");
+      setJobId("");
+      await refresh();
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function invalidatePreview() {
+    setPreview(null);
+    setSendResult("");
+    setBlockedKey("");
+  }
+
+  async function makePreview() {
+    setBusy(true);
+    setMessage("");
+    invalidatePreview();
+    try {
+      const response = await window.ct!.invoke("preview", { chatId, text: draft }) as { result?: string; error?: string };
+      if (response.error) throw new Error(response.error);
+      if (!response.result) throw new Error("Teams Client did not return a preview.");
+      setPreview(JSON.parse(response.result) as SendPreview);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function approveDestination() {
+    if (!preview) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const response = await window.ct!.invoke("approveSendPolicy", { approveDestination: true, previewId: preview.previewId }) as { result?: string; error?: string };
+      if (response.error) throw new Error(response.error);
+      if (!response.result) throw new Error("Teams Client did not save the single-chat policy.");
+      setPolicy(JSON.parse(response.result) as SendPolicy);
+      setMessage("Policy saved for the sender, tenant, and one immutable chat shown in this preview.");
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendPreview() {
+    if (!preview) return;
+    setBusy(true);
+    setSendInProgress(true);
+    setMessage("Sending with m365. Throttling retries can take about 10 seconds or more without output; wait for this result before taking another action.");
+    setSendResult("");
+    try {
+      const response = await window.ct!.invoke("send", {
+        chatId: preview.destination.id,
+        text: preview.text,
+        idempotencyKey: preview.idempotencyKey,
+      }) as { result?: string; error?: string };
+      if (response.error) {
+        if (/^unknown:/i.test(response.error)) setBlockedKey(preview.idempotencyKey);
+        throw new Error(response.error);
+      }
+      if (!response.result) throw new Error("Teams Client did not return a recorded send result.");
+      setSendResult(response.result);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setSendInProgress(false);
+      setBusy(false);
+    }
+  }
+
+  const signedIn = isSignedIn(health?.state);
+  const status = statusView(health?.state);
+  const { previewMatches, policyMatches, sendEnabled } = sendGate({ preview, chatId, draft, health, policy, busy, blockedKey, sendResult });
+
+  return (
+    <main style={pageStyle}>
+      <StatusBar label={status.label} tone={status.tone} detail={health?.message} busy={busy} onRefresh={() => void refresh()} />
+      {message && <Notice>{message}</Notice>}
+
+      {signedIn ? (
+        <Section title="Account">
+          <dl style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "4px 12px", margin: 0, fontSize: 12.5 }}>
+            {health?.upn && <><dt style={termStyle}>Account</dt><dd style={{ margin: 0 }}><strong>{health.upn}</strong></dd></>}
+            {health?.tenantId && <><dt style={termStyle}>Tenant</dt><dd style={{ margin: 0, overflowWrap: "anywhere" }}>{health.tenantId}</dd></>}
+            {health?.expiresOn && <><dt style={termStyle}>Token expires</dt><dd style={{ margin: 0 }}>{health.expiresOn}</dd></>}
+          </dl>
+          {accounts.length > 1 && <div style={{ marginTop: 12 }}><AccountList accounts={accounts} busy={busy} onUse={(id) => void useAccount(id)} /></div>}
+          <Actions>
+            <Btn kind="danger" disabled={busy} onClick={() => void logout()}>Sign out</Btn>
+          </Actions>
+        </Section>
+      ) : (
+        <Section title="Sign in" hint="Use your Microsoft 365 work or school account. Sign-in opens in your browser.">
+          {accounts.length > 0 && <AccountList accounts={accounts} busy={busy} onUse={(id) => void useAccount(id)} />}
+          <Actions>
+            {jobId
+              ? <Btn kind="primary" disabled={busy} onClick={() => void checkLogin()}>Check sign-in status</Btn>
+              : <Btn kind="primary" disabled={busy} onClick={() => void startLogin()}>{busy ? "Working…" : "Sign in with browser"}</Btn>}
+          </Actions>
+        </Section>
+      )}
+
+      <Section title="Preview and send" hint={signedIn ? "Pick one chat and preview the message. Sending unlocks after you approve that exact chat." : "Sign in first to load your chats."}>
+        <Field label="Chat">
+          <select value={chatId} disabled={busy || chats.length === 0} onChange={(event) => { setChatId(event.target.value); invalidatePreview(); }} style={inputStyle}>
+            <option value="">{chats.length === 0 ? "No chats loaded" : "Choose a chat"}</option>
+            {chats.map((chat) => <option key={chat.id} value={chat.id}>{chat.topic ? `${chat.topic} (${chat.id})` : chat.id}</option>)}
+          </select>
+        </Field>
+        <Field label="Message">
+          <textarea value={draft} rows={4} disabled={busy || !signedIn} onChange={(event) => { setDraft(event.target.value); invalidatePreview(); }} style={{ ...inputStyle, resize: "vertical" }} />
+        </Field>
+        {!preview && (
+          <Actions>
+            <Btn kind="primary" disabled={busy || !chatId || draft.length === 0} onClick={() => void makePreview()}>{busy ? "Working…" : "Preview"}</Btn>
+          </Actions>
+        )}
+
+        {preview && (
+          <PreviewCard
+            preview={preview}
+            policy={policy}
+            previewMatches={previewMatches}
+            policyMatches={policyMatches}
+            sendEnabled={sendEnabled}
+            busy={busy}
+            sendInProgress={sendInProgress}
+            sendResult={sendResult}
+            onApprove={() => void approveDestination()}
+            onSend={() => void sendPreview()}
+            onEdit={invalidatePreview}
+          />
+        )}
+      </Section>
+
+      <Disclosure summary="Security details">
+        <p style={{ margin: "0 0 6px" }}>If your tenant allows user consent, approve the m365 permissions in the browser. If it restricts user consent, a tenant administrator must approve those permissions once. This plugin does not create an Entra app registration.</p>
+        <p style={{ margin: "0 0 6px" }}>The approved policy covers one sender, one tenant, and one immutable chat. The send button stays disabled until the preview shows the current account and tenant.</p>
+        <p style={{ margin: "0 0 6px" }}>m365 retries throttling internally. A surfaced 429 or 503 is recorded as unknown because the message may already have arrived.</p>
+        <p style={{ margin: 0 }}>Agent verbs: accounts, use, chats, history, health, preview, send, logout.</p>
+      </Disclosure>
+    </main>
+  );
+}
+
+export function PreviewCard({ preview, policy, previewMatches, policyMatches, sendEnabled, busy, sendInProgress, sendResult, onApprove, onSend, onEdit }: {
+  preview: SendPreview;
+  policy: SendPolicy;
+  previewMatches: boolean;
+  policyMatches: boolean;
+  sendEnabled: boolean;
+  busy: boolean;
+  sendInProgress: boolean;
+  sendResult: string;
+  onApprove: () => void;
+  onSend: () => void;
+  onEdit: () => void;
+}) {
+  return (
+        <div aria-label="Resolved preview" role="group" style={{ marginTop: 12, padding: 12, borderRadius: 10, border: "1px solid var(--ct-border-default, rgba(255,255,255,.12))", fontSize: 12.5 }}>
+          <p style={{ margin: "0 0 6px" }}>From <strong>{preview.sender.upn}</strong> to <strong>{preview.destination.label}</strong></p>
+          <pre style={codeBlock}>{preview.text}</pre>
+          <Disclosure summary="Identifiers">
+            <p style={{ margin: 0 }}>Sender account <code>{preview.sender.accountId}</code></p>
+            <p style={{ margin: "4px 0 0" }}>Tenant <code>{preview.tenant.id}</code></p>
+            <p style={{ margin: "4px 0 0" }}>Chat <code>{preview.destination.id}</code></p>
+            <p style={{ margin: "4px 0 0" }}>Policy: {policyMatches ? "approved for this account, tenant, and chat" : policy.configured ? "approved for a different sender, tenant, or chat" : "not set"}</p>
+          </Disclosure>
+          <Actions>
+            {policyMatches
+              ? <Btn kind="primary" disabled={!sendEnabled} onClick={onSend}>{sendInProgress ? "Sending…" : "Send"}</Btn>
+              : <Btn kind="primary" disabled={busy || !previewMatches} onClick={onApprove}>Approve this chat</Btn>}
+            <Btn disabled={busy} onClick={onEdit}>Edit</Btn>
+          </Actions>
+          {policyMatches && <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--ct-muted, #9aa)" }}>Sending can pause for 10 seconds or more while Microsoft throttles. Wait for the result.</p>}
+          {sendResult && <pre role="status" style={codeBlock}>{sendResult}</pre>}
+        </div>
+  );
+}
+
+const termStyle = { color: "var(--ct-muted, #9aa)" };
+
+function AccountList({ accounts, busy, onUse }: { accounts: Account[]; busy: boolean; onUse: (id: string) => void }) {
+  return (
+    <ul aria-label="Accounts" style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}>
+      {accounts.map((account) => (
+        <li key={account.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--ct-border-subtle, rgba(255,255,255,.08))", fontSize: 12.5 }}>
+          <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>
+            <strong>{account.upn || account.id}</strong>
+            <span style={{ color: "var(--ct-muted, #9aa)" }}>{account.active ? " (current)" : ""}</span>
+          </span>
+          {!account.active && <Btn disabled={busy} onClick={() => onUse(account.id)}>Use</Btn>}
+        </li>
+      ))}
+    </ul>
+  );
+}
