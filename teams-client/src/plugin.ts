@@ -289,9 +289,17 @@ function startBrowserLogin(p: Paths, target: Target, authType: LoginAuthType = "
   return startLoginProcess(p, target, "browser", args, undefined, authType);
 }
 
+function signInLogFailure(text: string): { state: string; message: string } | null {
+  const known = authState(text);
+  if (known) return known;
+  const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const last = lines[lines.length - 1] || "";
+  return /^Error:/.test(last) ? { state: "sign-in-failed", message: `Microsoft sign-in failed: ${last.slice(6).trim()}` } : null;
+}
+
 function browserLogFailure(login: LoginJob): { state: string; message: string } | null {
   if (!login.logFile) return null;
-  return authState(String(host.fs.readFileTail(login.logFile, 8192) || ""));
+  return signInLogFailure(String(host.fs.readFileTail(login.logFile, 8192) || ""));
 }
 
 function deviceSignInArtifacts(login: LoginJob): { signInUrl?: string; deviceCode?: string } {
@@ -1273,6 +1281,7 @@ const plugin: PluginModule = {
   __test_agentHistory: agentHistory,
   __test_credentials: credentialPublic,
   __test_windowsAclCommands: windowsAclCommands,
+  __test_signInLogFailure: signInLogFailure,
   __test_metadataReader: METADATA_READER,
 };
 

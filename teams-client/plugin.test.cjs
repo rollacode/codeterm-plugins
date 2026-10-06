@@ -1104,6 +1104,13 @@ test("browser sign-in starts a detached m365 job without credentials in argv", (
   }
 });
 
+test("a detached sign-in's final Error line is a named failure; device-code output is not", () => {
+  const failure = plugin.__test_signInLogFailure;
+  assert.deepEqual(failure("Error: post_request_failed: invalid_grant\n"), { state: "sign-in-failed", message: "Microsoft sign-in failed: post_request_failed: invalid_grant" });
+  assert.equal(failure("To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABCD-EFGH to authenticate."), null);
+  assert.equal(failure("AADSTS50076 MFA required").state, "mfa-required");
+});
+
 test("Windows ACL plan restricts only the root and never walks the tree", () => {
   const commands = plugin.__test_windowsAclCommands("C:\\root", "HOST\\owner");
   assert.equal(commands.length, 1);
