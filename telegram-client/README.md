@@ -1,6 +1,6 @@
 # Telegram Client
 
-Telegram Client connects CodeTerm to the owner’s Telegram account through the pinned [`gotd/cli`](https://github.com/gotd/cli) v0.11.0 release. It supports account selection, chat listing, bounded recent history, resolved previews, and an owner-gated send path.
+Telegram Client connects CodeTerm to the owner’s Telegram account through the pinned [`gotd/cli`](https://github.com/gotd/cli) v0.11.0 release. It supports account selection, chat listing, bounded recent history, message text search, resolved previews, and an owner-gated path for sending messages and files.
 
 ## Install the pinned helper
 
@@ -39,6 +39,9 @@ On macOS, `tg` stores the MTProto session in the login Keychain by default. Exis
 | `logout` | Log out configured accounts where possible, remove local session and peer-cache files, remove the YAML config, and clear API credentials from the host secret store. |
 | `preview <chat-id> <text>` | Optional dry run: resolve the sender, the recipient (title, type, @username), and the exact text, and say whether the owner's restriction would allow it. It writes no attempt and issues no send. |
 | `send <chat-id> [--key <idempotency-key>] [--format plain|html|markdown] [--] <text>` | Send to any chat the signed-in account can write to and return the Telegram server `telegramMessageId`. The sender's own id sends to Saved Messages. |
+| `send-file <chat-id-or-name> <absolute-file-path> [--message <caption>] [--key <idempotency-key>] [--format plain|html]` | Upload one file into an existing chat with an optional caption and return `telegramMessageId`, or `status: uploading` while a longer upload runs. `me` targets Saved Messages. |
+| `send-file-status <key>` | Read back a file send: `uploading`, `sent` with `telegramMessageId`, or its named failure. |
+| `search-messages <query> [--chat <chat-id-or-name>] [--limit N]` | Search message text with Telegram's server-side search, across all chats or in one chat. Each hit has `chat`, `sender`, `time` (ISO), `date`, `snippet`, `messageId`, and `out`. `chats [query]` stays the chat and person lookup. |
 
 `send-to` is an alias of `send`. Plain is the default and preserves literal tags and Markdown characters. Put flags before the body; `--` starts a literal body that begins with a flag.
 
@@ -47,6 +50,20 @@ codeterm plugin telegram-client send id:12345 --key html-greeting-1 --format htm
 ```
 
 HTML uses the pinned client's native `tg send --html` parser; the plugin never computes entity offsets. Parse failures return `invalid-markup:` followed by the client's exact error and are recorded as failed. Validation follows that parser: unsupported tags are ignored and unclosed tags can be tolerated. The pinned v0.11.0 client has no Markdown parse mode, so `--format markdown` returns `invalid-request` before invoking tg and sends nothing. Native Markdown and stricter malformed-markup validation require an upstream client change. A retry key is bound to the format as well as the chat and text; changing format requires a new key.
+
+## Files
+
+`send-file` uploads through the pinned client's `tg upload --peer <id> [--message=<caption>] [--html] -- <path>`, the same command the client documents for sending a file to a chat; the plugin never reads the file into its own process beyond a one-byte readability probe, and never logs or stores its contents, name in the ledger, or caption. The chat argument may be an immutable id, a name or @username that matches exactly one of the 100 most recent dialogs, or `me`; an ambiguous name returns the candidates and uploads nothing.
+
+Before any upload or ledger write the plugin checks the path is absolute, is one regular file (a directory is refused because `tg upload` would send every file under it), is not empty, is no larger than **Maximum file size** (`fileMaxMiB`, default 50 MiB, up to Telegram's 2000 MiB), and can be opened. Failures are `invalid-request`, `file-not-found`, `file-too-large`, or `file-unreadable`. A plugin installed as a user drop-in in a production CodeTerm may only inspect its own folders, so a file elsewhere is reported as `file-not-found` there; a dev instance and first-party plugins are not confined.
+
+A file send uses the same restriction, ledger, and idempotency rules as `send`. The key binds the chat argument, path, caption, and format; the ledger records `kind: "file"` and the byte size. The host bounds a plugin's awaited process at five seconds, so the upload runs as a background `tg` job with a timeout scaled to the file size (60 s plus 1 s per 256 KiB, at most 30 minutes). If it finishes at once, `send-file` returns `sent`; otherwise it returns `status: uploading` and `send-file-status <key>` (or re-running `send-file` with the same key) reads the result back. `health` and the view also record a finished upload. If the plugin reloads while an upload is running, or the result is not read within five minutes of completion, the attempt becomes `unknown` and is never re-uploaded automatically.
+
+## Message search
+
+`search-messages` maps to the pinned client's `tg search`: with `--chat` it is `messages.search` in that chat (`tg search --limit N -- <id> <query>`), and without it `messages.searchGlobal` (`tg search --global --limit N -- <query>`). Results are capped at 50 hits and a 32 KiB response with `truncated: true` when cut, and each snippet is at most 240 characters around the first matching word.
+
+The pinned v0.11.0 global search output carries one `peer` for the whole result, taken from the first hit, and per-hit `from` only; it does not say which chat each other hit is in. Global results therefore set `chatAttribution: "partial"`: the first hit has its chat and the rest have `chat: null`, with the sender where Telegram reports one. A `--chat` search attributes every hit. Full global attribution needs an upstream change that adds each message's `peer_id` to `tg search --global` JSON (one field on its message item, set from the message's own peer) and a pin bump; the plugin already reads a per-hit `peer` when present.
 
 Message bodies are returned as untrusted text. They are not interpreted as instructions, sent elsewhere, or exported to `codeterm mem`.
 
