@@ -91,7 +91,8 @@ function paths(): Paths | null {
 }
 
 function toolsFor(platform: string): Tools {
-  if (platform === "win32") return { curl: "curl.exe", tar: "tar.exe", hash: ["certutil.exe", "-hashfile", "{file}", "SHA256"], icacls: "icacls.exe", whoami: "whoami.exe", kill: ["taskkill.exe", "/PID", "{pid}", "/T", "/F"] };
+  // certutil prints a localized header in the OEM code page, which the host's UTF-8 stdout reader drops entirely.
+  if (platform === "win32") return { curl: "curl.exe", tar: "tar.exe", hash: ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "(Get-FileHash -Algorithm SHA256 -LiteralPath $env:CT_HASH_FILE).Hash"], icacls: "icacls.exe", whoami: "whoami.exe", kill: ["taskkill.exe", "/PID", "{pid}", "/T", "/F"] };
   if (platform === "darwin") return { curl: "curl", tar: "tar", hash: ["shasum", "-a", "256", "{file}"], icacls: "", whoami: "", kill: ["kill", "{pid}"] };
   return { curl: "curl", tar: "tar", hash: ["sha256sum", "{file}"], icacls: "", whoami: "", kill: ["kill", "{pid}"] };
 }
@@ -852,11 +853,12 @@ function nextInstallStage(p: Paths, target: Target, from?: InstallStage): any {
 function verifyArchive(p: Paths, target: Target): string | null {
   const file = nativePath(joinPath(p.runtime, target.archive.file));
   const [bin, ...args] = target.tools.hash.map((part) => part === "{file}" ? file : part);
-  const run = runProcess(bin, args, {}, TIMEOUTS.hash);
+  const run = runProcess(bin, args, { CT_HASH_FILE: file }, TIMEOUTS.hash);
   const digest = run.ok ? parseSha256(run.stdout) : null;
   if (digest === target.archive.sha256) return null;
   try { host.fs.removeFile(joinPath(p.runtime, target.archive.file)); } catch { }
-  return `The downloaded Go toolchain ${target.archive.file} did not match its pinned SHA-256, so it was deleted and nothing was built.`;
+  const observed = digest ? `got ${digest}` : `${bin} gave no digest: ${redact(run.ok ? run.stdout : `${run.error} ${run.stderr}`).trim().slice(0, 300)}`;
+  return `The downloaded Go toolchain ${target.archive.file} did not match its pinned SHA-256 ${target.archive.sha256} (${observed}), so it was deleted and nothing was built.`;
 }
 
 function finishInstallStage(jobId: string, job: InstallJob, poll: { code?: number; stdout?: string; stderr?: string; error?: string }): any {

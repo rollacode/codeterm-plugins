@@ -6,7 +6,7 @@ Teams Client works as a personal Teams client for the owner. It wraps the [exo-t
 
 The first `login` installs exo-teams into the plugin-owned runtime directory (`~/.codeterm/teams-client/runtime`, `~/.codeterm-dev/...` on a dev instance). exo-teams has no release binaries, so the plugin builds it:
 
-1. `curl` downloads Go 1.26.8 from `https://go.dev/dl/`; the archive must match the SHA-256 pinned per OS and architecture in `src/constants.ts` (checked with `certutil`, `shasum`, or `sha256sum`) or it is deleted.
+1. `curl` downloads Go 1.26.8 from `https://go.dev/dl/`; the archive must match the SHA-256 pinned per OS and architecture in `src/constants.ts` (checked with PowerShell `Get-FileHash`, `shasum`, or `sha256sum`) or it is deleted.
 2. `tar` extracts the toolchain into the runtime directory.
 3. `go mod download` fetches `github.com/alxxpersonal/exo-teams@v0.0.0-20260418032231-b9ebbf5583ee` (commit `b9ebbf5`) through `proxy.golang.org`, verified by `sum.golang.org`; its `h1:` sum must equal the pinned one.
 4. `go install` builds it with `CGO_ENABLED=0`, `GOTOOLCHAIN=local`, and `GOENV=off`, into `runtime/bin`.

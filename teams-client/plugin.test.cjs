@@ -214,7 +214,7 @@ function mockHost(options = {}) {
       files.set(normalize(args[args.indexOf("-o") + 1]), "go archive bytes");
       return { code: 0, stdout: "", stderr: "" };
     }
-    if (bin === "certutil.exe" || bin === "shasum" || bin === "sha256sum") {
+    if (bin === "powershell.exe" || bin === "shasum" || bin === "sha256sum") {
       const target = `${platform}/${platform === "win32" ? "x64" : "arm64"}`;
       const digest = options.badDigest ? "0".repeat(64) : C.GO_ARCHIVES[target].sha256;
       return { code: 0, stdout: windows ? `SHA256 hash of file:\r\n${digest}\r\nCertUtil: -hashfile command completed successfully.\r\n` : `${digest}  file\n`, stderr: "" };
@@ -302,8 +302,10 @@ test("first login installs the pinned toolchain and module stage by stage, then 
   assert.equal(value.state, "awaiting-user");
   assert.equal(value.signInUrl, "https://microsoft.com/devicelogin");
   assert.equal(value.deviceCode, "KX7PQ2LMN");
-  const order = env.calls.map((call) => call.bin).filter((bin) => ["curl.exe", "certutil.exe", "tar.exe", "go.exe", "exo-teams.exe"].includes(bin));
-  assert.deepEqual(order, ["curl.exe", "certutil.exe", "tar.exe", "go.exe", "go.exe", "exo-teams.exe"]);
+  const order = env.calls.map((call) => call.bin).filter((bin) => ["curl.exe", "powershell.exe", "tar.exe", "go.exe", "exo-teams.exe"].includes(bin));
+  assert.deepEqual(order, ["curl.exe", "powershell.exe", "tar.exe", "go.exe", "go.exe", "exo-teams.exe"]);
+  const hash = env.calls.find((call) => call.bin === "powershell.exe");
+  assert.ok(hash.env.CT_HASH_FILE.endsWith(C.GO_ARCHIVES["win32/x64"].file), "the archive path travels in the environment, not in a command string");
   const curl = env.calls.find((call) => call.bin === "curl.exe");
   assert.equal(curl.args[curl.args.length - 1], `https://go.dev/dl/${C.GO_ARCHIVES["win32/x64"].file}`);
   assert.ok(curl.args.includes("=https"));
@@ -524,7 +526,7 @@ test("manifest declares the token files as credentials, the subprocess allowlist
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "plugin.json"), "utf8"));
   const declared = manifest.credentials.map((entry) => entry.file);
   for (const name of C.EXO_TOKEN_FILES) assert.ok(declared.includes(`${C.ROOT}/${C.EXO_HOME_DIR}/${C.EXO_TOKEN_DIR}/${name}`), name);
-  for (const bin of ["exo-teams.exe", "go.exe", "curl.exe", "tar.exe", "certutil.exe", "exo-teams", "go", "curl", "tar", "shasum", "sha256sum"]) assert.ok(manifest.permissions.subprocess.allow.includes(bin), bin);
+  for (const bin of ["exo-teams.exe", "go.exe", "curl.exe", "tar.exe", "powershell.exe", "exo-teams", "go", "curl", "tar", "shasum", "sha256sum"]) assert.ok(manifest.permissions.subprocess.allow.includes(bin), bin);
   const text = fs.readFileSync(path.join(__dirname, "plugin.json"), "utf8") + fs.readFileSync(path.join(__dirname, "src/plugin.ts"), "utf8");
   assert.doesNotMatch(text, /m365|cli-microsoft365|graph\.microsoft\.com\/v1\.0\/chats/);
   assert.equal(manifest.permissions.secrets, undefined);
