@@ -1,7 +1,7 @@
 import type { GlanceView, PluginModule, ViewNode } from "@codeterm/plugin-sdk";
 import { decideSend, matchChats, parseSendScope, validateSendScope, type SendOrigin, type SendScope } from "../../shared/src/send-scope";
 import {
-  CHAT_CACHE_TTL_MS, EXO_HOME_DIR, EXO_MODULE, EXO_MODULE_SUM, EXO_PACKAGE, EXO_REFRESH_TOKEN_FILE, EXO_TOKEN_DIR, EXO_TOKEN_FILES,
+  CHAT_CACHE_TTL_MS, EXO_HOME_DIR, EXO_MODULE, EXO_MODULE_SUM, EXO_PACKAGE, EXO_TOKEN_DIR, EXO_TOKEN_FILES,
   EXO_VERSION, GO_ARCHIVES, GO_DOWNLOAD_BASE, GO_VERSION, MAX_BYTES, MAX_COUNT, ROOT, SIGN_IN_TTL_MS, TIMEOUTS,
 } from "./constants";
 import {
@@ -259,10 +259,6 @@ function endSignIn(p: Paths, kill: boolean): void {
   try { host.fs.removeFile(p.loginState); } catch { }
 }
 
-function tokensPresent(p: Paths): boolean {
-  return host.fs.fileExists(joinPath(p.tokenDir, "token-skype.jwt")) && host.fs.fileExists(joinPath(p.tokenDir, "token-chatsvcagg.jwt"));
-}
-
 function runExo(p: Paths, args: string[], timeoutMs: number): RunResult {
   const target = detectTarget(p);
   if ("state" in target) return { ok: false, error: target.message, stdout: "", stderr: "" };
@@ -315,15 +311,12 @@ function computeStatus(): StateResult {
   if (pending && pending.log.state === "awaiting-user") {
     return { state: "awaiting-user", message: `Open ${pending.log.signInUrl} and enter code ${pending.log.deviceCode}.`, signInUrl: pending.log.signInUrl, deviceCode: pending.log.deviceCode, accounts: [] };
   }
-  if (!tokensPresent(p)) return { state: "logged-out", message: lifecycleMessage("logged-out"), accounts: [] };
+  // The token files are declared credentials, so the host hides them from fileExists; exo-teams itself says whether they exist.
   const first = whoami(p);
   if ("who" in first && sessionUsable(first.who)) return loggedIn(first.who);
   if ("error" in first) {
     const known = classifyAuthFailure(first.error);
     if (known && known.state !== "expired") return { state: known.state, message: known.message, accounts: [] };
-  }
-  if (!host.fs.fileExists(joinPath(p.tokenDir, EXO_REFRESH_TOKEN_FILE))) {
-    return { state: "expired", message: "The Teams session expired and no refresh token is stored. Run login to sign in again.", accounts: [] };
   }
   const refreshed = runExo(p, ["auth", "--refresh"], TIMEOUTS.refresh);
   if (!refreshed.ok) {
@@ -730,7 +723,8 @@ function deliver(origin: SendOrigin, plan: SendPlan, text: string, explicitKey: 
   } else {
     const listed = chatList(resolved.sender);
     if ("error" in listed) return rememberPrefixedFailure(listed.error);
-    const found = findChats(listed.chats, plan.query, true);
+    // A person is reached only through a 1:1 chat; new-dm's unique-roster thread returns the existing DM when there is one.
+    const found = matchChats(listed.chats.filter((chat) => chat.chatType === "oneOnOne"), personQuery(plan.query));
     if (found.ambiguous) {
       return sendFailureResult("invalid-request", `Several chats match "${plan.query}": ${found.candidates.slice(0, 8).map((chat) => `${chat.title} (${chat.chatType}, ${chat.id})`).join("; ")}. Ask the owner which one and send to its id.`);
     }
@@ -808,13 +802,17 @@ function logout(): { result: string } | { error: string } {
   endSignIn(p, true);
   for (const name of EXO_TOKEN_FILES) {
     const file = joinPath(p.tokenDir, name);
-    if (host.fs.fileExists(file) && !host.fs.removeFile(file)) return { error: "A plugin-owned Teams token file could not be removed. Retry logout." };
+    try { host.fs.removeFile(file); } catch { }
   }
   try { host.fs.removeFile(p.chatCache); } catch { }
   try { host.fs.removeFile(p.loginLog); } catch { }
   memoryChats = null;
   lastStatus = null;
   clearPreviewTokens();
+  if (installedMarker(p)) {
+    const after = whoami(p);
+    if ("who" in after && sessionUsable(after.who)) return { error: "A plugin-owned Teams token file could not be removed. Retry logout." };
+  }
   return { result: "Logged out. The plugin-owned Teams token files were removed." };
 }
 

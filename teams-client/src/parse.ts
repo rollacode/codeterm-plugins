@@ -68,7 +68,7 @@ export function classifyAuthFailure(text: string): AuthOutcome | null {
   if (/invalid_grant|interaction_required|AADSTS70008|AADSTS700082|AADSTS700084|AADSTS50173|AADSTS50076|AADSTS50078|AADSTS50079|AADSTS50132|AADSTS50133|no refresh token|tokens expired and no refresh token|auto-refresh failed|refresh failed/i.test(value)) {
     return { state: "expired", message: `The Teams session expired and could not be renewed silently.${quoted(value)} Run login to sign in again.` };
   }
-  if (/loading tokens|reading skype token|reading chatsvcagg token|reading teams token|no such file|cannot find the (?:file|path)/i.test(value)) {
+  if (/loading tokens: reading (?:skype|chatsvcagg|teams) token/i.test(value)) {
     return { state: "logged-out", message: "Not signed in to Teams. Run login to get a sign-in code." };
   }
   return null;

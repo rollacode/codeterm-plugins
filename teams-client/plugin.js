@@ -145,7 +145,6 @@ var ROOT = "~/.codeterm/teams-client";
 var EXO_HOME_DIR = "exo-home";
 var EXO_TOKEN_DIR = ".exo-teams";
 var EXO_TOKEN_FILES = ["token-skype.jwt", "token-chatsvcagg.jwt", "token-teams.jwt", "token-graph.jwt", "token-assignments.jwt", "refresh-token.jwt"];
-var EXO_REFRESH_TOKEN_FILE = "refresh-token.jwt";
 var DEVICE_LOGIN_URL = /https:\/\/(?:(?:aka\.ms|(?:www\.)?microsoft\.com)\/devicelogin|login\.microsoft(?:online)?\.com\/(?:device|common\/oauth2\/deviceauth))(?![\w.-])[^\s<>"']*/i;
 var SIGN_IN_TTL_MS = 15 * 60 * 1e3;
 var TIMEOUTS = {
@@ -206,7 +205,7 @@ function classifyAuthFailure(text) {
   if (/invalid_grant|interaction_required|AADSTS70008|AADSTS700082|AADSTS700084|AADSTS50173|AADSTS50076|AADSTS50078|AADSTS50079|AADSTS50132|AADSTS50133|no refresh token|tokens expired and no refresh token|auto-refresh failed|refresh failed/i.test(value)) {
     return { state: "expired", message: `The Teams session expired and could not be renewed silently.${quoted(value)} Run login to sign in again.` };
   }
-  if (/loading tokens|reading skype token|reading chatsvcagg token|reading teams token|no such file|cannot find the (?:file|path)/i.test(value)) {
+  if (/loading tokens: reading (?:skype|chatsvcagg|teams) token/i.test(value)) {
     return { state: "logged-out", message: "Not signed in to Teams. Run login to get a sign-in code." };
   }
   return null;
@@ -555,9 +554,6 @@ function endSignIn(p, kill) {
   } catch {
   }
 }
-function tokensPresent(p) {
-  return host.fs.fileExists(joinPath(p.tokenDir, "token-skype.jwt")) && host.fs.fileExists(joinPath(p.tokenDir, "token-chatsvcagg.jwt"));
-}
 function runExo(p, args, timeoutMs) {
   const target = detectTarget(p);
   if ("state" in target) return { ok: false, error: target.message, stdout: "", stderr: "" };
@@ -607,15 +603,11 @@ function computeStatus() {
   if (pending && pending.log.state === "awaiting-user") {
     return { state: "awaiting-user", message: `Open ${pending.log.signInUrl} and enter code ${pending.log.deviceCode}.`, signInUrl: pending.log.signInUrl, deviceCode: pending.log.deviceCode, accounts: [] };
   }
-  if (!tokensPresent(p)) return { state: "logged-out", message: lifecycleMessage("logged-out"), accounts: [] };
   const first = whoami(p);
   if ("who" in first && sessionUsable(first.who)) return loggedIn(first.who);
   if ("error" in first) {
     const known = classifyAuthFailure(first.error);
     if (known && known.state !== "expired") return { state: known.state, message: known.message, accounts: [] };
-  }
-  if (!host.fs.fileExists(joinPath(p.tokenDir, EXO_REFRESH_TOKEN_FILE))) {
-    return { state: "expired", message: "The Teams session expired and no refresh token is stored. Run login to sign in again.", accounts: [] };
   }
   const refreshed = runExo(p, ["auth", "--refresh"], TIMEOUTS.refresh);
   if (!refreshed.ok) {
@@ -980,7 +972,7 @@ function deliver(origin, plan, text, explicitKey) {
   } else {
     const listed = chatList(resolved.sender);
     if ("error" in listed) return rememberPrefixedFailure(listed.error);
-    const found = findChats(listed.chats, plan.query, true);
+    const found = matchChats(listed.chats.filter((chat) => chat.chatType === "oneOnOne"), personQuery(plan.query));
     if (found.ambiguous) {
       return sendFailureResult("invalid-request", `Several chats match "${plan.query}": ${found.candidates.slice(0, 8).map((chat) => `${chat.title} (${chat.chatType}, ${chat.id})`).join("; ")}. Ask the owner which one and send to its id.`);
     }
@@ -1053,7 +1045,10 @@ function logout() {
   endSignIn(p, true);
   for (const name of EXO_TOKEN_FILES) {
     const file = joinPath(p.tokenDir, name);
-    if (host.fs.fileExists(file) && !host.fs.removeFile(file)) return { error: "A plugin-owned Teams token file could not be removed. Retry logout." };
+    try {
+      host.fs.removeFile(file);
+    } catch {
+    }
   }
   try {
     host.fs.removeFile(p.chatCache);
@@ -1066,6 +1061,10 @@ function logout() {
   memoryChats = null;
   lastStatus = null;
   clearPreviewTokens();
+  if (installedMarker(p)) {
+    const after = whoami(p);
+    if ("who" in after && sessionUsable(after.who)) return { error: "A plugin-owned Teams token file could not be removed. Retry logout." };
+  }
   return { result: "Logged out. The plugin-owned Teams token files were removed." };
 }
 function clearPreviewTokens() {

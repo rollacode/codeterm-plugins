@@ -133,6 +133,7 @@ test("send failures map to the ledger taxonomy: retried statuses stay unknown, d
   assert.equal(parse.sendFailure("Error: sending message: POST https://emea.ng.msg.teams.microsoft.com/v1/x returned status 403").kind, "upstream-rejected");
   assert.equal(parse.sendFailure("Error: sending message: POST https://emea.ng.msg.teams.microsoft.com/v1/x returned status 401").kind, "reauth-needed");
   assert.equal(parse.sendFailure("Error: loading tokens: reading skype token: no such file").kind, "not-logged-in");
+  assert.equal(parse.classifyAuthFailure("spawn C:\\x\\exo-teams.exe: The system cannot find the file specified."), null, "a process failure is never mistaken for a missing sign-in");
   assert.equal(parse.sendFailure("Error: auto-refresh failed: refreshing skype token: token endpoint returned 400").kind, "reauth-needed");
   assert.equal(parse.sendFailure("something odd").kind, "unknown");
 });
@@ -182,8 +183,14 @@ function mockHost(options = {}) {
     return normalize(text);
   }
   const root = () => expandHome(C.ROOT);
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "plugin.json"), "utf8"));
+  const deniedReads = () => new Set(manifest.credentials.map((entry) => expandHome(entry.file)));
+  const token = (name) => files.has(normalize(`${plugin.__test_paths().tokenDir}/${name}`));
   function exo(args, opts) {
-    if (args[0] === "whoami") return { code: 0, stdout: state.whoami, stderr: "" };
+    if (args[0] === "whoami") return token("token-skype.jwt")
+      ? { code: 0, stdout: state.whoami, stderr: "" }
+      : { code: 1, stdout: "", stderr: "Error: loading tokens: reading skype token: open C:\\h\\.exo-teams\\token-skype.jwt: The system cannot find the file specified.\n" };
+    if (args[0] === "auth" && args[1] === "--refresh" && !token("refresh-token.jwt")) return { code: 1, stdout: "", stderr: "Error: refresh failed: no refresh token found - run 'exo-teams auth' to login again\n" };
     if (args[0] === "auth" && args[1] === "--refresh") {
       if (state.refresh.code === 0) state.whoami = WHOAMI_OK;
       return state.refresh;
@@ -197,7 +204,7 @@ function mockHost(options = {}) {
       const conv = "19:new_dm@unq.gbl.spaces";
       state.chats = state.chats.concat([{ id: conv, title: "", isOneOnOne: true, members: [{ friendlyName: "Andrey Kovalev" }, { friendlyName: "Boris Petrov" }] }]);
       state.messages.push({ id: "1759744800999", content: args[2], imdisplayname: "Andrey Kovalev", originalarrivaltime: new Date(Date.now()).toISOString(), conv });
-      return { code: 0, stdout: JSON.stringify({ ok: true, id: conv }), stderr: "found user: Boris Petrov (boris@x.example)\ncreating conversation...\n" };
+      return { code: 0, stdout: JSON.stringify({ ok: true, id: conv }), stderr: `found user: ${args[1]} (person@x.example)\ncreating conversation...\n` };
     }
     if (args[0] === "get-chat") return { code: 0, stdout: JSON.stringify(state.messages), stderr: "fetching messages from chat: x...\n" };
     return { code: 1, stdout: "", stderr: `Error: unknown command ${args[0]}` };
@@ -254,9 +261,9 @@ function mockHost(options = {}) {
     fs: {
       expandHome,
       makeDirs: () => true,
-      fileExists: (file) => files.has(normalize(file)),
+      fileExists: (file) => !deniedReads().has(normalize(file)) && files.has(normalize(file)),
       writeFile: (file, contents) => { files.set(normalize(file), String(contents)); return true; },
-      readFile: (file) => files.has(normalize(file)) ? files.get(normalize(file)) : null,
+      readFile: (file) => !deniedReads().has(normalize(file)) && files.has(normalize(file)) ? files.get(normalize(file)) : null,
       readJson: (file) => { try { return JSON.parse(files.get(normalize(file))); } catch { return null; } },
       readFileTail: (file) => files.get(normalize(file)) ?? null,
       removeFile: (file) => files.delete(normalize(file)) || true,
@@ -488,6 +495,16 @@ test("send-to uses the existing 1:1 chat, and starts a new one for a full name w
   assert.equal(created.messageId, "1759744800999");
   assert.equal(result(command("send-to", ["Boris Petrov", "--key", "p2", "hi", "Boris"])).messageId, "1759744800999");
   assert.match(command("send-to", ["Zed", "hello"]).error, /full name/);
+});
+
+test("send-to never delivers to a group chat that merely contains the person", () => {
+  const env = mockHost({ chats: RAW_CHATS.filter((chat) => chat.id !== ALEX_CHAT) });
+  env.install(); env.signIn();
+  const sent = result(command("send-to", ["Alexander Kouznetsov", "--key", "g1", "test domios plugin for teams"]));
+  assert.deepEqual(env.exoCalls().find((call) => call.args[0] === "new-dm").args, ["new-dm", "Alexander Kouznetsov", "test domios plugin for teams", "--json"]);
+  assert.equal(env.exoCalls().some((call) => call.args[0] === "send" && call.args[1] === GROUP_CHAT), false);
+  assert.equal(sent.destination.label, "Alexander Kouznetsov");
+  assert.equal(sent.messageId, "1759744800999");
 });
 
 test("the owner restriction refuses agent sends to other chats; view sends stay allowed", () => {
