@@ -2063,6 +2063,9 @@ var loginJobs = {};
 var loginPasswords = {};
 var loginLaunchPending = {};
 var loginLogPaths = {};
+var loginLogSequence = 0;
+var LOGIN_LOG = /^login-([A-Za-z0-9_-]{1,64})(?:\.[a-z0-9]{1,32})?\.log$/;
+var LOGIN_TIMEOUT_MS = 15 * 6e4;
 var activeLoginJobId = null;
 var previewTokens = {};
 var injectedClock = null;
@@ -2642,6 +2645,9 @@ function rememberSendFailure(kind, message) {
 function sendFailureResult(kind, detail) {
   return rememberSendFailure(kind, failureMessage(kind, detail));
 }
+function requestFailure(detail) {
+  return rememberSendFailure("invalid-request", `invalid-request: ${detail}`);
+}
 function rememberPrefixedFailure(message) {
   const state = message.slice(0, message.indexOf(":"));
   return SEND_FAILURES.indexOf(state) >= 0 ? rememberSendFailure(state, message) : rememberSendFailure("unknown", "The command result could not be classified safely. Inspect Telegram before retrying.");
@@ -2841,7 +2847,7 @@ function chatByIdOrName(value) {
   if (found.match) return { chat: found.match };
   if (found.ambiguous) {
     const options2 = found.candidates.map((chat) => `${chat.title || chat.id} (${chat.id}${chat.username ? `, ${chat.username}` : ""}, ${chat.type})`).join("; ");
-    return { error: failureMessage("invalid-request", `Several chats match ${JSON.stringify(value)}: ${options2}. Ask the owner which one and pass its id; nothing was sent.`) };
+    return { error: `invalid-request: Several chats match ${JSON.stringify(value)}: ${options2}. Ask the owner which one and pass its id; nothing was sent.` };
   }
   return { error: `chat-not-found: No chat among this account's 100 most recent dialogs matches ${JSON.stringify(value)}. Ask the owner for a more exact name or @username, or look it up with \`chats <name>\`.` };
 }
@@ -2950,7 +2956,7 @@ function settleFileJobs() {
 }
 function sendFileCommand(origin, args) {
   const parsed = parseSendFileArgs(args);
-  if ("error" in parsed) return sendFailureResult("invalid-request", parsed.error);
+  if ("error" in parsed) return requestFailure(parsed.error);
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
   const payloadHash = filePayloadHash(parsed.chat, parsed.path, parsed.format, parsed.caption);
@@ -2959,7 +2965,7 @@ function sendFileCommand(origin, args) {
     if (!loaded2.ledger) return sendFailureResult("upstream-rejected", loaded2.error);
     const existing = loaded2.ledger.attempts.find((item) => item.idempotencyKey === parsed.key);
     if (existing && (existing.kind !== "file" || existing.payloadHash !== payloadHash)) {
-      return sendFailureResult("invalid-request", "This idempotency key is already bound to a different chat, file, caption, or format; choose a new key.");
+      return requestFailure("This idempotency key is already bound to a different chat, file, caption, or format; choose a new key.");
     }
     if (existing) {
       const settled2 = settleFileAttempt(p, loaded2.ledger, existing);
@@ -2973,14 +2979,14 @@ function sendFileCommand(origin, args) {
   const decision = decideSend(readSendScope(), found.destination.id, origin);
   if (!decision.allow) return sendFailureResult("chat-not-allowed", decision.message);
   const facts = fileFacts(parsed.path, settings().fileMaxBytes);
-  if ("kind" in facts) return sendFailureResult(facts.kind, facts.detail);
+  if ("kind" in facts) return facts.kind === "invalid-request" ? requestFailure(facts.detail) : sendFailureResult(facts.kind, facts.detail);
   const key = parsed.key || sha256Hex(`file\0${now()}\0${++previewSequence}\0${parsed.chat}`).slice(0, 32);
   const loaded = loadOutbox(p);
   if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error);
   const ledger = loaded.ledger;
   let attempt = ledger.attempts.find((item) => item.idempotencyKey === key);
   if (attempt && (attempt.sender.id !== resolved.sender.id || attempt.destination.id !== found.destination.id)) {
-    return sendFailureResult("invalid-request", "This idempotency key is already bound to a different sender or chat; choose a new key.");
+    return requestFailure("This idempotency key is already bound to a different sender or chat; choose a new key.");
   }
   if (!attempt) {
     attempt = {
@@ -3023,13 +3029,13 @@ function sendFileCommand(origin, args) {
   return settled || uploadingResult(attempt);
 }
 function sendFileStatus(args) {
-  if (args.length !== 1 || !/^[A-Za-z0-9._:-]{1,160}$/.test(args[0])) return sendFailureResult("invalid-request", "Usage: send-file-status <idempotency-key> from the send-file result.");
+  if (args.length !== 1 || !/^[A-Za-z0-9._:-]{1,160}$/.test(args[0])) return requestFailure("Usage: send-file-status <idempotency-key> from the send-file result.");
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
   const loaded = loadOutbox(p);
   if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error);
   const attempt = loaded.ledger.attempts.find((item) => item.idempotencyKey === args[0]);
-  if (!attempt || attempt.kind !== "file") return sendFailureResult("invalid-request", `No file send is recorded under key ${args[0]}.`);
+  if (!attempt || attempt.kind !== "file") return requestFailure(`No file send is recorded under key ${args[0]}.`);
   const settled = settleFileAttempt(p, loaded.ledger, attempt);
   if (settled) return settled;
   return { error: attempt.failureMessage || failureMessage(attempt.failure || "upstream-rejected") };
@@ -3228,7 +3234,6 @@ function ensureAccount(label, apiId, apiHash) {
 function loginStart(args, fromAgent = false) {
   const p = paths();
   if (!p || !host.fs.fileExists(p.binary)) return { error: notInstalledMessage(p) };
-  if (activeLoginJobId && loginJobs[activeLoginJobId]) return { jobId: activeLoginJobId, state: "login-in-progress", message: "Telegram login is already running. Poll its progress for the QR." };
   const useStored = fromAgent || !String(args.apiId || "").trim() && !String(args.apiHash || "").trim();
   const apiId = String(useStored ? host.secretGet("api_id") || "" : args.apiId || "").trim();
   const apiHash = String(useStored ? host.secretGet("api_hash") || "" : args.apiHash || "").trim();
@@ -3243,12 +3248,10 @@ function loginStart(args, fromAgent = false) {
   if (!useStored && (!host.secretSet("api_id", apiId) || !host.secretSet("api_hash", apiHash))) return { error: "Could not store Telegram API credentials in the host secret store." };
   const setup = ensureAccount(label, apiId, apiHash);
   if (setup.error) return { error: setup.error };
-  const logFile = childPath(p.root, `login-${label}.log`);
-  try {
-    host.fs.removeFile(logFile);
-  } catch {
-  }
-  const job = startTg(["--account", label, "login", "--output", "json"], twoFactorPassword ? { TG_PASSWORD: twoFactorPassword } : {}, { detach: true, logFile });
+  if (activeLoginJobId && loginJobs[activeLoginJobId]) cancelLoginJob(activeLoginJobId);
+  removeLoginLogs(p, label);
+  const logFile = childPath(p.root, `login-${label}.${now().toString(36)}${(++loginLogSequence).toString(36)}.log`);
+  const job = startTg(["--account", label, "login", "--output", "json"], twoFactorPassword ? { TG_PASSWORD: twoFactorPassword } : {}, { detach: true, logFile, timeoutMs: LOGIN_TIMEOUT_MS });
   if (job.error || !job.jobId) return { error: job.error || "tg login did not start." };
   loginJobs[job.jobId] = label;
   activeLoginJobId = job.jobId;
@@ -3271,6 +3274,33 @@ function forgetLoginJob(jobId) {
   delete loginLaunchPending[jobId];
   if (activeLoginJobId === jobId) activeLoginJobId = null;
 }
+function cancelLoginJob(jobId) {
+  const log = loginLogPaths[jobId];
+  try {
+    host.exec.close(jobId);
+  } catch {
+  }
+  forgetLoginJob(jobId);
+  if (log) try {
+    host.fs.removeFile(log);
+  } catch {
+  }
+}
+function removeLoginLogs(p, label) {
+  let entries = [];
+  try {
+    entries = host.fs.readDir(p.root) || [];
+  } catch {
+    entries = [];
+  }
+  for (const entry of entries) {
+    const match = LOGIN_LOG.exec(entry.name);
+    if (match && match[1] === label) try {
+      host.fs.removeFile(entry.path);
+    } catch {
+    }
+  }
+}
 function pendingLoginStep() {
   const p = paths();
   if (!p) return null;
@@ -3282,7 +3312,7 @@ function pendingLoginStep() {
   }
   const running = activeLoginJobId ? loginJobs[activeLoginJobId] : null;
   for (const entry of entries) {
-    const match = /^login-([A-Za-z0-9_-]{1,64})\.log$/.exec(entry.name);
+    const match = LOGIN_LOG.exec(entry.name);
     if (!match || match[1] === running) continue;
     const outcome = classifyLoginOutput(host.fs.readFileTail(entry.path, 8192) || "");
     if (outcome.phase === "input-required") return { label: match[1], step: outcome.step };
@@ -3340,11 +3370,9 @@ function loginPoll(jobId) {
     } catch {
     }
     delete loginLaunchPending[jobId];
-    if (launch.error || launch.code !== 0) {
-      delete loginJobs[jobId];
-      delete loginPasswords[jobId];
-      delete loginLogPaths[jobId];
-      if (activeLoginJobId === jobId) activeLoginJobId = null;
+    const exited = classifyLoginOutput(redact(host.fs.readFileTail(loginLogPaths[jobId], 8192) || ""));
+    if ((launch.error || launch.code !== 0) && exited.phase === "running") {
+      forgetLoginJob(jobId);
       return { done: true, output: redact(launch.stderr || ""), error: redact(launch.error || launch.stderr || "tg login could not start."), state: "reauth-needed" };
     }
   }
@@ -3368,12 +3396,10 @@ function loginPoll(jobId) {
   if (verified.error) return { done: false, output, state: "login-in-progress", message: "Scan the QR, then refresh progress. Telegram session authorization is still pending.", ...artifacts };
   const selected = runTg(["accounts", "default", label]);
   if (!selected.ok) return { done: false, output, state: "login-in-progress", message: safeError(selected), ...artifacts };
-  delete loginJobs[jobId];
-  if (activeLoginJobId === jobId) activeLoginJobId = null;
-  delete loginPasswords[jobId];
-  delete loginLogPaths[jobId];
+  const log = loginLogPaths[jobId];
+  forgetLoginJob(jobId);
   try {
-    host.fs.removeFile(childPath(p.root, `login-${label}.log`));
+    if (log) host.fs.removeFile(log);
   } catch {
   }
   try {
@@ -3385,7 +3411,7 @@ function loginPoll(jobId) {
 function removeFiles(p) {
   const entries = host.fs.readDir(p.root) || [];
   for (const entry of entries) {
-    if ((/^gotd\.(session|peers)\..+\.json$/.test(entry.name) || /^login-[A-Za-z0-9_-]+\.log$/.test(entry.name)) && host.fs.fileExists(entry.path)) {
+    if ((/^gotd\.(session|peers)\..+\.json$/.test(entry.name) || LOGIN_LOG.test(entry.name)) && host.fs.fileExists(entry.path)) {
       if (!host.fs.removeFile(entry.path) && host.fs.fileExists(entry.path)) return false;
     }
   }

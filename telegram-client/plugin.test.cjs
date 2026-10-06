@@ -62,6 +62,7 @@ function mockHost(options = {}) {
   const continuations = new Map();
   const loginJobs = new Map();
   let sequence = 0;
+  let loginCount = 0;
   let continuationSequence = 0;
   let sendMode = options.sendMode || "sent";
   let whoamiError = options.whoamiError || "";
@@ -163,8 +164,12 @@ function mockHost(options = {}) {
       return { code: 0, stdout: envelope({ files: [{ path: file, message_id: 9100 }] }), stderr: "" };
     }
     if (words[0] === "search") return { code: 0, stdout: envelope(searchData), stderr: "" };
-    if (words[0] === "login" && options.loginLog !== undefined) return { code: 0, stdout: "", stderr: options.loginLog };
-    if (words[0] === "login") return { code: 0, stdout: envelope({ id: 777 }), stderr: "QR authorization link: tg://login?token=fixture-qrauth-token\nQR LOGIN COMPLETE" };
+    if (words[0] === "login" && options.loginLog !== undefined) return { code: options.loginExitCode || 0, stdout: "", stderr: options.loginLog };
+    if (words[0] === "login") {
+      loginCount++;
+      const token = loginCount === 1 ? "fixture-qrauth-token" : `fixture-qrauth-token-${loginCount}`;
+      return { code: 0, stdout: envelope({ id: 777 }), stderr: `QR authorization link: tg://login?token=${token}\nQR LOGIN COMPLETE` };
+    }
     return { code: 1, stdout: "", stderr: `unexpected tg command: ${words.join(" ")}` };
   }
 
@@ -249,6 +254,8 @@ function mockHost(options = {}) {
     cleanup() { globalThis.host = new Proxy({}, { get: () => () => { throw new Error("host called at load time"); } }); rmSync(root, { recursive: true, force: true }); },
   };
 }
+
+function loginLogs(env) { return fs.readdirSync(env.root).filter((name) => /^login-.*\.log$/.test(name)); }
 
 function configureLoggedInFixture(env) {
   const selected = env.accounts.find((account) => account.default);
@@ -995,7 +1002,7 @@ test("view login flow reads the QR log and confirms the selected account", () =>
     assert.equal(done.state, "logged-in");
     assert.equal(done.currentAccount, "default");
     assert.match(done.output, /QR LOGIN COMPLETE/);
-    assert.equal(existsSync(join(env.root, "login-default.log")), false);
+    assert.deepEqual(loginLogs(env), []);
     const current = plugin.viewCall("status");
     assert.equal(current.currentAccount, "default");
     assert.equal(current.account.name, "Owner");
@@ -1027,6 +1034,85 @@ test("agent login returns the QR payload and tg link without returning the store
     assert.doesNotMatch(complete.result, new RegExp(apiHash));
     assert.ok(env.closedJobs.includes(JSON.parse(started.result).jobId), "completed detached login job is released");
     for (const call of env.calls) for (const arg of call.args) assert.equal(arg.includes(apiHash), false);
+  } finally { env.cleanup(); }
+});
+
+test("a second login while a QR login is pending cancels the old job and its log, then shows only the fresh QR", () => {
+  const env = mockHost({ loginPending: true, secrets: { api_id: "887766", api_hash: "1234567890abcdef1234567890abcdef" } });
+  try {
+    plugin.__test_resetLoginJobs();
+    const first = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login", args: [] }).result);
+    assert.equal(first.qrPayload, "tg://login?token=fixture-qrauth-token");
+    const firstLogs = loginLogs(env);
+    assert.equal(firstLogs.length, 1);
+
+    const second = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login", args: [] }).result);
+    assert.notEqual(second.jobId, first.jobId, "a second login starts a new job instead of returning the pending one");
+    assert.ok(env.closedJobs.includes(first.jobId), "the pending job is closed through the host job API");
+    assert.equal(second.qrPayload, "tg://login?token=fixture-qrauth-token-2");
+    assert.equal(decodeQrSvg(second.qrSvg), second.tgLink);
+    const secondLogs = loginLogs(env);
+    assert.equal(secondLogs.length, 1, "the cancelled job's log is removed");
+    assert.notDeepEqual(secondLogs, firstLogs, "each job writes its own log file");
+    assert.match(plugin.__test_loginPoll(first.jobId).error, /Unknown login job/);
+
+    const status = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login-status", args: [] }).result);
+    assert.equal(status.jobId, second.jobId);
+    assert.equal(status.qrPayload, second.qrPayload, "login-status never shows the stale QR");
+    const view = plugin.viewCall("status", {});
+    assert.equal(view.loginJobId, second.jobId);
+
+    const launches = env.calls.filter((call) => call.words[0] === "login");
+    assert.equal(launches.length, 2);
+    for (const call of launches) {
+      assert.equal(call.detach, true);
+      assert.equal(call.timeoutMs, 15 * 60_000, "a host that waits on detached jobs must not kill the QR login at its 30 s default");
+    }
+
+    env.finishLogin(second.jobId);
+    const done = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login-status", args: [] }).result);
+    assert.equal(done.state, "logged-in");
+    assert.deepEqual(loginLogs(env), []);
+  } finally { env.cleanup(); }
+});
+
+test("when the host reports tg's own non-zero exit, the 2FA prompt in the log still wins over a generic failure", () => {
+  const env = mockHost({ loginPending: true, loginLog: TG_2FA_PROMPT_LOG, loginExitCode: 1, secrets: { api_id: "887766", api_hash: "1234567890abcdef1234567890abcdef" } });
+  try {
+    plugin.__test_resetLoginJobs();
+    const started = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login", args: [] }).result);
+    env.finishLogin(started.jobId);
+    const status = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login-status", args: [] }).result);
+    assert.equal(status.state, "password-required");
+    assert.equal(status.next, "ask-password");
+  } finally { env.cleanup(); }
+  const crashed = mockHost({ loginPending: true, loginLog: "", loginExitCode: 2, secrets: { api_id: "887766", api_hash: "1234567890abcdef1234567890abcdef" } });
+  try {
+    plugin.__test_resetLoginJobs();
+    const started = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login", args: [] }).result);
+    crashed.finishLogin(started.jobId);
+    assert.match(plugin.onAgentCommand({ sessionId: "s", verb: "login-status", args: [] }).error, /login needs attention/);
+  } finally { crashed.cleanup(); }
+});
+
+test("file and search request errors carry no text-send chat-id hint; text send keeps it", () => {
+  const env = mockHost({ chats: sendFixtureChats });
+  try {
+    configureLoggedInFixture(env);
+    const errors = [
+      plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["me", "report.pdf"] }).error,
+      plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["anna", ownerFile(env)] }).error,
+      plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["id:4242", ownerFile(env, "empty.txt", "")] }).error,
+      plugin.onAgentCommand({ sessionId: "s", verb: "send-file-status", args: ["nope"] }).error,
+      plugin.onAgentCommand({ sessionId: "s", verb: "search-messages", args: ["x", "--chat", "anna"] }).error,
+      plugin.onAgentCommand({ sessionId: "s", verb: "search-messages", args: ["x", "--limit", "0"] }).error,
+    ];
+    for (const error of errors) {
+      assert.match(error, /^invalid-request: /);
+      assert.equal(error.includes("Find the chat id"), false, error);
+      assert.equal(error.includes("then send again"), false, error);
+    }
+    assert.match(plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["Anna", "hi"] }).error, /Find the chat id with `chats <name>`/);
   } finally { env.cleanup(); }
 });
 
@@ -1274,7 +1360,7 @@ test("login-password reads the one-shot stdin secret, deletes it, and hands it t
     assert.equal(login.env.TG_PASSWORD, password);
     assert.ok(login.args.includes("default"), "the pending account label is reused");
     for (const call of env.calls) for (const arg of call.args) assert.equal(arg.includes(password), false, "password never in argv");
-    assert.equal(existsSync(join(env.root, "login-default.log")), false);
+    assert.deepEqual(loginLogs(env), []);
     for (const entry of fs.readdirSync(env.root)) {
       const file = join(env.root, entry);
       if (statSync(file).isFile()) assert.equal(readFileSync(file, "utf8").includes(password), false, `${entry} never holds the password`);
