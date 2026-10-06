@@ -1842,6 +1842,27 @@ function telegramLoginArtifacts(text) {
   }
   return { qrPayload: link, tgLink: link, qrSvg: svg };
 }
+function loginFailure(output) {
+  const lines = String(output || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const last = lines[lines.length - 1] || "";
+  return /^tg: /.test(last) ? last.slice(4).trim() : null;
+}
+function rejectedCredentials(failure) {
+  return /\b(API_ID_INVALID|API_HASH_INVALID|API_ID_PUBLISHED_FLOOD)\b/.test(failure);
+}
+function loginFailureMessage(failure) {
+  return rejectedCredentials(failure) ? `Telegram rejected the API ID and hash (${failure.match(/API_[A-Z_]+/)?.[0]}). Check them at https://my.telegram.org, store the corrected values with --secret api_id and --secret api_hash, then run login again.` : `tg login failed: ${failure}`;
+}
+function resetRejectedConfig(p, label) {
+  const entries = host.fs.readDir(p.root) || [];
+  const prefix = new RegExp(`^gotd\\.(session|peers)\\.${label}\\.`);
+  for (const entry of entries) if (prefix.test(entry.name)) host.fs.removeFile(entry.path);
+  if (host.fs.fileExists(p.config)) host.fs.removeFile(p.config);
+  try {
+    host.secretDelete("config_initialized");
+  } catch {
+  }
+}
 function installCommand(p) {
   let bundle = null;
   try {
@@ -2677,6 +2698,15 @@ function loginPoll(jobId) {
   if (twoFactorPassword) output = output.split(twoFactorPassword).join("[redacted]");
   output = redact(output);
   const label = loginJobs[jobId];
+  const failure = loginFailure(output);
+  if (failure) {
+    delete loginJobs[jobId];
+    delete loginPasswords[jobId];
+    delete loginLogPaths[jobId];
+    if (activeLoginJobId === jobId) activeLoginJobId = null;
+    if (rejectedCredentials(failure)) resetRejectedConfig(p, label);
+    return { done: true, output, state: "logged-out", error: loginFailureMessage(failure) };
+  }
   const verified = jsonCommand(["--account", label, "whoami"]);
   const artifacts = telegramLoginArtifacts(output);
   if (verified.error) return { done: false, output, state: "login-in-progress", message: "Scan the QR, then refresh progress. Telegram session authorization is still pending.", ...artifacts };
@@ -2883,6 +2913,8 @@ var plugin = {
   __test_status: status,
   __test_loginStart: loginStart,
   __test_loginPoll: loginPoll,
+  __test_loginFailure: loginFailure,
+  __test_loginFailureMessage: loginFailureMessage,
   __test_logout: logout,
   __test_agentHistory: agentHistory,
   __test_setClock: (clock) => {

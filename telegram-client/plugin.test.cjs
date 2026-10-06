@@ -114,6 +114,7 @@ function mockHost(options = {}) {
       if (sendMode === "rejected") return { code: 1, stdout: "", stderr: "MESSAGE_TOO_LONG" };
       return { code: 0, stdout: envelope({ message: { id: 9001 } }), stderr: "" };
     }
+    if (words[0] === "login" && options.loginLog !== undefined) return { code: 0, stdout: "", stderr: options.loginLog };
     if (words[0] === "login") return { code: 0, stdout: envelope({ id: 777 }), stderr: "QR authorization link: tg://login?token=fixture-qrauth-token\nQR LOGIN COMPLETE" };
     return { code: 1, stdout: "", stderr: `unexpected tg command: ${words.join(" ")}` };
   }
@@ -736,6 +737,41 @@ test("agent login without stored credentials names the stdin secret command inst
     const result = plugin.onAgentCommand({ sessionId: "agent-missing", verb: "login", args: [] });
     assert.match(result.error, /--secret api_id/);
     assert.doesNotMatch(result.error, /view/i);
+  } finally { env.cleanup(); }
+});
+
+
+test("login failure is the final tg error line of the detached login log", () => {
+  const failure = plugin.__test_loginFailure;
+  assert.equal(failure("tg: callback: qr login: export: rpcDoRequest: rpc error code 400: API_ID_INVALID\n"), "callback: qr login: export: rpcDoRequest: rpc error code 400: API_ID_INVALID");
+  assert.equal(failure("QR authorization link: tg://login?token=t1\n"), null);
+  assert.equal(failure("tg: transient\nQR authorization link: tg://login?token=t2"), null);
+  assert.equal(failure(""), null);
+});
+
+test("rejected API credentials name the stdin secret fix; other failures keep tg's text", () => {
+  const message = plugin.__test_loginFailureMessage;
+  assert.match(message("rpc error code 400: API_ID_INVALID"), /API_ID_INVALID.*--secret api_id.*--secret api_hash/s);
+  assert.equal(message("dial tcp: timeout"), "tg login failed: dial tcp: timeout");
+});
+
+test("agent login surfaces a rejected-credential exit and resets the config so new secrets re-init", () => {
+  const env = mockHost({ loginLog: "tg: callback: qr login: export: rpcDoRequest: rpc error code 400: API_ID_INVALID\n", secrets: { api_id: "1", api_hash: "deadbeefdeadbeefdeadbeefdeadbeef" } });
+  try {
+    const p = plugin.__test_paths();
+    const session = join(p.root, "gotd.session.default.user.fixture.json");
+    const other = join(p.root, "gotd.session.work.user.fixture.json");
+    writeFileSync(session, "s");
+    writeFileSync(other, "s");
+    const result = plugin.onAgentCommand({ sessionId: "agent-rejected", verb: "login", args: [] });
+    assert.match(result.error, /API_ID_INVALID/);
+    assert.doesNotMatch(result.error, /deadbeef/);
+    assert.equal(existsSync(p.config), false);
+    assert.equal(existsSync(session), false);
+    assert.equal(existsSync(other), true);
+    assert.equal(env.secrets.config_initialized, undefined);
+    const status = JSON.parse(plugin.onAgentCommand({ sessionId: "agent-rejected", verb: "login-status", args: [] }).result);
+    assert.equal(status.done, true);
   } finally { env.cleanup(); }
 });
 
