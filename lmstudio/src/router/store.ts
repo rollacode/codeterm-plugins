@@ -8,11 +8,12 @@ import {
   type RouterState,
 } from "./config";
 import { classifyFetch, modelsRequests, type FetchOutcome } from "./adapters";
+import { readDataFile, writeDataFile } from "./datafiles";
 import { parseModelList } from "./models";
 import type { HttpRequest, ProviderConfig, RouterError, RouterModel, RouterPreset } from "./types";
 
-const STATE_REL = ".codeterm/plugins/lmstudio/router.json";
-const MODEL_CACHE_REL = ".codeterm/plugins/lmstudio/router-models.json";
+const STATE_FILE = "router.json";
+const MODEL_CACHE_FILE = "router-models.json";
 export const REMOTE_MODEL_TTL_MS = 10 * 60 * 1000;
 export const LOCAL_MODEL_TTL_MS = 15 * 1000;
 export const FAILURE_TTL_MS = 60 * 1000;
@@ -49,40 +50,12 @@ function parseJson<T>(raw: string | null | undefined, fallback: T): T {
   }
 }
 
-function dataPath(rel: string): string | null {
-  try {
-    const viaFs = host.fs && typeof host.fs.expandHome === "function" ? host.fs.expandHome(`~/${rel}`) : null;
-    if (viaFs) return viaFs;
-    const viaHost = typeof host.expandHome === "function" ? host.expandHome(`~/${rel}`) : null;
-    if (viaHost) return viaHost;
-    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
-    return home ? `${home.replace(/\/+$/, "")}/${rel}` : null;
-  } catch {
-    return null;
-  }
+function writeJsonFile(name: string, value: unknown): boolean {
+  return writeDataFile(name, JSON.stringify(value, null, 2));
 }
 
-function writeJsonFile(rel: string, value: unknown): boolean {
-  const path = dataPath(rel);
-  if (!path) return false;
-  try {
-    const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
-    const text = JSON.stringify(value, null, 2);
-    return typeof host.writeFileAtomic === "function" ? host.writeFileAtomic(path, text) : host.writeFile(path, text);
-  } catch {
-    return false;
-  }
-}
-
-function readJsonFile(rel: string): unknown {
-  const path = dataPath(rel);
-  if (!path) return null;
-  try {
-    return parseJson<unknown>(host.readFile(path), null);
-  } catch {
-    return null;
-  }
+function readJsonFile(name: string): unknown {
+  return parseJson<unknown>(readDataFile(name), null);
 }
 
 export function readSettings(): RouterSettings & Record<string, unknown> {
@@ -91,11 +64,11 @@ export function readSettings(): RouterSettings & Record<string, unknown> {
 }
 
 export function readState(): RouterState {
-  return coerceState(readJsonFile(STATE_REL));
+  return coerceState(readJsonFile(STATE_FILE));
 }
 
 export function writeState(state: RouterState): boolean {
-  return writeJsonFile(STATE_REL, state);
+  return writeJsonFile(STATE_FILE, state);
 }
 
 export function snapshot(): RouterSnapshot {
@@ -158,7 +131,7 @@ export function fetchSync(req: HttpRequest): FetchOutcome {
 
 function cache(): Record<string, ModelCacheEntry> {
   if (!memCache) {
-    const stored = readJsonFile(MODEL_CACHE_REL);
+    const stored = readJsonFile(MODEL_CACHE_FILE);
     memCache = stored && typeof stored === "object" && !Array.isArray(stored) ? (stored as Record<string, ModelCacheEntry>) : {};
   }
   return memCache;
@@ -168,7 +141,7 @@ function persistCache(): void {
   const entries = cache();
   const durable: Record<string, ModelCacheEntry> = {};
   for (const id of Object.keys(entries)) if (!entries[id].error) durable[id] = entries[id];
-  writeJsonFile(MODEL_CACHE_REL, durable);
+  writeJsonFile(MODEL_CACHE_FILE, durable);
 }
 
 export function invalidateModels(providerId: string): void {

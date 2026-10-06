@@ -33,7 +33,7 @@ import {
   validateProvider,
 } from "./config";
 import { capabilityBadges, formatContext, groupAndSearch, matchScore, parseModelList } from "./models";
-import { presetModelId, presetParams, qualifyModel, resolveModelTarget, splitModelId } from "./routing";
+import { presetModelId, presetParams, qualifyModel, reroute, resolveModelTarget, splitModelId } from "./routing";
 import { parseArgs } from "./verbs";
 import type { ChatTurn, ProviderConfig } from "./types";
 import { parseTextToolCalls } from "./textcalls";
@@ -439,4 +439,13 @@ test("activity moves thinking → working → idle and the line names router, mo
   assert.equal(activityOf(idle), "idle");
   assert.equal(activityLine("mimo::m", "idle"), "");
   assert.deepEqual(activityLine("mimo::m", "thinking").split(" · ").slice(1), ["mimo::m", "Thinking"]);
+});
+
+test("reroute follows the live registry and keeps an auto-picked model only on the same provider", () => {
+  const mimo = provider({ id: "mimo", kind: "openai", baseUrl: "https://a/v1" });
+  const lms = provider({ id: "lmstudio", kind: "lmstudio", baseUrl: "http://localhost:1234" });
+  assert.equal(reroute({ raw: "mimo::m1" }, { providerId: null, model: "" }, [lms], "lmstudio").error, 'unknown provider "mimo"');
+  assert.deepEqual(reroute({ raw: "mimo::m1" }, { providerId: null, model: "" }, [lms, mimo], "lmstudio"), { provider: mimo, model: "m1" });
+  assert.equal(reroute({ raw: "" }, { providerId: "lmstudio", model: "auto" }, [lms], "lmstudio").model, "auto");
+  assert.equal(reroute({ raw: "", presetProvider: "mimo" }, { providerId: "lmstudio", model: "auto" }, [lms, mimo], "lmstudio").model, "");
 });

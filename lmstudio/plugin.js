@@ -1638,10 +1638,61 @@ function presetParams(preset) {
   if (preset.maxTokens !== void 0) params.max_tokens = preset.maxTokens;
   return params;
 }
+function reroute(req, current, providers, defaultProvider) {
+  const target = resolveModelTarget(req.raw, providers, defaultProvider, req.raw ? void 0 : req.presetProvider);
+  if (!target.provider || target.model) return target;
+  return { provider: target.provider, model: current.providerId === target.provider.id ? current.model : "" };
+}
+
+// lmstudio/src/router/datafiles.ts
+var DATA_DIR_REL = ".codeterm/plugin-data/lmstudio";
+var LEGACY_DIR_REL = ".codeterm/plugins/lmstudio";
+function homePath(rel) {
+  try {
+    const viaFs = host.fs && typeof host.fs.expandHome === "function" ? host.fs.expandHome(`~/${rel}`) : null;
+    if (viaFs) return viaFs;
+    const viaHost = typeof host.expandHome === "function" ? host.expandHome(`~/${rel}`) : null;
+    if (viaHost) return viaHost;
+    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
+    return home ? `${home.replace(/\/+$/, "")}/${rel}` : null;
+  } catch {
+    return null;
+  }
+}
+function dataFilePath(name) {
+  return homePath(`${DATA_DIR_REL}/${name}`);
+}
+function readText(path) {
+  if (!path) return null;
+  try {
+    const text = host.readFile(path);
+    return text ? text : null;
+  } catch {
+    return null;
+  }
+}
+function writeDataFile(name, text) {
+  const path = dataFilePath(name);
+  if (!path) return false;
+  try {
+    const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
+    return typeof host.writeFileAtomic === "function" ? host.writeFileAtomic(path, text) : host.writeFile(path, text);
+  } catch {
+    return false;
+  }
+}
+function readDataFile(name) {
+  const current = readText(dataFilePath(name));
+  if (current) return current;
+  const legacy = readText(homePath(`${LEGACY_DIR_REL}/${name}`));
+  if (legacy) writeDataFile(name, legacy);
+  return legacy;
+}
 
 // lmstudio/src/router/store.ts
-var STATE_REL = ".codeterm/plugins/lmstudio/router.json";
-var MODEL_CACHE_REL = ".codeterm/plugins/lmstudio/router-models.json";
+var STATE_FILE = "router.json";
+var MODEL_CACHE_FILE = "router-models.json";
 var REMOTE_MODEL_TTL_MS = 10 * 60 * 1e3;
 var LOCAL_MODEL_TTL_MS = 15 * 1e3;
 var FAILURE_TTL_MS = 60 * 1e3;
@@ -1657,48 +1708,21 @@ function parseJson(raw, fallback) {
     return fallback;
   }
 }
-function dataPath(rel) {
-  try {
-    const viaFs = host.fs && typeof host.fs.expandHome === "function" ? host.fs.expandHome(`~/${rel}`) : null;
-    if (viaFs) return viaFs;
-    const viaHost = typeof host.expandHome === "function" ? host.expandHome(`~/${rel}`) : null;
-    if (viaHost) return viaHost;
-    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
-    return home ? `${home.replace(/\/+$/, "")}/${rel}` : null;
-  } catch {
-    return null;
-  }
+function writeJsonFile(name, value) {
+  return writeDataFile(name, JSON.stringify(value, null, 2));
 }
-function writeJsonFile(rel, value) {
-  const path = dataPath(rel);
-  if (!path) return false;
-  try {
-    const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
-    const text = JSON.stringify(value, null, 2);
-    return typeof host.writeFileAtomic === "function" ? host.writeFileAtomic(path, text) : host.writeFile(path, text);
-  } catch {
-    return false;
-  }
-}
-function readJsonFile(rel) {
-  const path = dataPath(rel);
-  if (!path) return null;
-  try {
-    return parseJson(host.readFile(path), null);
-  } catch {
-    return null;
-  }
+function readJsonFile(name) {
+  return parseJson(readDataFile(name), null);
 }
 function readSettings() {
   const raw = parseJson(host.settingsJson ? host.settingsJson() : "{}", {});
   return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
 }
 function readState() {
-  return coerceState(readJsonFile(STATE_REL));
+  return coerceState(readJsonFile(STATE_FILE));
 }
 function writeState(state) {
-  return writeJsonFile(STATE_REL, state);
+  return writeJsonFile(STATE_FILE, state);
 }
 function snapshot() {
   const settings2 = readSettings();
@@ -1753,7 +1777,7 @@ function fetchSync(req) {
 }
 function cache() {
   if (!memCache) {
-    const stored = readJsonFile(MODEL_CACHE_REL);
+    const stored = readJsonFile(MODEL_CACHE_FILE);
     memCache = stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
   }
   return memCache;
@@ -1762,7 +1786,7 @@ function persistCache() {
   const entries = cache();
   const durable = {};
   for (const id of Object.keys(entries)) if (!entries[id].error) durable[id] = entries[id];
-  writeJsonFile(MODEL_CACHE_REL, durable);
+  writeJsonFile(MODEL_CACHE_FILE, durable);
 }
 function invalidateModels(providerId) {
   delete cache()[providerId];
@@ -2237,6 +2261,32 @@ function applyNativeEvent(acc, ev) {
   }
 }
 
+// lmstudio/src/router/sessionstore.ts
+var SESSIONS_FILE = "sessions.json";
+function readAll() {
+  try {
+    const data = JSON.parse(readDataFile(SESSIONS_FILE) || "{}");
+    return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  } catch {
+    return {};
+  }
+}
+function savedSession(sid) {
+  const entry = readAll()[sid];
+  return entry && typeof entry.model === "string" ? entry : null;
+}
+function saveSession(sid, entry) {
+  const all = readAll();
+  all[sid] = entry;
+  writeDataFile(SESSIONS_FILE, JSON.stringify(all));
+}
+function forgetSession(sid) {
+  const all = readAll();
+  if (!(sid in all)) return;
+  delete all[sid];
+  writeDataFile(SESSIONS_FILE, JSON.stringify(all));
+}
+
 // lmstudio/src/router/textcalls.ts
 var OPEN_RE = /<tool_call\s*>/gi;
 var CLOSE_RE = /<\/tool_call\s*>/i;
@@ -2403,8 +2453,8 @@ function resolveCharterRef(ref) {
   return { charter: "", error: `unknown charter id: ${id}` };
 }
 var DEFAULT_BASE_URL2 = "http://localhost:1234";
-var LAST_MODEL_PATH = ".codeterm/plugins/lmstudio/last-model.json";
-var AUTHORED_PROMPTS_PATH = ".codeterm/plugins/lmstudio/authored-prompts.json";
+var LAST_MODEL_FILE = "last-model.json";
+var AUTHORED_PROMPTS_FILE = "authored-prompts.json";
 var PROMPT_AUTHOR_WORKSPACE = "lmstudio-prompt-authoring";
 var MAX_TOOL_ROUNDS = 8;
 var MAX_MALFORMED_RETRIES = 2;
@@ -2434,72 +2484,22 @@ function readSettings2() {
 function cleanModel(model) {
   return typeof model === "string" ? model.trim() : "";
 }
-function lastModelFilePath() {
-  try {
-    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
-    if (!home) return null;
-    return `${home.replace(/\/+$/, "")}/${LAST_MODEL_PATH}`;
-  } catch {
-    return null;
-  }
-}
 function readLastModel() {
-  try {
-    const path = lastModelFilePath();
-    if (!path) return "";
-    const raw = host.readFile(path);
-    if (!raw) return "";
-    const state = JSON.parse(raw);
-    return cleanModel(state && state.lastModel);
-  } catch {
-    return "";
-  }
+  const state = parseJson2(readDataFile(LAST_MODEL_FILE) || "", null);
+  return cleanModel(state && state.lastModel);
 }
 function rememberLastModel(model) {
   const lastModel = cleanModel(model);
-  if (!lastModel) return;
-  try {
-    const path = lastModelFilePath();
-    if (!path) return;
-    const slash = path.lastIndexOf("/");
-    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
-    host.writeFile(path, JSON.stringify({ lastModel }));
-  } catch {
-  }
-}
-function authoredPromptsFilePath() {
-  try {
-    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
-    if (!home) return null;
-    return `${home.replace(/\/+$/, "")}/${AUTHORED_PROMPTS_PATH}`;
-  } catch {
-    return null;
-  }
+  if (lastModel) writeDataFile(LAST_MODEL_FILE, JSON.stringify({ lastModel }));
 }
 function readAuthoredPrompts() {
-  try {
-    const path = authoredPromptsFilePath();
-    if (!path) return {};
-    const raw = host.readFile(path);
-    if (!raw) return {};
-    const data = JSON.parse(raw);
-    if (!data || typeof data !== "object" || Array.isArray(data)) return {};
-    return data;
-  } catch {
-    return {};
-  }
+  const data = parseJson2(readDataFile(AUTHORED_PROMPTS_FILE) || "", null);
+  return data && typeof data === "object" && !Array.isArray(data) ? data : {};
 }
 function writeAuthoredPrompt(model, draft) {
-  try {
-    const path = authoredPromptsFilePath();
-    if (!path) return;
-    const current = readAuthoredPrompts();
-    current[model] = draft;
-    const slash = path.lastIndexOf("/");
-    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
-    host.writeFile(path, JSON.stringify(current));
-  } catch {
-  }
+  const current = readAuthoredPrompts();
+  current[model] = draft;
+  writeDataFile(AUTHORED_PROMPTS_FILE, JSON.stringify(current));
 }
 function applyAuthoredPrompt(s2, model, draft) {
   if (!model) return;
@@ -2566,8 +2566,11 @@ function defaultSystemPrompt(all) {
   const p2 = defaultPreset(all);
   return p2 && typeof p2.systemPrompt === "string" ? p2.systemPrompt : "";
 }
+function sessionEpoch() {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
 function nextId(s2, prefix = "lmstudio") {
-  const id = `${prefix}-${s2.seq}`;
+  const id = `${prefix}-${s2.epoch}-${s2.seq}`;
   s2.seq += 1;
   return id;
 }
@@ -2691,6 +2694,33 @@ function emitToolResult(s2, call, result, toolId, callId) {
   if (callId) extras.callId = callId;
   append(s2, "tool_result", formatted, void 0, extras);
   s2.roundResults.push(formatted);
+}
+function sessionFor(sid) {
+  const live = sessions.get(sid);
+  if (live) return live;
+  const saved = savedSession(sid);
+  if (!saved) return void 0;
+  const s2 = resolveSession({ tabId: sid, model: saved.model, preset: saved.preset });
+  if (s2.charterError) return void 0;
+  s2.cursorReset = true;
+  append(s2, "system", "Router reloaded: earlier turns of this tab are no longer in the model's context.");
+  sessions.set(sid, s2);
+  return s2;
+}
+function refreshRoute(s2) {
+  const router = snapshot();
+  const target = reroute(s2.route, { providerId: s2.provider ? s2.provider.id : null, model: s2.model }, router.providers, router.defaultProvider);
+  if (!target.provider) {
+    s2.routeError = target.error || "no enabled provider";
+    return;
+  }
+  if (!s2.provider || s2.provider.id !== target.provider.id || s2.model !== target.model) s2.previousResponseId = null;
+  s2.provider = target.provider;
+  s2.model = target.model;
+  s2.routeError = null;
+}
+function reportedModel(s2) {
+  return s2.provider ? sessionModelId(s2) : s2.route.raw;
 }
 function requestSystem(s2) {
   if (s2.mode === "watcher" || s2.engine && s2.engine.kind === "machine") return s2.systemPrompt;
@@ -2827,6 +2857,7 @@ function beginStream(s2, jobId, kind, watcher) {
   s2.done = false;
 }
 function startLmStudioCall(s2, input, opts) {
+  refreshRoute(s2);
   if (s2.routeError) {
     append(s2, "system", `Router error: ${s2.routeError}`);
     s2.done = true;
@@ -3205,6 +3236,8 @@ function resolveSession(ctx) {
   return {
     messages: [],
     seq: 0,
+    epoch: sessionEpoch(),
+    cursorReset: false,
     systemPrompt: effectiveSystemPrompt,
     mode,
     engine,
@@ -3216,6 +3249,7 @@ function resolveSession(ctx) {
     watcherLastAssistant: "",
     model: target.model,
     provider: target.provider,
+    route: { raw: model, presetProvider: model ? void 0 : routerPreset && routerPreset.provider },
     routeError: target.error || null,
     params,
     previousResponseId: null,
@@ -3247,10 +3281,11 @@ var plugin = {
     }
     sessions.set(sid, s2);
     rememberLastModel(sessionModelId(s2));
+    if (s2.mode !== "watcher") saveSession(sid, { model: reportedModel(s2), preset: ctx.preset });
     return { sessionId: sid };
   },
   sendMessage(sid, text) {
-    const s2 = sessions.get(sid);
+    const s2 = sessionFor(sid);
     if (!s2) return;
     if (s2.mode === "watcher") {
       host.log("warn", `sendMessage ignored for watcher session ${sid}`);
@@ -3303,7 +3338,8 @@ var plugin = {
   poll(sid, cursor) {
     const s2 = sessions.get(sid);
     if (!s2) return { messages: [], cursor: cursor ?? "0", done: true };
-    const from = Number(cursor ?? 0) || 0;
+    const from = s2.cursorReset ? 0 : Number(cursor ?? 0) || 0;
+    s2.cursorReset = false;
     let liveFrom = -1;
     if (s2.stream) {
       for (let i = 0; i < s2.messages.length; i += 1) {
@@ -3351,6 +3387,7 @@ var plugin = {
     else s2.done = true;
   },
   closeSession(sid) {
+    forgetSession(sid);
     const s2 = sessions.get(sid);
     if (s2 && s2.stream) host.fetchStreamClose(s2.stream.jobId);
     if (s2 && s2.pendingExec) host.execClose(s2.pendingExec.jobId);
@@ -3378,7 +3415,8 @@ var plugin = {
   },
   sessionInfo(sid) {
     const s2 = sessions.get(sid);
-    return { model: s2 ? sessionModelId(s2) || void 0 : void 0, systemPrompt: s2 ? s2.systemPrompt : void 0 };
+    if (s2) refreshRoute(s2);
+    return { model: s2 ? reportedModel(s2) || void 0 : void 0, systemPrompt: s2 ? s2.systemPrompt : void 0 };
   },
   describeModelSwitch,
   authorSystemPrompt(sid, draft) {
@@ -3439,6 +3477,8 @@ var plugin = {
       append(s2, "system", `Router error: ${target.error || `cannot route ${model}`}`);
       return;
     }
+    s2.route = { raw: model.trim() };
+    saveSession(sid, { model: model.trim() });
     if (s2.provider && s2.provider.id === target.provider.id && s2.model === target.model) return;
     s2.provider = target.provider;
     s2.model = target.model;

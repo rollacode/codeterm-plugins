@@ -31,7 +31,7 @@ let forceParse = null;
 let settingsObj = {};
 let fetchHandler = () => JSON.stringify({ error: "no fetch handler set" });
 let asyncFetchHandler = () => ({ status: 500, error: "no async fetch handler set" });
-const lastModelPath = "/tmp/codeterm-home/.codeterm/plugins/lmstudio/last-model.json";
+const lastModelPath = "/tmp/codeterm-home/.codeterm/plugin-data/lmstudio/last-model.json";
 
 function parseLooseJson(raw) {
   const attempts = [
@@ -1626,7 +1626,7 @@ test("settings schema and config expose presets/defaultPreset", () => {
 
 // ── R6: authorSystemPrompt — author/refine a pane's system prompt ─────────────
 
-const authoredPromptsPath = "/tmp/codeterm-home/.codeterm/plugins/lmstudio/authored-prompts.json";
+const authoredPromptsPath = "/tmp/codeterm-home/.codeterm/plugin-data/lmstudio/authored-prompts.json";
 
 test("sessionInfo returns model and systemPrompt so an external author can read the current state", () => {
   reset({
@@ -2177,7 +2177,7 @@ test("decision_model_id_reports_catalogue_fallback_and_metadata_normalizes_remot
 
 // ── Router: multi-provider routing, keys, usage, verbs, view bridge ──
 
-const ROUTER_STATE = "/tmp/codeterm-home/.codeterm/plugins/lmstudio/router.json";
+const ROUTER_STATE = "/tmp/codeterm-home/.codeterm/plugin-data/lmstudio/router.json";
 const MIMO_KEY = "tp-0123456789abcdef";
 
 function routerSettings(extra) {
@@ -2693,6 +2693,77 @@ test("router_cancel_during_a_tool_closes_the_exec_and_keeps_history_paired", () 
   const p = plugin.poll("t-cx", null);
   assert(p.done && p.messages.some((m) => m.type === "tool_result" && m.callId === "c9" && /cancelled/.test(m.content)), "call answered as cancelled");
   plugin.closeSession("t-cx");
+});
+
+// ── Router: user state outlives reinstall; live sessions follow the registry ──
+const LEGACY_DIR = "/tmp/codeterm-home/.codeterm/plugins/lmstudio/";
+const DATA_DIR = "/tmp/codeterm-home/.codeterm/plugin-data/lmstudio/";
+
+test("router_state_is_written_outside_the_install_dir", () => {
+  reset(routerSettings());
+  const out = plugin.onAgentCommand({ verb: "add-provider", args: ["mimo", "openai", "https://token-plan-sgp.xiaomimimo.com/v1"] });
+  assert(!out.error, "add-provider ok: " + JSON.stringify(out));
+  plugin.openSession({ tabId: "t-paths", config: {}, model: "mimo::mimo-v2.6-pro" });
+  const written = Object.keys(fileStore);
+  assert(written.includes(DATA_DIR + "router.json") && written.includes(DATA_DIR + "last-model.json"), "state in the data dir, got " + written);
+  assert(!written.some((p) => p.indexOf(LEGACY_DIR) === 0), "nothing written into the install dir");
+  plugin.closeSession("t-paths");
+});
+
+test("router_state_left_in_the_install_dir_migrates_on_first_read", () => {
+  reset(routerSettings());
+  fileStore[LEGACY_DIR + "router.json"] = JSON.stringify(mimoProviders());
+  fileStore[LEGACY_DIR + "last-model.json"] = JSON.stringify({ lastModel: "mimo::mimo-v2.6-pro" });
+  const listed = plugin.onAgentCommand({ verb: "providers", args: [] });
+  assert(/mimo-anthropic/.test(listed.result), "legacy providers still listed");
+  assert(JSON.parse(fileStore[DATA_DIR + "router.json"]).providers.length === 2, "copied into the data dir");
+  plugin.openSession({ tabId: "t-mig", config: {} });
+  assert(plugin.sessionInfo("t-mig").model === "mimo::mimo-v2.6-pro", "last model migrated too");
+  plugin.closeSession("t-mig");
+});
+
+test("router_live_session_follows_registry_changes_without_a_new_tab", () => {
+  reset(routerSettings());
+  secretStore.mimo_api_key = MIMO_KEY;
+  plugin.openSession({ tabId: "t-live", config: {}, model: "mimo::mimo-v2.6-pro" });
+  plugin.sendMessage("t-live", "hi");
+  let p = pumpUntilDone("t-live");
+  assert(contents(p.messages, "system").some((m) => /unknown provider "mimo"/.test(m)), "missing provider reported");
+  assert(streamCalls.length === 0, "no request without a route");
+  assert(plugin.sessionInfo("t-live").model === "mimo::mimo-v2.6-pro", "session keeps reporting the requested model");
+  seedRouter(mimoProviders());
+  plugin.sendMessage("t-live", "list my tabs");
+  assert(streamCalls.length === 1 && streamCalls[0].url === "https://token-plan-sgp.xiaomimimo.com/v1/chat/completions", "re-added provider used by the open session");
+  enqueueStream(0, oaiDone("ok"));
+  p = pumpUntilDone("t-live");
+  assert(contents(p.messages, "assistant").pop() === "ok", "the open session answers");
+  seedRouter({ providers: [{ ...mimoProviders().providers[0], baseUrl: "https://other.example/v1" }] });
+  plugin.sendMessage("t-live", "again");
+  assert(streamCalls[1].url === "https://other.example/v1/chat/completions", "edited provider applies to the next request");
+  plugin.closeSession("t-live");
+});
+
+test("router_session_revives_after_a_plugin_reload_without_a_new_tab", () => {
+  openMimo("t-rev");
+  plugin.sendMessage("t-rev", "hello");
+  enqueueStream(0, oaiDone("first"));
+  const before = pumpUntilDone("t-rev");
+  const oldIds = new Set(before.messages.map((m) => m.id));
+  const staleCursor = before.cursor;
+
+  const reloaded = loadPlugin();
+  reloaded.sendMessage("t-rev", "list my tabs");
+  assert(streamCalls.length === 2 && /xiaomimimo\.com\/v1\/chat\/completions$/.test(streamCalls[1].url), "revived session routes to its saved provider");
+  enqueueStream(1, oaiDone("second"));
+  for (let i = 0; i < 5; i += 1) reloaded.pump("t-rev");
+  const p = reloaded.poll("t-rev", staleCursor);
+  assert(contents(p.messages, "assistant").includes("second"), "the answer reaches a host still holding the old cursor");
+  assert(contents(p.messages, "user").includes("list my tabs"), "the revived send is delivered");
+  assert(!p.messages.some((m) => oldIds.has(m.id) && m.id !== "system-prompt"), "revived rows never reuse stored ids");
+  assert(reloaded.sessionInfo("t-rev").model === "mimo::mimo-v2.6-pro", "model survives the reload");
+  reloaded.closeSession("t-rev");
+  assert(!/t-rev/.test(fileStore[DATA_DIR + "sessions.json"] || ""), "closing forgets the saved route");
+  plugin.closeSession("t-rev");
 });
 
 for (const [name, fn] of tests) {

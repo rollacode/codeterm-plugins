@@ -32,11 +32,13 @@ import {
 } from "./router/adapters";
 import { apiRoot, LMSTUDIO_PROVIDER_ID } from "./router/config";
 import { capabilityBadges } from "./router/models";
-import { presetModelId, presetParams, qualifyModel, resolveModelTarget } from "./router/routing";
+import { presetModelId, presetParams, qualifyModel, reroute, resolveModelTarget, type RouteRequest } from "./router/routing";
 import { discoverModels, getKey, resetModelCache, snapshot } from "./router/store";
 import { runAgentVerb } from "./router/verbs";
 import { viewCall } from "./router/view";
 import { applyNativeEvent } from "./router/lmstudioNative";
+import { readDataFile, writeDataFile } from "./router/datafiles";
+import { forgetSession, savedSession, saveSession } from "./router/sessionstore";
 import { parseTextToolCalls } from "./router/textcalls";
 import { checkToolArgs } from "./router/toolspec";
 import { finishToolCalls, mergeToolParts } from "./router/toolwire";
@@ -112,6 +114,10 @@ interface StreamState {
 interface Session {
   messages: NormalizedChatMessage[];
   seq: number;
+  // Scopes message ids to this session object; a session revived after a plugin reload must not reuse ids the host already stored.
+  epoch: string;
+  // A revived session answers its first poll from 0: the host's cursor belongs to the previous VM.
+  cursorReset: boolean;
   systemPrompt: string;
   mode: SessionMode;
   engine: ContextEngineConfig | null;
@@ -123,6 +129,8 @@ interface Session {
   watcherLastAssistant: string;
   model: string;
   provider: ProviderConfig | null;
+  // What the session asked for; re-resolved against the live registry before every request.
+  route: RouteRequest;
   routeError: string | null;
   params: Record<string, unknown>;
   previousResponseId: string | null;
@@ -166,8 +174,8 @@ interface StreamPoll {
 }
 
 const DEFAULT_BASE_URL = "http://localhost:1234";
-const LAST_MODEL_PATH = ".codeterm/plugins/lmstudio/last-model.json";
-const AUTHORED_PROMPTS_PATH = ".codeterm/plugins/lmstudio/authored-prompts.json";
+const LAST_MODEL_FILE = "last-model.json";
+const AUTHORED_PROMPTS_FILE = "authored-prompts.json";
 const PROMPT_AUTHOR_WORKSPACE = "lmstudio-prompt-authoring";
 const MAX_TOOL_ROUNDS = 8;
 const MAX_MALFORMED_RETRIES = 2;
@@ -199,79 +207,25 @@ function cleanModel(model?: unknown): string {
   return typeof model === "string" ? model.trim() : "";
 }
 
-function lastModelFilePath(): string | null {
-  try {
-    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
-    if (!home) return null;
-    return `${home.replace(/\/+$/, "")}/${LAST_MODEL_PATH}`;
-  } catch {
-    return null;
-  }
-}
-
 function readLastModel(): string {
-  try {
-    const path = lastModelFilePath();
-    if (!path) return "";
-    const raw = host.readFile(path);
-    if (!raw) return "";
-    const state = JSON.parse(raw) as LastModelState;
-    return cleanModel(state && state.lastModel);
-  } catch {
-    return "";
-  }
+  const state = parseJson<LastModelState | null>(readDataFile(LAST_MODEL_FILE) || "", null);
+  return cleanModel(state && state.lastModel);
 }
 
 function rememberLastModel(model: string): void {
   const lastModel = cleanModel(model);
-  if (!lastModel) return;
-  try {
-    const path = lastModelFilePath();
-    if (!path) return;
-    const slash = path.lastIndexOf("/");
-    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
-    host.writeFile(path, JSON.stringify({ lastModel }));
-  } catch {
-    // Best-effort persistence must never break chat.
-  }
-}
-
-function authoredPromptsFilePath(): string | null {
-  try {
-    const home = typeof host.homeDir === "function" ? host.homeDir() : null;
-    if (!home) return null;
-    return `${home.replace(/\/+$/, "")}/${AUTHORED_PROMPTS_PATH}`;
-  } catch {
-    return null;
-  }
+  if (lastModel) writeDataFile(LAST_MODEL_FILE, JSON.stringify({ lastModel }));
 }
 
 function readAuthoredPrompts(): Record<string, string> {
-  try {
-    const path = authoredPromptsFilePath();
-    if (!path) return {};
-    const raw = host.readFile(path);
-    if (!raw) return {};
-    const data = JSON.parse(raw) as unknown;
-    if (!data || typeof data !== "object" || Array.isArray(data)) return {};
-    return data as Record<string, string>;
-  } catch {
-    return {};
-  }
+  const data = parseJson<unknown>(readDataFile(AUTHORED_PROMPTS_FILE) || "", null);
+  return data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, string>) : {};
 }
 
 function writeAuthoredPrompt(model: string, draft: string): void {
-  try {
-    const path = authoredPromptsFilePath();
-    if (!path) return;
-    const current = readAuthoredPrompts();
-    current[model] = draft;
-    const slash = path.lastIndexOf("/");
-    if (slash > 0 && typeof host.makeDirs === "function") host.makeDirs(path.slice(0, slash));
-    host.writeFile(path, JSON.stringify(current));
-  } catch {
-    // Best-effort persistence must never break chat.
-  }
+  const current = readAuthoredPrompts();
+  current[model] = draft;
+  writeDataFile(AUTHORED_PROMPTS_FILE, JSON.stringify(current));
 }
 
 // Persist a draft as the authored prompt for `model` AND apply it to the live
@@ -362,8 +316,12 @@ function defaultSystemPrompt(all: Preset[]): string {
   return p && typeof p.systemPrompt === "string" ? p.systemPrompt : "";
 }
 
+function sessionEpoch(): string {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
 function nextId(s: Session, prefix = "lmstudio"): string {
-  const id = `${prefix}-${s.seq}`;
+  const id = `${prefix}-${s.epoch}-${s.seq}`;
   s.seq += 1;
   return id;
 }
@@ -528,6 +486,37 @@ function emitToolResult(s: Session, call: ToolCall, result: unknown, toolId?: st
   s.roundResults.push(formatted);
 }
 
+// The host does not reopen live sessions when the plugin VM reloads; revive one from its saved route.
+function sessionFor(sid: string): Session | undefined {
+  const live = sessions.get(sid);
+  if (live) return live;
+  const saved = savedSession(sid);
+  if (!saved) return undefined;
+  const s = resolveSession({ tabId: sid, model: saved.model, preset: saved.preset } as unknown as ChatBackendOpenSessionCtx);
+  if (s.charterError) return undefined;
+  s.cursorReset = true;
+  append(s, "system", "Router reloaded: earlier turns of this tab are no longer in the model's context.");
+  sessions.set(sid, s);
+  return s;
+}
+
+function refreshRoute(s: Session): void {
+  const router = snapshot();
+  const target = reroute(s.route, { providerId: s.provider ? s.provider.id : null, model: s.model }, router.providers, router.defaultProvider);
+  if (!target.provider) {
+    s.routeError = target.error || "no enabled provider";
+    return;
+  }
+  if (!s.provider || s.provider.id !== target.provider.id || s.model !== target.model) s.previousResponseId = null;
+  s.provider = target.provider;
+  s.model = target.model;
+  s.routeError = null;
+}
+
+function reportedModel(s: Session): string {
+  return s.provider ? sessionModelId(s) : s.route.raw;
+}
+
 function requestSystem(s: Session): string {
   if (s.mode === "watcher" || (s.engine && s.engine.kind === "machine")) return s.systemPrompt;
   return withDomiosContext(s.systemPrompt);
@@ -681,6 +670,7 @@ function beginStream(s: Session, jobId: string, kind: ProviderConfig["kind"], wa
 }
 
 function startLmStudioCall(s: Session, input: string, opts?: { messages?: EngineMessage[]; watcher?: boolean }): void {
+  refreshRoute(s);
   if (s.routeError) {
     append(s, "system", `Router error: ${s.routeError}`);
     s.done = true;
@@ -1132,6 +1122,8 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
   return {
     messages: [],
     seq: 0,
+    epoch: sessionEpoch(),
+    cursorReset: false,
     systemPrompt: effectiveSystemPrompt,
     mode,
     engine,
@@ -1143,6 +1135,7 @@ function resolveSession(ctx: ChatBackendOpenSessionCtx): Session {
     watcherLastAssistant: "",
     model: target.model,
     provider: target.provider,
+    route: { raw: model, presetProvider: model ? undefined : routerPreset && routerPreset.provider },
     routeError: target.error || null,
     params,
     previousResponseId: null,
@@ -1185,11 +1178,12 @@ const plugin: ChatBackend & {
     }
     sessions.set(sid, s);
     rememberLastModel(sessionModelId(s));
+    if (s.mode !== "watcher") saveSession(sid, { model: reportedModel(s), preset: ctx.preset });
     return { sessionId: sid };
   },
 
   sendMessage(sid, text) {
-    const s = sessions.get(sid);
+    const s = sessionFor(sid);
     if (!s) return;
     if (s.mode === "watcher") {
       host.log("warn", `sendMessage ignored for watcher session ${sid}`);
@@ -1245,7 +1239,8 @@ const plugin: ChatBackend & {
   poll(sid, cursor) {
     const s = sessions.get(sid);
     if (!s) return { messages: [], cursor: cursor ?? "0", done: true };
-    const from = Number(cursor ?? 0) || 0;
+    const from = s.cursorReset ? 0 : Number(cursor ?? 0) || 0;
+    s.cursorReset = false;
     // While a stream is live, its assistant/thinking entries grow in place (see
     // append upsert). Pin the cursor at the lowest live entry's index so the
     // next poll re-reads the grown content instead of slicing past it.
@@ -1298,6 +1293,7 @@ const plugin: ChatBackend & {
   },
 
   closeSession(sid) {
+    forgetSession(sid);
     const s = sessions.get(sid);
     if (s && s.stream) host.fetchStreamClose(s.stream.jobId);
     if (s && s.pendingExec) host.execClose(s.pendingExec.jobId);
@@ -1328,7 +1324,8 @@ const plugin: ChatBackend & {
 
   sessionInfo(sid): ChatSessionInfo & { systemPrompt?: string } {
     const s = sessions.get(sid);
-    return { model: s ? sessionModelId(s) || undefined : undefined, systemPrompt: s ? s.systemPrompt : undefined };
+    if (s) refreshRoute(s);
+    return { model: s ? reportedModel(s) || undefined : undefined, systemPrompt: s ? s.systemPrompt : undefined };
   },
 
   describeModelSwitch,
@@ -1398,6 +1395,8 @@ const plugin: ChatBackend & {
       append(s, "system", `Router error: ${target.error || `cannot route ${model}`}`);
       return;
     }
+    s.route = { raw: model.trim() };
+    saveSession(sid, { model: model.trim() });
     if (s.provider && s.provider.id === target.provider.id && s.model === target.model) return;
     s.provider = target.provider;
     s.model = target.model;
