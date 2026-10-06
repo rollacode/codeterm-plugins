@@ -1291,6 +1291,10 @@ test("sign-in log parser types every state from real m365 and wrapper lines", ()
   assert.deepEqual(parse("\u001b[33m🌶️  To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABCD-EFGH to authenticate.\u001b[0m"), { state: "awaiting-device-code", signInUrl: "https://microsoft.com/devicelogin", deviceCode: "ABCD-EFGH" });
   assert.deepEqual(parse("codeterm-signin: url https://evil.example/common/oauth2/authorize?redirect_uri=http://localhost:1\n"), { state: "starting" }, "only Microsoft authorize URLs are surfaced");
   assert.deepEqual(parse("codeterm-signin: url https://login.microsoftonline.com/common/oauth2/authorize?redirect_uri=https://attacker.example\n"), { state: "starting" }, "only loopback redirects are surfaced");
+  assert.deepEqual(parse("To sign in, use a web browser to open the page https://login.microsoft.com/device and enter the code LSRGHM4XQ to authenticate."), { state: "awaiting-device-code", signInUrl: "https://login.microsoft.com/device", deviceCode: "LSRGHM4XQ" }, "the current Microsoft device page");
+  for (const host of ["https://login.microsoft.com.attacker.example/device", "https://login.microsoft.com/devicex", "http://login.microsoft.com/device"]) {
+    assert.deepEqual(parse(`To sign in, use a web browser to open the page ${host} and enter the code LSRGHM4XQ to authenticate.`), { state: "starting" }, host);
+  }
 });
 
 test("login again cancels the pending sign-in and yields a fresh link", () => {
@@ -1474,7 +1478,8 @@ const TEAMS_APP_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
 const OWNER_AADSTS50011 = `AADSTS50011: The redirect URI 'http://localhost:58950' specified in the request does not match the redirect URIs configured for the application '${TEAMS_APP_ID}'. Make sure the redirect URI sent in the request matches one added to your application in the Azure portal. Navigate to https://aka.ms/redirectUriMismatchError to learn more about how to fix this.`;
 const CONSENT_AADSTS65001 = `AADSTS65001: The user or administrator has not consented to use the application with ID '${GRAPH_CLI_APP_ID}' named 'Microsoft Graph Command Line Tools'. Send an interactive authorization request for this user and resource.`;
 const MISSING_SCOPE_403 = `{"error":{"code":"Forbidden","message":"Missing scope permissions on the request. API requires one of 'Chat.ReadBasic, Chat.Read, Chat.ReadWrite'. Scopes on the request 'openid, profile, User.Read, email'"}}`;
-const DEVICE_CODE_LOG = "To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABCD-EFGH to authenticate.\n";
+// Verbatim m365 11.11.0 device-code line for the Graph CLI tools app id, from the owner DEV machine (code replaced).
+const DEVICE_CODE_LOG = "\u{1F336}\uFE0F  To sign in, use a web browser to open the page https://login.microsoft.com/device and enter the code LSRGHM4XQ to authenticate.\n";
 
 test("AADSTS50011 maps to wrong-client-redirect and consent errors to consent-required, quoting Microsoft", () => {
   const redirect = plugin.__test_authState(`Error: ${OWNER_AADSTS50011}`, TEAMS_APP_ID);
@@ -1554,8 +1559,8 @@ test("a refused loopback link falls back to device code once and completes there
     const code = JSON.parse(command("login-status").result);
     assert.equal(code.state, "waiting-for-sign-in");
     assert.equal(code.signIn, "device-code");
-    assert.equal(code.signInUrl, "https://microsoft.com/devicelogin");
-    assert.equal(code.deviceCode, "ABCD-EFGH");
+    assert.equal(code.signInUrl, "https://login.microsoft.com/device");
+    assert.equal(code.deviceCode, "LSRGHM4XQ");
     assert.equal(code.fallbackFrom, "wrong-client-redirect");
     assert.match(code.message, /uses a code instead/);
     env.setCurrentName("account-a");
@@ -1609,7 +1614,7 @@ test("login --device-code starts a code sign-in; other login arguments are refus
   try {
     const login = JSON.parse(command("login", ["--device-code"]).result);
     assert.equal(login.signIn, "device-code");
-    assert.equal(login.deviceCode, "ABCD-EFGH");
+    assert.equal(login.deviceCode, "LSRGHM4XQ");
     assert.equal(login.fallbackFrom, undefined);
     assert.equal(loginCalls(env)[0].args[7], "deviceCode");
     assert.match(command("login", ["--browser"]).error, /Usage: login \[--device-code\]/);

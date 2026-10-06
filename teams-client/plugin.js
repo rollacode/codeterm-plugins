@@ -445,7 +445,7 @@ function signInLogFailure(text, appId) {
   return /^Error:/.test(last) ? { state: "sign-in-failed", message: `Microsoft sign-in failed: ${last.slice(6).trim()}` } : null;
 }
 var AUTHORIZE_URL = /^https:\/\/login\.(?:microsoftonline\.(?:com|us)|chinacloudapi\.cn|partner\.microsoftonline\.cn)\/[\w.-]+\/oauth2\/(?:v2\.0\/)?authorize\?\S*redirect_uri=http:\/\/localhost:\d+\S*$/;
-var DEVICE_LOGIN_URL = /https?:\/\/(?:aka\.ms|microsoft\.com)\/devicelogin\b[^\s<>"']*/i;
+var DEVICE_LOGIN_URL = /https:\/\/(?:(?:aka\.ms|(?:www\.)?microsoft\.com)\/devicelogin|login\.microsoft(?:online)?\.com\/(?:device|common\/oauth2\/deviceauth))(?![\w.-])[^\s<>"']*/i;
 var USER_CODE = /^[A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?$|^[A-Z0-9]{6,12}$/i;
 function parseSignInLog(text, appId) {
   const raw = String(text || "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, " ");

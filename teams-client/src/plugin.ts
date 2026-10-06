@@ -337,7 +337,7 @@ function signInLogFailure(text: string, appId?: string): { state: string; messag
 }
 
 const AUTHORIZE_URL = /^https:\/\/login\.(?:microsoftonline\.(?:com|us)|chinacloudapi\.cn|partner\.microsoftonline\.cn)\/[\w.-]+\/oauth2\/(?:v2\.0\/)?authorize\?\S*redirect_uri=http:\/\/localhost:\d+\S*$/;
-const DEVICE_LOGIN_URL = /https?:\/\/(?:aka\.ms|microsoft\.com)\/devicelogin\b[^\s<>"']*/i;
+const DEVICE_LOGIN_URL = /https:\/\/(?:(?:aka\.ms|(?:www\.)?microsoft\.com)\/devicelogin|login\.microsoft(?:online)?\.com\/(?:device|common\/oauth2\/deviceauth))(?![\w.-])[^\s<>"']*/i;
 const USER_CODE = /^[A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?$|^[A-Z0-9]{6,12}$/i;
 
 function parseSignInLog(text: string, appId?: string): SignInLog {
