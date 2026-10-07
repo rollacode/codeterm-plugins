@@ -719,16 +719,21 @@ test("adapter is default, plain mode is explicit, marker preserves core nonce", 
   const settings = {endpoints: [mimoEndpoint]};
   const p = load({settingsJson: () => JSON.stringify(settings)});
   const command = p.buildLaunchCommand({launchMarker: "ct-launch-own", sessionId: "different-binding"});
-  assert.match(command, /bash '\/installed\/plugins\/aider\/launch-adapter.sh'/);
+  assert.match(command, /export PYTHONPATH='\/installed\/plugins\/aider\/startup'\$\{PYTHONPATH/);
+  assert.match(command, /export DOMIOS_AIDER_ADAPTER='1'/);
   assert.match(command, /DOMIOS_AIDER_SESSION_ID='ct-launch-own'/);
   assert.doesNotMatch(command, /(?:export |\$env:)CODETERM_SESSION_BINDING_NONCE=/);
-  assert.doesNotMatch(configured([mimoEndpoint]).buildLaunchCommand({launchMarker: "ct-launch-own"}), /launch-adapter/);
+  const plainCommand = configured([mimoEndpoint]).buildLaunchCommand({launchMarker: "ct-launch-own"});
+  assert.doesNotMatch(plainCommand, /PYTHONPATH|launch-adapter/);
+  assert.match(plainCommand, /DOMIOS_AIDER_ADAPTER='0'/);
 });
 
 test("Windows adapter uses an argument array and runtime secret, never its value", () => {
   const p = load({platform: () => "windows", settingsJson: () => JSON.stringify({endpoints: [mimoEndpoint]})});
   const command = p.buildLaunchCommand({launchMarker: "ct-launch-own"});
-  assert.match(command, /& '\/installed\/plugins\/aider\/launch-adapter.ps1'/);
+  assert.match(command, /\$env:PYTHONPATH=\(@\('\/installed\/plugins\/aider\/startup'\)/);
+  assert.match(command, /\$env:DOMIOS_AIDER_ADAPTER='1'/);
+  assert.match(command, /; aider /);
   assert.match(command, /codeterm mem secret get --name 'mimo-key'/);
   assert.doesNotMatch(command, /CODETERM_SESSION_BINDING_NONCE|plainMode/);
 });

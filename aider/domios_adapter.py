@@ -248,18 +248,26 @@ def install(Coder, IO, SwitchCoder, session, generation=None):
     return restore
 
 
+def activate():
+    import aider
+    if aider.__version__ != SUPPORTED_VERSION:
+        raise AdapterError("requires exactly aider-chat==" + SUPPORTED_VERSION)
+    from aider.coders.base_coder import Coder
+    from aider.coders.architect_coder import ArchitectCoder
+    from aider.commands import Commands, SwitchCoder
+    from aider.io import InputOutput
+    from aider.main import main as aider_main
+    validate_api(Coder, InputOutput, aider_main, Commands, ArchitectCoder)
+    session = os.environ.get("DOMIOS_AIDER_SESSION_ID", "")
+    if not session or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for char in session):
+        raise AdapterError("missing or invalid DOMIOS_AIDER_SESSION_ID")
+    install(Coder, InputOutput, SwitchCoder, session)
+    return aider_main
+
+
 def main():
     try:
-        from aider.coders.base_coder import Coder
-        from aider.coders.architect_coder import ArchitectCoder
-        from aider.commands import Commands, SwitchCoder
-        from aider.io import InputOutput
-        from aider.main import main as aider_main
-        validate_api(Coder, InputOutput, aider_main, Commands, ArchitectCoder)
-        session = os.environ.get("DOMIOS_AIDER_SESSION_ID", "")
-        if not session or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for char in session):
-            raise AdapterError("missing or invalid DOMIOS_AIDER_SESSION_ID")
-        install(Coder, InputOutput, SwitchCoder, session)
+        aider_main = activate()
         return aider_main()
     except (AdapterError, ImportError, importlib.metadata.PackageNotFoundError) as err:
         print("Domios Aider adapter refused launch: " + str(err) +

@@ -75,13 +75,21 @@ function pluginSettings(): Record<string, unknown> {
   }
 }
 
-function withLaunchEnv(command: string, p: LaunchParams, endpoint: Endpoint): string {
+function withLaunchEnv(command: string, p: LaunchParams, endpoint: Endpoint, startupDir?: string): string {
   const platform = host.platform();
   const quote = (v: string) => host.shell.quoteFor(v, platform);
   // On Windows Domios launches agents in PowerShell; the host reports the
   // platform as "windows".
   const isPowerShell = platform === "windows";
   const exports: string[] = [];
+  exports.push(isPowerShell
+    ? `$env:DOMIOS_AIDER_ADAPTER=${quote(startupDir ? "1" : "0")};`
+    : `export DOMIOS_AIDER_ADAPTER=${quote(startupDir ? "1" : "0")};`);
+  if (startupDir) {
+    exports.push(isPowerShell
+      ? `$env:PYTHONPATH=(@(${quote(startupDir)}) + @($env:PYTHONPATH -split ';' | Where-Object { $_ })) -join ';';`
+      : `export PYTHONPATH=${quote(startupDir)}\${PYTHONPATH:+":$PYTHONPATH"};`);
+  }
   const nonce =
     (typeof p.launchMarker === "string" && p.launchMarker) ||
     (typeof p.sessionId === "string" && p.sessionId) ||
@@ -328,13 +336,14 @@ const plugin: PluginModule = {
     const settings = pluginSettings();
     const requestedModel = selectedModel(p);
     const selected = launchEndpoint(configuredEndpoints(settings), requestedModel);
-    let executable = "aider";
+    let startupDir: string | undefined;
     if (settings.plainMode !== true) {
-      const launcher = host.fs.expandHome(`~/.codeterm/plugins/aider/launch-adapter.${isPowerShell ? "ps1" : "sh"}`);
-      if (!launcher) throw new Error("Domios Aider adapter is missing. Reinstall the plugin or explicitly set plainMode=true.");
-      executable = isPowerShell ? `& ${quote(launcher)}` : `bash ${quote(launcher)}`;
+      startupDir = host.fs.expandHome("~/.codeterm/plugins/aider/startup") || undefined;
+      if (!startupDir) throw new Error("Domios Aider adapter is missing. Reinstall the plugin or explicitly set plainMode=true.");
     }
-    const parts = [executable, ...modelLaunchArgs(p.args || [], selected.entry).map(quote)];
+    // Preserve aider's normal entry point in the PTY process tree. Python's
+    // startup hook installs the adapter before aider.main runs, in its own venv.
+    const parts = ["aider", ...modelLaunchArgs(p.args || [], selected.entry).map(quote)];
     if (p.skipPermissions) parts.push("--yes-always");
     if (!requestedModel) parts.push("--model", quote(selected.model));
     parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
@@ -379,7 +388,7 @@ const plugin: PluginModule = {
     const mkdir = isPowerShell
       ? `New-Item -ItemType Directory -Force -Path ${quote(historyDirPath)} | Out-Null;`
       : `mkdir -p ${quote(historyDirPath)};`;
-    return withLaunchEnv(`${mkdir} ${command} ${historyFlags}`, p, selected.endpoint);
+    return withLaunchEnv(`${mkdir} ${command} ${historyFlags}`, p, selected.endpoint, startupDir);
   },
 
 

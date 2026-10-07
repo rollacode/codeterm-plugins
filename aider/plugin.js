@@ -452,11 +452,15 @@ function pluginSettings() {
     return {};
   }
 }
-function withLaunchEnv(command, p, endpoint) {
+function withLaunchEnv(command, p, endpoint, startupDir) {
   const platform = host.platform();
   const quote = (v) => host.shell.quoteFor(v, platform);
   const isPowerShell = platform === "windows";
   const exports = [];
+  exports.push(isPowerShell ? `$env:DOMIOS_AIDER_ADAPTER=${quote(startupDir ? "1" : "0")};` : `export DOMIOS_AIDER_ADAPTER=${quote(startupDir ? "1" : "0")};`);
+  if (startupDir) {
+    exports.push(isPowerShell ? `$env:PYTHONPATH=(@(${quote(startupDir)}) + @($env:PYTHONPATH -split ';' | Where-Object { $_ })) -join ';';` : `export PYTHONPATH=${quote(startupDir)}\${PYTHONPATH:+":$PYTHONPATH"};`);
+  }
   const nonce = typeof p.launchMarker === "string" && p.launchMarker || typeof p.sessionId === "string" && p.sessionId || null;
   if (nonce) {
     exports.push(
@@ -646,13 +650,12 @@ var plugin = {
     const settings = pluginSettings();
     const requestedModel = selectedModel(p);
     const selected = launchEndpoint(configuredEndpoints(settings), requestedModel);
-    let executable = "aider";
+    let startupDir;
     if (settings.plainMode !== true) {
-      const launcher = host.fs.expandHome(`~/.codeterm/plugins/aider/launch-adapter.${isPowerShell ? "ps1" : "sh"}`);
-      if (!launcher) throw new Error("Domios Aider adapter is missing. Reinstall the plugin or explicitly set plainMode=true.");
-      executable = isPowerShell ? `& ${quote(launcher)}` : `bash ${quote(launcher)}`;
+      startupDir = host.fs.expandHome("~/.codeterm/plugins/aider/startup") || void 0;
+      if (!startupDir) throw new Error("Domios Aider adapter is missing. Reinstall the plugin or explicitly set plainMode=true.");
     }
-    const parts = [executable, ...modelLaunchArgs(p.args || [], selected.entry).map(quote)];
+    const parts = ["aider", ...modelLaunchArgs(p.args || [], selected.entry).map(quote)];
     if (p.skipPermissions) parts.push("--yes-always");
     if (!requestedModel) parts.push("--model", quote(selected.model));
     parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
@@ -686,7 +689,7 @@ var plugin = {
       inputHistoryPath
     ].join(" ");
     const mkdir = isPowerShell ? `New-Item -ItemType Directory -Force -Path ${quote(historyDirPath)} | Out-Null;` : `mkdir -p ${quote(historyDirPath)};`;
-    return withLaunchEnv(`${mkdir} ${command} ${historyFlags}`, p, selected.endpoint);
+    return withLaunchEnv(`${mkdir} ${command} ${historyFlags}`, p, selected.endpoint, startupDir);
   },
   buildResumeCommand(_sessionId, _skipPermissions) {
     return this.buildLaunchCommand({});
