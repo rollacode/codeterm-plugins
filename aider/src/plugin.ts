@@ -4,9 +4,11 @@ import type {
   ParsedPrompt,
   PluginModule,
   ResumeParams,
+  SessionDeltaContext,
 } from "@codeterm/plugin-sdk";
 import {
   parseAiderHistoryDelta,
+  utf8Length,
 } from "./history";
 
 const TITLE_RE = /aider/i;
@@ -371,8 +373,6 @@ const plugin: PluginModule = {
     return this.buildLaunchCommand({ ...params, task: params.systemPrompt || undefined });
   },
 
-  buildPromptSafeChoice: promptSafeChoice,
-
   launchOnboardingResponse(screen: string): { frameKey: string; step: string } | null {
     const prompt = parsePromptWithContext(String(screen || ""));
     if (!prompt) return null;
@@ -470,8 +470,13 @@ const plugin: PluginModule = {
     return historyFilePath(cwd, sessionId);
   },
 
-  parseSessionDelta(chunk: string): unknown {
-    return parseAiderHistoryDelta(String(chunk || ""));
+  parseSessionDelta(chunk: string, context?: SessionDeltaContext): unknown {
+    const text = String(chunk || "");
+    if (!context || context.from_offset === 0) return parseAiderHistoryDelta(text);
+    // Evidence, backfill and live tail readers can call independently.
+    const prefix = host.fs.readFileHead(context.session_key, context.from_offset + utf8Length(text));
+    if (prefix === null) return { messages: [] };
+    return parseAiderHistoryDelta(prefix, context.from_offset);
   },
 
   checkIntegration(): unknown {
