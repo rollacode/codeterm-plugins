@@ -552,7 +552,7 @@ test("reasoning equals syntax is consumed and normalized", () => {
   assert.match(tuned([budgetModel]).buildLaunchCommand({args: ["--reasoning-effort=high"]}), /'--thinking-tokens' '16384'/);
 });
 test("malformed reasoning choices are rejected", () => {
-  for (const args of [["--reasoning-effort"], ["--reasoning-effort="], ["--thinking-tokens"], ["--reasoning-effort", "--model"]]) {
+  for (const args of [["--reasoning-effort"], ["--reasoning-effort="], ["--thinking-tokens"], ["--reasoning-effort", "--model", effortModel.id]]) {
     assert.throws(() => tuned([effortModel]).buildLaunchCommand({args}), /requires a declared model option/);
   }
 });

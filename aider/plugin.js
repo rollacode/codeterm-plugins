@@ -559,6 +559,13 @@ var plugin = {
     if (p.skipPermissions) parts.push("--yes-always");
     if (!requestedModel) parts.push("--model", quote(selected.model));
     parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
+    const instructions = `${cwd.replace(/[\\/]+$/, "")}/AGENTS.md`;
+    try {
+      if (host.fs.readFileHead(instructions, 1) !== null) {
+        parts.push("--read", quote(instructions));
+      }
+    } catch (_) {
+    }
     const configPath = typeof settings.configPath === "string" && settings.configPath || typeof p.configPath === "string" && p.configPath || null;
     if (configPath) {
       parts.push("--config", quote(configPath));
