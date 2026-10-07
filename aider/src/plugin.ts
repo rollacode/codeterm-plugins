@@ -341,6 +341,16 @@ const plugin: PluginModule = {
     } catch (_) {
       // Missing or unreadable instructions must not prevent starting Aider.
     }
+    try {
+      // expandHome maps ~/.codeterm to this instance's data directory, so
+      // the bundled primer resolves inside the installed plugin on DEV too.
+      const primer = host.fs.expandHome("~/.codeterm/plugins/aider/domios-primer.md");
+      if (primer && host.fs.readFileHead(primer, 1) !== null) {
+        parts.push("--read", quote(primer));
+      }
+    } catch (_) {
+      // A missing bundled primer must not prevent starting Aider either.
+    }
     const configPath =
       (typeof settings.configPath === "string" && settings.configPath) ||
       (typeof p.configPath === "string" && p.configPath) ||

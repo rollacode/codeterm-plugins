@@ -8,7 +8,7 @@ function load(over = {}) {
     platform: () => "linux",
     settingsJson: () => "{}",
     shell: { quoteFor: (v) => "'" + v.replace(/'/g, "'\\''") + "'" },
-    fs: { readDir: () => [], readFileHead: () => null },
+    fs: { readDir: () => [], readFileHead: () => null, expandHome: () => null },
     ...over,
   };
   const context = { host, module: { exports: {} }, exports: {} };
@@ -90,6 +90,73 @@ test("launch tolerates missing or unreadable project instructions", () => {
 test("Windows instructions path is quoted and empty instructions still load", () => {
   const p = configured([mimoEndpoint], {platform: () => "windows", fs: {readFileHead: () => ""}});
   assert.match(p.buildLaunchCommand({cwd: "D:/some repo"}), /--read 'D:\/some repo\/AGENTS.md'/);
+});
+
+test("launch reads the primer from the installed instance plugin beside AGENTS", () => {
+  const paths = [];
+  const primer = "/home/dev/.codeterm-dev/plugins/aider/domios-primer.md";
+  const p = configured([mimoEndpoint], {fs: {
+    expandHome: path => {
+      assert.equal(path, "~/.codeterm/plugins/aider/domios-primer.md");
+      return primer;
+    },
+    readFileHead: (path, bytes) => { paths.push([path, bytes]); return "R"; },
+  }});
+  const command = p.buildLaunchCommand({cwd: "/project"});
+  assert.match(command, /--read '\/project\/AGENTS.md'/);
+  assert.ok(command.includes(`--read '${primer}'`));
+  assert.deepEqual(paths, [["/project/AGENTS.md", 1], [primer, 1]]);
+});
+
+test("missing or unreadable primer does not prevent launch", () => {
+  for (const read of [() => null, () => {throw new Error("unreadable");}]) {
+    const p = configured([mimoEndpoint], {fs: {
+      expandHome: () => "/installed/aider/domios-primer.md",
+      readFileHead: path => path.endsWith("AGENTS.md") ? "#" : read(),
+    }});
+    const command = p.buildLaunchCommand({cwd: "/project"});
+    assert.match(command, /--read '\/project\/AGENTS.md'/);
+    assert.doesNotMatch(command, /--read '[^']*domios-primer/);
+    assert.match(command, /--chat-history-file/);
+  }
+});
+
+test("primer loads without project instructions and Windows paths stay quoted", () => {
+  const primer = "C:/Users/Some User/.codeterm-dev/plugins/aider/domios-primer.md";
+  const p = configured([mimoEndpoint], {platform: () => "windows", fs: {
+    expandHome: () => primer,
+    readFileHead: path => path === primer ? "Rules" : null,
+  }});
+  const command = p.buildLaunchCommand({cwd: "D:/project"});
+  assert.ok(command.includes(`--read '${primer}'`));
+  assert.doesNotMatch(command, /--read 'D:\/project\/AGENTS.md'/);
+});
+
+test("unresolved or failed primer path expansion does not block launch", () => {
+  for (const expandHome of [() => null, () => {throw new Error("unavailable");}]) {
+    const command = configured([mimoEndpoint], {fs: {expandHome, readFileHead: () => null}}).buildLaunchCommand({});
+    assert.match(command, /--chat-history-file/);
+    assert.doesNotMatch(command, /domios-primer/);
+  }
+});
+
+test("resume launch paths also include the installed Domios primer", () => {
+  const primer = "/installed/aider/domios-primer.md";
+  const p = configured([mimoEndpoint], {fs: {
+    expandHome: () => primer,
+    readFileHead: path => path === primer ? "Rules" : null,
+  }});
+  for (const command of [p.buildResumeCommand("session"), p.buildResumeCommandWithContext({sessionId: "session", cwd: "/project"})]) {
+    assert.ok(command.includes(`--read '${primer}'`));
+  }
+});
+
+test("bundled Domios primer is short and contains the reduced-agent rules", () => {
+  const primer = readFileSync(join(__dirname, "domios-primer.md"), "utf8");
+  assert.ok(Buffer.byteLength(primer) < 2000);
+  for (const rule of ["Aider tab inside Domios", "You have no tools", "Never print commands expecting them to run", "-=-codeterm:", "delivered back to that sender automatically", "forward slashes", "at most four files", "English unless the user writes otherwise", "verified facts from hypotheses", "caller or consumer"]) {
+    assert.ok(primer.includes(rule), rule);
+  }
 });
 test("onboarding answers gitignore and documentation dialogs", () => {
   const p = load();
