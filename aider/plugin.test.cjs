@@ -45,6 +45,11 @@ test("settings schema exposes the three launch settings", () => {
   const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json")));
   assert.deepEqual(schema[0].fields.map(f => f.key).sort(), ["apiBase", "apiKeySecret", "configPath"]);
 });
+test("full access maps to --yes-always and stays off otherwise", () => {
+  const p = load({});
+  assert.match(p.buildLaunchCommand({cwd: "/work", skipPermissions: true}), /--yes-always/);
+  assert.doesNotMatch(p.buildLaunchCommand({cwd: "/work"}), /--yes-always/);
+});
 test("runtime settings and nonce are applied in the launch shell", () => {
   const p = load({settingsJson: () => JSON.stringify({apiBase: "https://example.test/v1", apiKeySecret: "mimo-key", configPath: "/work/aider.yml"})});
   const command = p.buildLaunchCommand({cwd: "/work", launchMarker: "nonce", args: ["--model", "openai/mimo-v2.6-pro"]});

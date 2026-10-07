@@ -411,6 +411,7 @@ var plugin = {
         parts.push(quote(String(p.args[i])));
       }
     }
+    if (p.skipPermissions) parts.push("--yes-always");
     parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
     const settings = pluginSettings();
     const configPath = typeof settings.configPath === "string" && settings.configPath || typeof p.configPath === "string" && p.configPath || null;
