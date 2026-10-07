@@ -26,9 +26,9 @@
       "timeoutSecs": 60
     },
     "composerCursorPosition": "prompt_line",
-    "taskDelivery": "inline_flag",
+    "taskDelivery": "pty_input",
     "systemPromptDelivery": {
-      "kind": "session_config"
+      "kind": "external"
     },
     "verifySubmit": {
       "kind": "tui_input_drained"

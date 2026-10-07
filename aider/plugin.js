@@ -411,8 +411,6 @@ var OUTPUT_SIGNALS = [
   "Create new file"
 ];
 var TUI_FRAGMENTS = ["aider", "tokens sent"];
-var ASSIGNED_TASK_START_PROMPT = "Execute the assigned task. Follow the configured instructions.";
-var IDLE_WAKEUP_START_PROMPT = "You are a newly started agent. Wait for instructions from the user or your orchestration parent.";
 var PROMPT_QUESTION_RE = /^(Run shell commands?\?|Add file to the chat\?|Create new file[^\n]*\?|Add \.aider\* to \.gitignore \(recommended\)\?|Open documentation url for more info\?)\s*\(Y\)es\/\(N\)o(?:\/\(D\)on't ask again)?\s*(\[[^\]]*\])?\s*:?\s*$/;
 var SHELL_COMMAND_QUESTION_RE = /^Run shell commands?\?\s*\(Y\)es\/\(N\)o\s*$/;
 var GITIGNORE_QUESTION_RE = /^Add \.aider\* to \.gitignore \(recommended\)\?\s*\(Y\)es\/\(N\)o\s*(\[[^\]]*\])?\s*:?\s*$/;
@@ -474,13 +472,6 @@ function withLaunchEnv(command, p, endpoint, startupDir) {
   exports.push(isPowerShell ? `$env:${env.key}=(codeterm mem secret get --name ${quote(endpoint.apiKeySecret)});` : `export ${env.key}="$(codeterm mem secret get --name ${quote(endpoint.apiKeySecret)})";`);
   if (exports.length === 0) return command;
   return `${exports.join(" ")} ${command}`;
-}
-function starterPrompt(params) {
-  if (params.starterPromptText) return params.starterPromptText;
-  if (params.starterPrompt === "no_starter") return void 0;
-  if (params.starterPrompt === "idle_wakeup") return IDLE_WAKEUP_START_PROMPT;
-  if (params.starterPrompt === "team_bootstrap") throw new Error("team_bootstrap requires host starterPromptText");
-  return ASSIGNED_TASK_START_PROMPT;
 }
 function historyDir(cwd) {
   return `${String(cwd || "")}/.aider/history`;
@@ -557,8 +548,8 @@ function promptSafeChoice(prompt, screen) {
   return isCodetermOnlyCommandList(extractPromptedCommands(screen)) ? "1" : null;
 }
 var plugin = {
-  starterPromptText(prompt) {
-    return prompt === "team_bootstrap" ? void 0 : starterPrompt({ starterPrompt: prompt });
+  starterPromptText(_prompt) {
+    return void 0;
   },
   detectFromTitle(title) {
     return TITLE_RE.test(String(title || ""));
@@ -676,10 +667,6 @@ var plugin = {
     const configPath = typeof settings.configPath === "string" && settings.configPath || typeof p.configPath === "string" && p.configPath || null;
     if (configPath) {
       parts.push("--config", quote(configPath));
-    }
-    const prompt = starterPrompt(p);
-    if (p.task && prompt) {
-      parts.push("--message", quote(prompt));
     }
     const command = parts.join(" ");
     const historyFlags = [

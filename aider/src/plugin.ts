@@ -30,8 +30,6 @@ const OUTPUT_SIGNALS = [
   "Create new file",
 ];
 const TUI_FRAGMENTS = ["aider", "tokens sent"];
-const ASSIGNED_TASK_START_PROMPT = "Execute the assigned task. Follow the configured instructions.";
-const IDLE_WAKEUP_START_PROMPT = "You are a newly started agent. Wait for instructions from the user or your orchestration parent.";
 const PROMPT_QUESTION_RE = /^(Run shell commands?\?|Add file to the chat\?|Create new file[^\n]*\?|Add \.aider\* to \.gitignore \(recommended\)\?|Open documentation url for more info\?)\s*\(Y\)es\/\(N\)o(?:\/\(D\)on't ask again)?\s*(\[[^\]]*\])?\s*:?\s*$/;
 const SHELL_COMMAND_QUESTION_RE = /^Run shell commands?\?\s*\(Y\)es\/\(N\)o\s*$/;
 const GITIGNORE_QUESTION_RE = /^Add \.aider\* to \.gitignore \(recommended\)\?\s*\(Y\)es\/\(N\)o\s*(\[[^\]]*\])?\s*:?\s*$/;
@@ -114,16 +112,6 @@ function withLaunchEnv(command: string, p: LaunchParams, endpoint: Endpoint, sta
   if (exports.length === 0) return command;
   return `${exports.join(" ")} ${command}`;
 }
-
-
-function starterPrompt(params: LaunchParams): string | undefined {
-  if (params.starterPromptText) return params.starterPromptText;
-  if (params.starterPrompt === "no_starter") return undefined;
-  if (params.starterPrompt === "idle_wakeup") return IDLE_WAKEUP_START_PROMPT;
-  if (params.starterPrompt === "team_bootstrap") throw new Error("team_bootstrap requires host starterPromptText");
-  return ASSIGNED_TASK_START_PROMPT;
-}
-
 /** Per-tab history folder: one file per launch, named by the binding nonce. */
 function historyDir(cwd: string): string {
   return `${String(cwd || "")}/.aider/history`;
@@ -219,8 +207,10 @@ function promptSafeChoice(prompt: ParsedPrompt | null | undefined, screen: strin
 }
 
 const plugin: PluginModule = {
-  starterPromptText(prompt: "no_starter" | "assigned_task" | "idle_wakeup" | "team_bootstrap" | "startup_handshake"): string | undefined {
-    return prompt === "team_bootstrap" ? undefined : starterPrompt({ starterPrompt: prompt });
+  starterPromptText(_prompt: "no_starter" | "assigned_task" | "idle_wakeup" | "team_bootstrap" | "startup_handshake"): string | undefined {
+    // No native initial turn: core delivers the exact prepared payload to the
+    // interactive composer after readiness, including any required starter.
+    return undefined;
   },
 
   detectFromTitle(title: string): boolean {
@@ -374,10 +364,8 @@ const plugin: PluginModule = {
     if (configPath) {
       parts.push("--config", quote(configPath));
     }
-    const prompt = starterPrompt(p);
-    if (p.task && prompt) {
-      parts.push("--message", quote(prompt));
-    }
+    // --message/--message-file exit after one answer in Aider 0.86.2.
+    // The manifest selects core's confirmed PTY delivery for the initial task.
     const command = parts.join(" ");
     const historyFlags = [
       "--chat-history-file",

@@ -74,6 +74,32 @@ test("Windows launch fetches the key in PowerShell", () => {
   assert.match(command, /\$\(\$env:DOMIOS_AIDER_SESSION_ID\)\.md/);
 });
 
+test("launch leaves the framed task to confirmed PTY delivery and stays interactive", () => {
+  const task = "-=-codeterm:tab label=Fermi tab=sender-=-\nInspect é and `$value`.\n\nName the caller's file.";
+  for (const platform of ["linux", "windows"]) {
+    const quoted = [];
+    const p = configured([mimoEndpoint], {platform: () => platform,
+      shell: {quoteFor: value => {quoted.push(value); return JSON.stringify(value);}}});
+    const command = p.buildLaunchCommand({cwd: "/repo", task, starterPrompt: "startup_handshake",
+      starterPromptText: "A different host starter"});
+    assert.doesNotMatch(command, /--message(?:-file)?\b/);
+    assert.ok(!quoted.includes(task));
+    assert.ok(!quoted.includes("A different host starter"));
+  }
+});
+
+test("manifest selects PTY task delivery without native system or starter injection", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json")));
+  assert.equal(manifest.spawn.taskDelivery, "pty_input");
+  assert.deepEqual(manifest.spawn.systemPromptDelivery, {kind: "external"});
+  const p = configured([mimoEndpoint]);
+  assert.doesNotMatch(p.buildLaunchCommand({cwd: "/repo", task: "Actual task", starterPrompt: "no_starter"}), /--message/);
+  assert.doesNotMatch(p.buildLaunchCommand({cwd: "/repo", starterPromptText: "Host starter"}), /--message/);
+  for (const prompt of ["assigned_task", "no_starter", "idle_wakeup", "team_bootstrap", "startup_handshake"]) {
+    assert.equal(p.starterPromptText(prompt), undefined);
+  }
+});
+
 test("launch loads project instructions as read-only context", () => {
   const paths = [];
   const p = configured([mimoEndpoint], {fs: {readFileHead: (path, bytes) => {
@@ -834,6 +860,30 @@ for (const outcome of ["error", "cancelled", "reflection_limit"]) {
 test("relay skips completed users before the captured delivery boundary", () => {
   const f = relayFixture();
   assert.equal(relayRead(f, undefined, f.end.userRecordStart + 1), null);
+});
+
+test("relay and Chat preserve the normalized multiline routed task", () => {
+  const task = "-=-codeterm:tab label=Fermi tab=sender-=-\nInspect é.\n\nName the caller's file.";
+  const f = relayFixture(task.split("\n").join("  \r\n#### "));
+  assert.equal(relayRead(f).userText, task);
+  assert.equal(text(parse(f.history).find(row => row.role === "user")), task);
+});
+
+test("relay queued followups accept consumed-user-plus-one and interior UTF-8 offsets", () => {
+  const first = relayFixture("First é", "First answer");
+  const second = relayFixture("Followup 😀", "Second answer");
+  const shift = byteLength(first.history);
+  const end = {...second.end, turnSequence: 2};
+  for (const key of ["userRecordStart", "responseRecordStart", "responseRecordEnd", "historyBytes"]) end[key] += shift;
+  const combined = {...first, history: first.history + second.history};
+  const records = [first.start, first.end, end];
+  const insideAccent = byteLength(first.history.slice(0, first.history.indexOf("é"))) + 1;
+  for (const offset of [first.end.userRecordStart + 1, insideAccent, shift, end.userRecordStart]) {
+    const result = relayRead(combined, records, offset);
+    assert.equal(result.userText, "Followup 😀");
+    assert.equal(result.userRecordStart, end.userRecordStart);
+    assert.equal(result.answer, "Second answer");
+  }
 });
 
 test("relay rejects wrong session, launch marker, generation and malformed records", () => {
