@@ -949,6 +949,23 @@ test("relay /ask keeps original payload identity despite nested input echo", () 
   assert.equal(relayRead(f).answer, "Final");
 });
 
+test("declared line-break normalization matches pasted frames without rewriting raw relay text", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json")));
+  assert.deepEqual(manifest.spawn.turnEvidenceNormalization, {dropLineBreaks: true});
+  // Contract fixture for core's symmetric comparison, not plugin-side mutation.
+  const payload = '<domios from="tab" tab="sender">First line\r\nSecond é\nThird line</domios>\r\n';
+  const stored = '<domios from="tab" tab="sender">First lineSecond éThird line</domios>';
+  const normalize = value => manifest.spawn.turnEvidenceNormalization.dropLineBreaks
+    ? value.trim().replace(/[\r\n]/g, "") : value.trim();
+  assert.notEqual(payload.trim(), stored);
+  const raw = relayRead(relayFixture(stored)).userText;
+  assert.equal(raw, stored);
+  assert.equal(normalize(payload), normalize(raw));
+  const multiline = payload.trim().replace(/\r\n/g, "\n");
+  const headingLines = multiline.split("\n").join("  \r\n#### ");
+  assert.equal(relayRead(relayFixture(headingLines)).userText, multiline);
+});
+
 for (const outcome of ["error", "cancelled", "reflection_limit"]) {
   test(`relay ${outcome} returns matching original user without partial answer`, () => {
     const f = relayFixture("Question", "partial");

@@ -27,6 +27,7 @@
       "timeoutSecs": 60
     },
     "composerCursorPosition": "prompt_line",
+    "turnEvidenceNormalization": { "dropLineBreaks": true },
     "taskDelivery": "pty_input",
     "systemPromptDelivery": {
       "kind": "external"
