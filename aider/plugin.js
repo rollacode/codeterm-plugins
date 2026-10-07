@@ -647,6 +647,18 @@ var plugin = {
       if (!startupDir) throw new Error("Domios Aider adapter is missing. Reinstall the plugin or explicitly set plainMode=true.");
     }
     const parts = ["aider", ...modelLaunchArgs(p.args || [], selected.entry).map(quote)];
+    if (p.toolLessInstructionsPath !== void 0 && p.toolLessInstructionsPath !== null) {
+      const path = p.toolLessInstructionsPath;
+      let readable = false;
+      if (typeof path === "string" && path.trim()) {
+        try {
+          readable = host.fs.readFileHead(path, 1) !== null;
+        } catch (_) {
+        }
+      }
+      if (!readable) throw new Error("Domios tool-less instructions are unreadable. Retry the launch so Domios can recreate its instructions file.");
+      parts.push("--read", quote(path));
+    }
     if (p.skipPermissions) parts.push("--yes-always");
     if (!requestedModel) parts.push("--model", quote(selected.model));
     parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
