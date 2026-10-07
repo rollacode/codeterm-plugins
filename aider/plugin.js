@@ -581,6 +581,13 @@ var plugin = {
       }
     } catch (_) {
     }
+    try {
+      const primer = host.fs.expandHome("~/.codeterm/plugins/aider/domios-primer.md");
+      if (primer && host.fs.readFileHead(primer, 1) !== null) {
+        parts.push("--read", quote(primer));
+      }
+    } catch (_) {
+    }
     const configPath = typeof settings.configPath === "string" && settings.configPath || typeof p.configPath === "string" && p.configPath || null;
     if (configPath) {
       parts.push("--config", quote(configPath));
