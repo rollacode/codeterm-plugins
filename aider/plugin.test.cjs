@@ -70,6 +70,27 @@ test("Windows launch fetches the key in PowerShell", () => {
   assert.match(command, /\$env:OPENAI_API_KEY=\(codeterm mem secret get/);
   assert.match(command, /\$\(\$env:CODETERM_SESSION_BINDING_NONCE\)\.md/);
 });
+
+test("launch loads project instructions as read-only context", () => {
+  const paths = [];
+  const p = configured([mimoEndpoint], {fs: {readFileHead: (path, bytes) => {
+    paths.push([path, bytes]);
+    return "#";
+  }}});
+  assert.match(p.buildLaunchCommand({cwd: "/some repo/"}), /--read '\/some repo\/AGENTS.md'/);
+  assert.deepEqual(paths, [["/some repo/AGENTS.md", 1]]);
+});
+
+test("launch tolerates missing or unreadable project instructions", () => {
+  assert.doesNotMatch(configured([mimoEndpoint]).buildLaunchCommand({cwd: "/repo"}), /--read/);
+  const p = configured([mimoEndpoint], {fs: {readFileHead: () => {throw new Error("denied");}}});
+  assert.doesNotMatch(p.buildLaunchCommand({cwd: "/repo"}), /--read/);
+});
+
+test("Windows instructions path is quoted and empty instructions still load", () => {
+  const p = configured([mimoEndpoint], {platform: () => "windows", fs: {readFileHead: () => ""}});
+  assert.match(p.buildLaunchCommand({cwd: "D:/some repo"}), /--read 'D:\/some repo\/AGENTS.md'/);
+});
 test("onboarding answers gitignore and documentation dialogs", () => {
   const p = load();
   assert.equal(p.launchOnboardingResponse("Add .aider* to .gitignore (recommended)? (Y)es/(N)o [Yes]:").step, "WQ==");

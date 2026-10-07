@@ -331,6 +331,16 @@ const plugin: PluginModule = {
     if (p.skipPermissions) parts.push("--yes-always");
     if (!requestedModel) parts.push("--model", quote(selected.model));
     parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
+    // Aider does not load the agents.md convention itself. Keep repository
+    // instructions in read-only context, without scanning the whole tree.
+    const instructions = `${cwd.replace(/[\\/]+$/, "")}/AGENTS.md`;
+    try {
+      if (host.fs.readFileHead(instructions, 1) !== null) {
+        parts.push("--read", quote(instructions));
+      }
+    } catch (_) {
+      // Missing or unreadable instructions must not prevent starting Aider.
+    }
     const configPath =
       (typeof settings.configPath === "string" && settings.configPath) ||
       (typeof p.configPath === "string" && p.configPath) ||
