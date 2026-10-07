@@ -17,7 +17,7 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// plugins/provider-aider/src/plugin.ts
+// aider/src/plugin.ts
 var plugin_exports = {};
 __export(plugin_exports, {
   MODE_PROMPT_RE: () => MODE_PROMPT_RE,
@@ -32,61 +32,123 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
-// plugins/provider-aider/src/history.ts
-var THINKING_BLOCK_RE = /<thinking-content-[^>]*>[\s\S]*?<\/thinking-content-[^>]*>/g;
-var META_LINE_RE = /^> /;
-function parseAiderHistoryDelta(chunk) {
-  const text = String(chunk || "");
-  const lines = text.split(/\r?\n/);
-  const messages = [];
-  let currentRole = null;
-  let currentText = [];
-  let currentStart = 0;
-  function flush() {
-    if (currentRole && currentText.length > 0) {
-      let body = currentText.join("\n").trim();
-      if (currentRole === "assistant") {
-        body = body.replace(THINKING_BLOCK_RE, "").trim();
-        body = body.split(/\r?\n/).filter((line) => !META_LINE_RE.test(line)).join("\n").trim();
-      }
-      if (body) {
-        messages.push({
-          role: currentRole,
-          blocks: [{ kind: "text", data: { text: body } }],
-          ts: null,
-          recordIndex: currentStart
-        });
-      }
-    }
-    currentText = [];
+// aider/src/history.ts
+function utf8Length(text) {
+  let bytes = 0;
+  for (const char of text) {
+    const cp = char.codePointAt(0);
+    bytes += cp < 128 ? 1 : cp < 2048 ? 2 : cp < 65536 ? 3 : 4;
   }
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.startsWith("#### ")) {
+  return bytes;
+}
+var ERROR_RE = /(?:\blitellm\.[\w.]*Error\b|\b(?:AuthenticationError|APIConnectionError|RateLimitError|BadRequestError|PermissionDeniedError|InternalServerError)\b|\b(?:Error|Exception):|\b(?:invalid|incorrect|missing) api key\b|\bEmpty response received from LLM\b)/i;
+var NOISE_RE = /^(?:Aider v\d|Model:|Weak model:|Editor model:|Git repo:|Repo[ -]?[Mm]ap:|Tokens:|Added .+ to the chat|Use \/help|Cost:|Open documentation url|Add \.aider\* to \.gitignore|Please visit)/;
+function parseAiderHistoryDelta(prefix, fromOffset = 0) {
+  const messages = [];
+  const state = { current: null };
+  let offset = 0;
+  let deltaLine = 0;
+  let previousHeading = false;
+  let fence = null;
+  let thinkingTag = null;
+  let errorContinuation = false;
+  function flush() {
+    if (!state.current) return;
+    const text = state.current.lines.join("\n").trim();
+    if (text && text !== "<blank>" && state.current.end > fromOffset) {
+      messages.push({
+        role: state.current.role,
+        blocks: [{ kind: "text", data: { text } }],
+        ts: null,
+        uuid: `aider:${state.current.role}:${state.current.start}`,
+        ...state.current.start >= fromOffset ? { recordIndex: state.current.line } : {}
+      });
+    }
+    state.current = null;
+  }
+  function add(role, text, end) {
+    if (state.current?.role !== role) {
       flush();
-      const userText = line.slice(5).trim();
-      if (!userText || userText === "<blank>") {
-        currentRole = null;
-        continue;
+      state.current = { role, lines: [], start: offset, line: deltaLine, end };
+    }
+    state.current.lines.push(text);
+    if (text.trim()) state.current.end = end;
+  }
+  const records = prefix.match(/[^\n]*\n|[^\n]+$/g) || [];
+  for (const record of records) {
+    const raw = record.replace(/\r?\n$/, "");
+    const end = offset + utf8Length(record);
+    let line = raw;
+    if (!fence) {
+      let visible = "";
+      while (line) {
+        if (thinkingTag) {
+          const close = `</${thinkingTag}>`;
+          const at = line.indexOf(close);
+          if (at < 0) {
+            line = "";
+            break;
+          }
+          line = line.slice(at + close.length);
+          thinkingTag = null;
+        } else {
+          const open = /<thinking-content-[^>]*>/.exec(line);
+          if (!open) {
+            visible += line;
+            break;
+          }
+          visible += line.slice(0, open.index);
+          thinkingTag = open[0].slice(1, -1);
+          line = line.slice(open.index + open[0].length);
+        }
       }
-      currentRole = "user";
-      currentStart = i;
-      currentText.push(userText);
-      continue;
+      line = visible;
     }
-    if (currentRole === null) continue;
-    if (currentRole === "user" && line.trim()) {
+    const heading = !fence && /^####(?: |$)/.test(line);
+    if (!fence && /^# aider chat started at /.test(line)) {
       flush();
-      currentRole = "assistant";
-      currentStart = i;
+      previousHeading = false;
+      errorContinuation = false;
+    } else if (heading) {
+      if (!previousHeading) flush();
+      const body = line.slice(5).replace(/ {2}$/, "");
+      if (body.trim() && body.trim() !== "<blank>") add("user", body, end);
+      else if (!body.trim() && previousHeading && state.current?.role === "user") add("user", "", end);
+      previousHeading = true;
+      errorContinuation = false;
+    } else {
+      previousHeading = false;
+      const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+      if (fence) {
+        add("assistant", line, end);
+        if (marker && marker[1][0] === fence.char && marker[1].length >= fence.size && !marker[2].trim()) fence = null;
+      } else if (marker) {
+        fence = { char: marker[1][0], size: marker[1].length };
+        add("assistant", line, end);
+      } else if (/^> ?/.test(line)) {
+        const body = line.replace(/^> ?/, "").replace(/ {2}$/, "");
+        if (NOISE_RE.test(body) || !body.trim()) errorContinuation = false;
+        else if (ERROR_RE.test(body) || errorContinuation) {
+          add("assistant", body, end);
+          errorContinuation = true;
+        }
+      } else if (NOISE_RE.test(line)) {
+        errorContinuation = false;
+      } else if (line.trim()) {
+        add("assistant", line, end);
+        errorContinuation = false;
+      } else if (state.current?.role === "assistant") {
+        add("assistant", "", end);
+      }
     }
-    currentText.push(line);
+    if (offset >= fromOffset) deltaLine++;
+    offset = end;
   }
   flush();
   return { messages };
 }
 
-// plugins/provider-aider/src/plugin.ts
+// aider/src/plugin.ts
 var TITLE_RE = /aider/i;
 var OUTPUT_MARKERS = ["aider", "Aider", "Aider Chat"];
 var OUTPUT_SIGNALS = [
@@ -375,7 +437,6 @@ var plugin = {
   buildResumeCommandWithContext(params) {
     return this.buildLaunchCommand({ ...params, task: params.systemPrompt || void 0 });
   },
-  buildPromptSafeChoice: promptSafeChoice,
   launchOnboardingResponse(screen) {
     const prompt = parsePromptWithContext(String(screen || ""));
     if (!prompt) return null;
@@ -452,8 +513,12 @@ var plugin = {
     if (!cwd || !sessionId) return null;
     return historyFilePath(cwd, sessionId);
   },
-  parseSessionDelta(chunk) {
-    return parseAiderHistoryDelta(String(chunk || ""));
+  parseSessionDelta(chunk, context) {
+    const text = String(chunk || "");
+    if (!context || context.from_offset === 0) return parseAiderHistoryDelta(text);
+    const prefix = host.fs.readFileHead(context.session_key, context.from_offset + utf8Length(text));
+    if (prefix === null) return { messages: [] };
+    return parseAiderHistoryDelta(prefix, context.from_offset);
   },
   checkIntegration() {
     return {
