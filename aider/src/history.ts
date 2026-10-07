@@ -34,11 +34,21 @@ export function parseAiderHistoryDelta(prefix: string, fromOffset = 0): { messag
   let fence: { char: string; size: number } | null = null;
   let thinkingTag: string | null = null;
   let errorContinuation = false;
+  let modeCommandEcho: string | null = null;
 
   function flush() {
     if (!state.current) return;
     const text = state.current.lines.join("\n").trim();
-    if (text && text !== "<blank>" && state.current.end > fromOffset) {
+    // /ask, /code and the other per-turn mode commands log both the command
+    // and its expanded user input. Only the immediately adjacent exact echo
+    // is redundant; repeated real user sends keep their own byte identities.
+    const echo = state.current.role === "user" && modeCommandEcho !== null && text === modeCommandEcho;
+    if (text && text !== "<blank>") {
+      modeCommandEcho = state.current.role === "user" && !echo
+        ? /^\/(?:ask|code|architect|context)\s+([\s\S]+)$/.exec(text)?.[1] || null
+        : null;
+    }
+    if (!echo && text && text !== "<blank>" && state.current.end > fromOffset) {
       messages.push({
         role: state.current.role,
         blocks: [{ kind: state.current.kind, data: { text } }],

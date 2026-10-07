@@ -164,6 +164,23 @@ test("thinking blocks use the collapsed host block before the answer", () => {
   assert.equal(rows[2].blocks[0].kind, "text");
 });
 
+test("per-turn ask command and its exact Aider expansion are one user row", () => {
+  const rows = parse("#### /ask Review this\n\n> Warning: files\n\n#### Review this\n\nAnswer\n");
+  assert.deepEqual(contents(rows), ["/ask Review this", "Answer"]);
+});
+
+test("mode command echo deduplication survives complete-line tails", () => {
+  for (const command of ["ask", "code", "architect", "context"]) {
+    const result = tail([`#### /${command} Review\n\n`, "> Added file\n\n", "#### Review\n\n", "Answer\n"]);
+    assert.deepEqual(contents(result.rows), [`/${command} Review`, "Answer"]);
+  }
+});
+
+test("mode echo matching does not swallow real later or different user input", () => {
+  assert.deepEqual(contents(parse("#### /ask Q\n\nAnswer\n\n#### Q\n\nOther answer\n")), ["/ask Q", "Answer", "Q", "Other answer"]);
+  assert.deepEqual(contents(parse("#### /ask Q\n\n#### Different\n\nAnswer\n")), ["/ask Q", "Different", "Answer"]);
+});
+
 test("launch marker binds its exact file even when another tab is newer", () => {
   const p = load({fs: {readDir: () => [
     {name: "first.md", modifiedMs: 10},
