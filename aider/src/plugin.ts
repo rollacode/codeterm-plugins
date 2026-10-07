@@ -334,6 +334,17 @@ const plugin: PluginModule = {
     // Preserve aider's normal entry point in the PTY process tree. Python's
     // startup hook installs the adapter before aider.main runs, in its own venv.
     const parts = ["aider", ...modelLaunchArgs(p.args || [], selected.entry).map(quote)];
+    // Core owns the shared tool-less rules. A supplied file is mandatory;
+    // unlike optional project/primer context, it must never be silently lost.
+    if (p.toolLessInstructionsPath !== undefined && p.toolLessInstructionsPath !== null) {
+      const path = p.toolLessInstructionsPath;
+      let readable = false;
+      if (typeof path === "string" && path.trim()) {
+        try { readable = host.fs.readFileHead(path, 1) !== null; } catch (_) { /* refuse below */ }
+      }
+      if (!readable) throw new Error("Domios tool-less instructions are unreadable. Retry the launch so Domios can recreate its instructions file.");
+      parts.push("--read", quote(path as string));
+    }
     if (p.skipPermissions) parts.push("--yes-always");
     if (!requestedModel) parts.push("--model", quote(selected.model));
     parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");

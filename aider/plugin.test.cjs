@@ -180,12 +180,49 @@ test("resume launch paths also include the installed Domios primer", () => {
   }
 });
 
-test("bundled Domios primer is short and contains the reduced-agent rules", () => {
+test("bundled primer contains only Aider file-reading guidance", () => {
   const primer = readFileSync(join(__dirname, "domios-primer.md"), "utf8");
   assert.ok(Buffer.byteLength(primer) < 2000);
-  for (const rule of ["Aider tab inside Domios", "You have no tools", "Never print commands expecting them to run", "-=-codeterm:", "delivered back to that sender automatically", "forward slashes", "at most four files", "English unless the user writes otherwise", "verified facts from hypotheses", "caller or consumer"]) {
+  for (const rule of ["Aider inside a Domios tab", "exact path with forward slashes", "added to the chat automatically", "at most four files"]) {
     assert.ok(primer.includes(rule), rule);
   }
+  assert.doesNotMatch(primer, /type="report"|status=|startup-ack|replies go back|You have no tools/);
+});
+
+test("core tool-less instructions load alongside AGENTS and primer in both launch modes", () => {
+  const shared = "D:/Domios rules/core 'shared'.md";
+  const primer = "/installed/plugins/aider/domios-primer.md";
+  for (const platform of ["linux", "windows"]) {
+    for (const plainMode of [true, false]) {
+      const reads = [];
+      const p = load({platform: () => platform,
+        settingsJson: () => JSON.stringify({endpoints: [mimoEndpoint], plainMode}),
+        fs: {expandHome: path => path.replace("~/.codeterm", "/installed"),
+          readFileHead: (path, bytes) => {reads.push([path, bytes]); return "Rules";}}});
+      const command = p.buildLaunchCommand({cwd: "/repo", toolLessInstructionsPath: shared});
+      assert.ok(command.includes("--read 'D:/Domios rules/core '\\''shared'\\''.md'"));
+      assert.ok(command.includes("--read '/repo/AGENTS.md'"));
+      assert.ok(command.includes(`--read '${primer}'`));
+      assert.deepEqual(reads, [[shared, 1], ["/repo/AGENTS.md", 1], [primer, 1]]);
+      assert.doesNotMatch(command, /--message(?:-file)?\b/);
+    }
+  }
+});
+
+test("supplied unreadable or invalid core instructions refuse launch", () => {
+  for (const read of [() => null, () => {throw new Error("denied");}]) {
+    const p = configured([mimoEndpoint], {fs: {readFileHead: read}});
+    for (const path of ["/missing/rules.md", "", " ", 42]) {
+      assert.throws(() => p.buildLaunchCommand({toolLessInstructionsPath: path}), /tool-less instructions are unreadable/);
+    }
+  }
+});
+
+test("empty readable core file loads and resume context preserves its path", () => {
+  const p = configured([mimoEndpoint], {fs: {readFileHead: () => ""}});
+  const command = p.buildResumeCommandWithContext({sessionId: "session", cwd: "/repo", toolLessInstructionsPath: "/core/rules.md"});
+  assert.ok(command.includes("--read '/core/rules.md'"));
+  assert.doesNotThrow(() => p.buildLaunchCommand({cwd: "/repo"}));
 });
 test("onboarding answers gitignore and documentation dialogs", () => {
   const p = load();

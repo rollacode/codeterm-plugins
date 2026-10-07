@@ -1,6 +1,6 @@
 # Aider
 
-Spawn tasks arrive through Domios's confirmed PTY input after Aider is ready. The plugin keeps the session interactive: it does not use Aider's one-shot `--message` or `--message-file` flags. Project instructions and the bundled primer are read-only context; they do not replace or expand the routed task's user turn.
+Spawn tasks arrive through Domios's confirmed PTY input after Aider is ready. The plugin keeps the session interactive: it does not use Aider's one-shot `--message` or `--message-file` flags. Project instructions and the bundled primer are read-only context; they do not replace or expand the routed task's user turn. Core supplies shared tool-less rules through `toolLessInstructionsPath`, added as another `--read` file; an unreadable supplied file refuses launch. The bundled primer contains only Aider-specific file-reading guidance.
 
 Optional Aider CLI provider for Domios Chat UI, installed from the `codeterm-plugins` channel. Requires CodeTerm 1.12.4 or later and an `aider` executable on PATH. The installer and updater prefer `uv tool install --force aider-chat==0.86.2`, with `pipx install --force aider-chat==0.86.2` as the alternative. They never upgrade past the supported version.
 
