@@ -1,6 +1,6 @@
 /** Pure parser for Aider's markdown history. Positions are UTF-8 byte offsets. */
 export interface HistoryRow {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   blocks: Array<{ kind: "text"; data: { text: string } }>;
   ts: number | null;
   uuid: string;
@@ -17,6 +17,8 @@ export function utf8Length(text: string): number {
 }
 
 const ERROR_RE = /(?:\blitellm\.[\w.]*Error\b|\b(?:AuthenticationError|APIConnectionError|RateLimitError|BadRequestError|PermissionDeniedError|InternalServerError)\b|\b(?:Error|Exception):|\b(?:invalid|incorrect|missing) api key\b|\bEmpty response received from LLM\b)/i;
+// Aider tool_output persists these notices as blockquoted history lines.
+const CHANGE_NOTICE_RE = /^(?:Applied edit to .+|Did not apply edit to .+|Commit [0-9a-f]{7,40}(?: .*)?)$/i;
 const NOISE_RE = /^(?:Aider v\d|Model:|Weak model:|Editor model:|Git repo:|Repo[ -]?[Mm]ap:|Tokens:|Added .+ to the chat|Use \/help|Cost:|Open documentation url|Add \.aider\* to \.gitignore|Please visit)/;
 
 /** `prefix` ends at the host's complete-line delta boundary. Older row content
@@ -24,7 +26,7 @@ const NOISE_RE = /^(?:Aider v\d|Model:|Weak model:|Editor model:|Git repo:|Repo[
  * after `fromOffset`. Stable UUIDs let the host merge split rows in place. */
 export function parseAiderHistoryDelta(prefix: string, fromOffset = 0): { messages: HistoryRow[] } {
   const messages: HistoryRow[] = [];
-  const state: { current: { role: "user" | "assistant"; lines: string[]; start: number; line: number; end: number } | null } = { current: null };
+  const state: { current: { role: "user" | "assistant" | "system"; lines: string[]; start: number; line: number; end: number } | null } = { current: null };
   let offset = 0;
   let deltaLine = 0;
   let previousHeading = false;
@@ -47,7 +49,7 @@ export function parseAiderHistoryDelta(prefix: string, fromOffset = 0): { messag
     state.current = null;
   }
 
-  function add(role: "user" | "assistant", text: string, end: number) {
+  function add(role: "user" | "assistant" | "system", text: string, end: number) {
     if (state.current?.role !== role) {
       flush();
       state.current = { role, lines: [], start: offset, line: deltaLine, end };
@@ -105,7 +107,10 @@ export function parseAiderHistoryDelta(prefix: string, fromOffset = 0): { messag
         add("assistant", line, end);
       } else if (/^> ?/.test(line)) {
         const body = line.replace(/^> ?/, "").replace(/ {2}$/, "");
-        if (NOISE_RE.test(body) || !body.trim()) errorContinuation = false;
+        if (CHANGE_NOTICE_RE.test(body)) {
+          add("system", body, end);
+          errorContinuation = false;
+        } else if (NOISE_RE.test(body) || !body.trim()) errorContinuation = false;
         else if (ERROR_RE.test(body) || errorContinuation) {
           add("assistant", body, end);
           errorContinuation = true;

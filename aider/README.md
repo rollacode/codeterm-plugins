@@ -12,7 +12,7 @@ For MiMo, set `apiBase` to `https://api.xiaomimimo.com/v1`, store your key in a 
 
 Each tab records history in `<cwd>/.aider/history/<CODETERM_SESSION_BINDING_NONCE>.md` with a separate `.input` file. Startup gitignore and documentation dialogs use the provider's onboarding capability. Readiness uses the prompt line and a 5000 ms input fallback.
 
-Chat parses Aider's markdown transcript, preserving fenced code, combining multiline user headings, hiding thinking blocks and tool chatter, and retaining readable API errors. Delta reads reconstruct the prefix through `host.fs.readFileHead` so split turns retain their role and stable byte-based identity. This reparses the history prefix on each delta; very long sessions can cost more than line-oriented transcripts. No mutable parser state is shared between tabs or readers.
+Chat parses Aider's markdown transcript, preserving fenced code, combining multiline user headings, hiding thinking blocks and tool chatter, and retaining readable API errors. Applied edits, dry-run edit notices and commits appear as compact system rows after the answer. Permission prompts are reported only when the final nonempty screen line contains an unanswered question. Delta reads reconstruct the prefix through `host.fs.readFileHead` so split turns retain their role and stable byte-based identity. This reparses the history prefix on each delta; very long sessions can cost more than line-oriented transcripts. No mutable parser state is shared between tabs or readers.
 
 Build and verify from the canonical checkout:
 

@@ -264,6 +264,58 @@ test("onboarding ignores old dialogs after the composer returns", () => {
   assert.deepEqual(plain(p.detectEvents(screen)), []);
 });
 
+test("applied edit is a compact system row after the answer", () => {
+  const rows = parse("#### Edit hello.py\n\nHere is the code.\n> Tokens: 10\n> Applied edit to hello.py  \n");
+  assert.deepEqual(rows.map(r => r.role), ["user", "assistant", "system"]);
+  assert.deepEqual(contents(rows), ["Edit hello.py", "Here is the code.", "Applied edit to hello.py"]);
+});
+test("multiple edits and a commit share a compact change row", () => {
+  const rows = parse("#### Q\n\nDone.\n> Applied edit to src/a.ts  \n> Applied edit to src/b.ts  \n> Commit abc1234 fix both files  \n> Tokens: 5\n");
+  assert.equal(rows[2].role, "system");
+  assert.equal(text(rows[2]), "Applied edit to src/a.ts\nApplied edit to src/b.ts\nCommit abc1234 fix both files");
+});
+test("edit paths with spaces and Unicode remain intact", () => {
+  const rows = parse("> Applied edit to dir/my файл.py  \n");
+  assert.equal(rows[0].role, "system");
+  assert.equal(text(rows[0]), "Applied edit to dir/my файл.py");
+});
+test("dry run edit notices stay visible", () => {
+  const rows = parse("> Did not apply edit to hello.py (--dry-run)  \n");
+  assert.equal(rows[0].role, "system");
+  assert.equal(text(rows[0]), "Did not apply edit to hello.py (--dry-run)");
+});
+test("change-looking text inside a fence remains assistant code", () => {
+  const answer = "```text\n> Applied edit to hello.py\n> Commit abc1234 example\n```";
+  const rows = parse("#### Q\n\n" + answer + "\n");
+  assert.deepEqual(rows.map(r => r.role), ["user", "assistant"]);
+  assert.equal(text(rows[1]), answer);
+});
+test("change notices split from answer keep chronological roles", () => {
+  const result = tail(["#### Q\n\nAnswer\n", "> Applied edit to hello.py  \n", "> Commit abc1234 fix hello  \n", "> Tokens: 5\n"]);
+  assert.deepEqual(result.rows.map(r => r.role), ["user", "assistant", "system"]);
+  assert.deepEqual(contents(result.rows), ["Q", "Answer", "Applied edit to hello.py\nCommit abc1234 fix hello"]);
+  assert.equal(result.deltas[3].length, 0);
+});
+test("change notices terminate error continuation", () => {
+  const rows = parse("> litellm.AuthenticationError: test\n> Applied edit to hello.py\n> Run shell command?\n");
+  assert.deepEqual(rows.map(r => r.role), ["assistant", "system"]);
+  assert.deepEqual(contents(rows), ["litellm.AuthenticationError: test", "Applied edit to hello.py"]);
+});
+test("separate turns have separate change identities", () => {
+  const rows = parse("#### Q\n\nA\n> Applied edit to hello.py\n\n#### Q\n\nA\n> Applied edit to hello.py\n");
+  const edits = rows.filter(r => r.role === "system");
+  assert.equal(edits.length, 2);
+  assert.notEqual(edits[0].uuid, edits[1].uuid);
+});
+test("every line split preserves change notices without duplicates", () => {
+  const source = "#### Q\n\nAnswer\n> Applied edit to hello.py  \n> Commit abc1234 fix hello  \n> Tokens: 5\n";
+  const expected = parse(source);
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] !== "\n") continue;
+    assert.deepEqual(tail([source.slice(0, i + 1), source.slice(i + 1)]).rows.map(r => [r.uuid, r.role, text(r)]), expected.map(r => [r.uuid, r.role, text(r)]));
+  }
+});
+
 let failed = 0;
 for (const [name, run] of tests) {
   try { run(); console.log(`  ok  ${name}`); }
