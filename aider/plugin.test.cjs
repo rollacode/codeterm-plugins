@@ -156,14 +156,22 @@ test("tilde fences protect thinking syntax and headings", () => {
   const answer = "~~~~html\n<thinking-content-x>literal</thinking-content-x>\n#### code\n~~~~";
   assert.equal(text(parse("#### Q\n\n" + answer + "\n")[1]), answer);
 });
-test("thinking blocks are removed", () => {
-  assert.deepEqual(contents(parse("#### Q\n\n<thinking-content-x>\nhidden\n</thinking-content-x>\nAnswer\n")), ["Q", "Answer"]);
+test("thinking blocks use the collapsed host block before the answer", () => {
+  const rows = parse("#### Q\n\n<thinking-content-x>\nhidden\n</thinking-content-x>\nAnswer\n");
+  assert.deepEqual(contents(rows), ["Q", "hidden", "Answer"]);
+  assert.equal(rows[1].role, "assistant");
+  assert.equal(rows[1].blocks[0].kind, "thinking");
+  assert.equal(rows[2].blocks[0].kind, "text");
 });
-test("unclosed thinking never leaks", () => {
-  assert.deepEqual(contents(parse("#### Q\n\n<thinking-content-x>\nhidden\n")), ["Q"]);
+test("unclosed thinking stays separate from ordinary assistant text", () => {
+  const rows = parse("#### Q\n\n<thinking-content-x>\nhidden\n");
+  assert.deepEqual(contents(rows), ["Q", "hidden"]);
+  assert.equal(rows[1].blocks[0].kind, "thinking");
 });
 test("inline multiple thinking blocks preserve visible text", () => {
-  assert.deepEqual(contents(parse("#### Q\n\nA<thinking-content-x>hide</thinking-content-x>B<thinking-content-y>hide</thinking-content-y>C\n")), ["Q", "ABC"]);
+  const rows = parse("#### Q\n\nA<thinking-content-x>hide</thinking-content-x>B<thinking-content-y>hide</thinking-content-y>C\n");
+  assert.deepEqual(contents(rows), ["Q", "A", "hide", "B", "hide", "C"]);
+  assert.equal(new Set(rows.map(r => r.uuid)).size, rows.length);
 });
 test("authentication errors are readable and keep continuation", () => {
   assert.deepEqual(contents(parse("#### Q\n\n> litellm.AuthenticationError: Invalid key  \n> Check your API credentials.  \n> Tokens: 0 sent  \n")), ["Q", "litellm.AuthenticationError: Invalid key\nCheck your API credentials."]);
@@ -210,10 +218,29 @@ test("split multiline user send stays one row", () => {
 test("split fenced code protects role markers", () => {
   assert.deepEqual(contents(tail(["#### Q\n\n```md\n", "#### code\n> Tokens: code\n", "```\nDone\n"]).rows), ["Q", "```md\n#### code\n> Tokens: code\n```\nDone"]);
 });
-test("split thinking blocks never emit reasoning", () => {
+test("split thinking blocks update one stable reasoning row", () => {
   const result = tail(["#### Q\n\n<thinking-content-x>\n", "hidden\n", "</thinking-content-x>\nAnswer\n"]);
-  assert.deepEqual(contents(result.rows), ["Q", "Answer"]);
-  assert.equal(result.deltas[1].length, 0);
+  assert.deepEqual(contents(result.rows), ["Q", "hidden", "Answer"]);
+  assert.equal(result.deltas[1][0].blocks[0].kind, "thinking");
+  assert.equal(result.deltas[2].length, 1);
+});
+
+test("growing Unicode thinking retains its byte identity and paragraphs", () => {
+  const result = tail(["#### Q\r\n\r\n<thinking-content-x>\r\n", "Plan 😀\r\n", "\r\nRead files\r\n", "</thinking-content-x>\r\nDone\r\n"]);
+  assert.deepEqual(contents(result.rows), ["Q", "Plan 😀\n\nRead files", "Done"]);
+  assert.equal(result.deltas[1][0].uuid, result.deltas[2][0].uuid);
+  assert.equal(result.rows[1].uuid, `aider:thinking:${Buffer.byteLength("#### Q\r\n\r\n")}`);
+});
+
+test("empty thinking tags do not create rows", () => {
+  assert.deepEqual(contents(parse("#### Q\n\n<thinking-content-x></thinking-content-x>\nAnswer\n")), ["Q", "Answer"]);
+});
+
+test("automatic file-add continuations separate answers without blank floods", () => {
+  const source = "#### Review\n\nFirst answer\n> Tokens: 10\n<thinking-content-next>\n" + "Planning\n".repeat(100) + "</thinking-content-next>\nSecond answer\n";
+  const rows = parse(source);
+  assert.deepEqual(contents(rows).filter((_, i) => rows[i].blocks[0].kind === "text"), ["Review", "First answer", "Second answer"]);
+  assert.equal(rows[2].blocks[0].kind, "thinking");
 });
 test("split error continuation updates a single error row", () => {
   assert.deepEqual(contents(tail(["#### Q\n\n", "> litellm.AuthenticationError: bad key\n", "> Check the key.\n", "> Tokens: 0\n"]).rows), ["Q", "litellm.AuthenticationError: bad key\nCheck the key."]);
