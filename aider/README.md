@@ -1,6 +1,10 @@
 # Aider
 
-Optional Aider CLI provider for Domios Chat UI, installed from the `codeterm-plugins` channel. Requires CodeTerm 1.12.4 or later and an `aider` executable on PATH (`pipx install aider-chat`).
+Optional Aider CLI provider for Domios Chat UI, installed from the `codeterm-plugins` channel. Requires CodeTerm 1.12.4 or later and an `aider` executable on PATH. The installer and updater prefer `uv tool install --force aider-chat==0.86.2`, with `pipx install --force aider-chat==0.86.2` as the alternative. They never upgrade past the supported version.
+
+By default, Domios launches Aider through the bundled Python adapter, pinned to exactly `aider-chat==0.86.2` with runtime symbol/signature checks. It resolves the interpreter from the selected PATH entry point, preserving its virtual environment. Supported launchers: POSIX Python shebangs, pip/distlib and uv shell trampolines (including uv relative paths); Windows uv embedded shebang/PE resources and pip/pipx distlib PE + shebang + ZIP. Unknown launchers or versions refuse launch with a diagnostic. Reinstall the pinned version, or explicitly enable **Plain Aider** (`plainMode: true`) to bypass the adapter. There is no automatic fallback.
+
+Aider remains tool-less in both modes: it cannot run Domios tools. Agent-spawned tool-less tabs are managed by Domios. Only adapter sessions support automatic replies to the sending tab. The adapter writes an `adapter_start` record, then one authoritative outcome after the outermost turn and all file-add reflections, including nested `/ask` and architect/editor coders. Completion records go to `<history>.domios-turns.jsonl`, separate from Chat history. History and sidecar ranges use UTF-8 bytes; the adapter refuses other history encodings. Errors, cancellation, and exhausted reflection limits produce a non-success outcome, never a partial answer relayed as success. Plain sessions report relay unavailable explicitly.
 
 Configure **Endpoints** in the plugin settings. Each endpoint has a name (shown as the model group), provider kind, optional API base URL, Domios API key secret name, and model IDs. Store the API key in Domios Secrets; settings contain only its name. Keep `configPath` for an optional Aider YAML file passed as `--config`.
 

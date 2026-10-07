@@ -5,6 +5,13 @@
     "description": "Configure model endpoints. Store only secret names here.",
     "fields": [
       {
+        "kind": "toggle",
+        "key": "plainMode",
+        "label": "Plain Aider (no automatic replies)",
+        "default": false,
+        "description": "Explicitly bypass the pinned Domios adapter. Chat still works; automatic replies to other tabs are unavailable."
+      },
+      {
         "kind": "text",
         "key": "configPath",
         "label": "Aider config file",

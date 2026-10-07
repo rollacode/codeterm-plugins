@@ -15,6 +15,7 @@ import {
 
 import { modelLaunchArgs } from "./modelTuning";
 import { hasAiderActivity } from "./activity";
+import { readRelayEvidence } from "./replyRelay";
 import type { Endpoint } from "./endpoints";
 import { configuredEndpoints, endpointModels, launchEndpoint, selectedModel, PROVIDER_ENV } from "./endpoints";
 
@@ -82,14 +83,14 @@ function withLaunchEnv(command: string, p: LaunchParams, endpoint: Endpoint): st
   const isPowerShell = platform === "windows";
   const exports: string[] = [];
   const nonce =
-    (typeof p.sessionId === "string" && p.sessionId) ||
     (typeof p.launchMarker === "string" && p.launchMarker) ||
+    (typeof p.sessionId === "string" && p.sessionId) ||
     null;
   if (nonce) {
     exports.push(
       isPowerShell
-        ? `$env:CODETERM_SESSION_BINDING_NONCE=${quote(nonce)};`
-        : `export CODETERM_SESSION_BINDING_NONCE=${quote(nonce)};`,
+        ? `$env:DOMIOS_AIDER_SESSION_ID=${quote(nonce)};`
+        : `export DOMIOS_AIDER_SESSION_ID=${quote(nonce)};`,
     );
   }
   const env = PROVIDER_ENV[endpoint.kind];
@@ -319,15 +320,21 @@ const plugin: PluginModule = {
         : value.replace(/(["\\$`])/g, "\\$1");
     const dirQuoted = escapeDir(historyDirPath);
     const chatHistoryPath = isPowerShell
-      ? `"${dirQuoted}/$($env:CODETERM_SESSION_BINDING_NONCE).md"`
-      : `"${dirQuoted}/\${CODETERM_SESSION_BINDING_NONCE}.md"`;
+      ? `"${dirQuoted}/$($env:DOMIOS_AIDER_SESSION_ID).md"`
+      : `"${dirQuoted}/\${DOMIOS_AIDER_SESSION_ID}.md"`;
     const inputHistoryPath = isPowerShell
-      ? `"${dirQuoted}/$($env:CODETERM_SESSION_BINDING_NONCE).input"`
-      : `"${dirQuoted}/\${CODETERM_SESSION_BINDING_NONCE}.input"`;
+      ? `"${dirQuoted}/$($env:DOMIOS_AIDER_SESSION_ID).input"`
+      : `"${dirQuoted}/\${DOMIOS_AIDER_SESSION_ID}.input"`;
     const settings = pluginSettings();
     const requestedModel = selectedModel(p);
     const selected = launchEndpoint(configuredEndpoints(settings), requestedModel);
-    const parts = ["aider", ...modelLaunchArgs(p.args || [], selected.entry).map(quote)];
+    let executable = "aider";
+    if (settings.plainMode !== true) {
+      const launcher = host.fs.expandHome(`~/.codeterm/plugins/aider/launch-adapter.${isPowerShell ? "ps1" : "sh"}`);
+      if (!launcher) throw new Error("Domios Aider adapter is missing. Reinstall the plugin or explicitly set plainMode=true.");
+      executable = isPowerShell ? `& ${quote(launcher)}` : `bash ${quote(launcher)}`;
+    }
+    const parts = [executable, ...modelLaunchArgs(p.args || [], selected.entry).map(quote)];
     if (p.skipPermissions) parts.push("--yes-always");
     if (!requestedModel) parts.push("--model", quote(selected.model));
     parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
@@ -479,6 +486,16 @@ const plugin: PluginModule = {
   sessionJsonlPath(cwd: string, sessionId: string): string | null {
     if (!cwd || !sessionId) return null;
     return historyFilePath(cwd, sessionId);
+  },
+
+  readReplyRelayTurn(cwd: string, sessionId: string, afterOffset: number) {
+    if (!cwd || !/^[A-Za-z0-9_-]+$/.test(sessionId)) return null;
+    const path = historyFilePath(cwd, sessionId);
+    try {
+      return readRelayEvidence(host.fs.readFile(path), host.fs.readFile(`${path}.domios-turns.jsonl`), sessionId, afterOffset);
+    } catch (_) {
+      return { unavailable: true as const, reason: "Domios Aider completion evidence is unreadable." };
+    }
   },
 
   parseSessionDelta(chunk: string, context?: SessionDeltaContext): unknown {

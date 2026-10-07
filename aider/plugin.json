@@ -10,6 +10,8 @@
   "settingsSchema": "settings.schema.json",
   "capabilities": {
     "agentProvider": true,
+    "toolLess": true,
+    "replyRelay": true,
     "chatPreprocessor": {
       "match": "text"
     }
@@ -48,14 +50,14 @@
     "liveDiscoveryRequired": true
   },
   "installer": {
-    "macos": "pipx install aider-chat",
-    "linux": "pipx install aider-chat",
-    "windows": "pipx install aider-chat"
+    "macos": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat==0.86.2; else pipx install --force aider-chat==0.86.2; fi",
+    "linux": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat==0.86.2; else pipx install --force aider-chat==0.86.2; fi",
+    "windows": "if (Get-Command uv -ErrorAction SilentlyContinue) { uv tool install --force aider-chat==0.86.2 } else { pipx install --force aider-chat==0.86.2 }"
   },
   "updater": {
-    "macos": "pipx upgrade aider-chat",
-    "linux": "pipx upgrade aider-chat",
-    "windows": "pipx upgrade aider-chat"
+    "macos": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat==0.86.2; else pipx install --force aider-chat==0.86.2; fi",
+    "linux": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat==0.86.2; else pipx install --force aider-chat==0.86.2; fi",
+    "windows": "if (Get-Command uv -ErrorAction SilentlyContinue) { uv tool install --force aider-chat==0.86.2 } else { pipx install --force aider-chat==0.86.2 }"
   },
   "commands": {
     "compact": "/clear",

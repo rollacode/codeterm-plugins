@@ -8,7 +8,7 @@ function load(over = {}) {
     platform: () => "linux",
     settingsJson: () => "{}",
     shell: { quoteFor: (v) => "'" + v.replace(/'/g, "'\\''") + "'" },
-    fs: { readDir: () => [], readFileHead: () => null, expandHome: () => null },
+    fs: { readDir: () => [], readFileHead: () => null, readFile: () => null, expandHome: p => p.replace("~/.codeterm", "/installed") },
     ...over,
   };
   const context = { host, module: { exports: {} }, exports: {} };
@@ -16,7 +16,9 @@ function load(over = {}) {
   return context.module.exports.default;
 }
 const mimoEndpoint = {name: "MiMo", kind: "openai", apiBase: "https://example.test/v1", apiKeySecret: "mimo-key", models: ["openai/mimo-v2.6-pro"]};
-const configured = (endpoints, over = {}) => load({settingsJson: () => JSON.stringify({endpoints}), ...over});
+// Existing launch/parser cases exercise the explicit plain path; adapter cases
+// below supply their own settings to exercise the default and failure modes.
+const configured = (endpoints, over = {}) => load({settingsJson: () => JSON.stringify({endpoints, plainMode: true}), ...over});
 const plain = (v) => JSON.parse(JSON.stringify(v));
 const parse = (text) => plain(load().parseSessionDelta(text).messages);
 const text = (row) => row.blocks[0].data.text;
@@ -47,7 +49,7 @@ test("marketplace metadata, icon and model catalogue", () => {
 });
 test("settings schema exposes config and endpoint list", () => {
   const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json")));
-  assert.deepEqual(schema[0].fields.map(f => f.key).sort(), ["configPath", "endpoints"]);
+  assert.deepEqual(schema[0].fields.map(f => f.key).sort(), ["configPath", "endpoints", "plainMode"]);
 });
 test("full access maps to --yes-always and stays off otherwise", () => {
   const p = configured([mimoEndpoint]);
@@ -60,7 +62,8 @@ test("runtime settings and nonce are applied in the launch shell", () => {
   assert.match(command, /OPENAI_API_BASE='https:\/\/example.test\/v1'/);
   assert.match(command, /codeterm mem secret get --name 'mimo-key'/);
   assert.match(command, /--config '\/work\/aider.yml'/);
-  assert.match(command, /CODETERM_SESSION_BINDING_NONCE='nonce'/);
+  assert.match(command, /DOMIOS_AIDER_SESSION_ID='nonce'/);
+  assert.doesNotMatch(command, /(?:export |\$env:)CODETERM_SESSION_BINDING_NONCE=/);
   assert.match(command, /--chat-history-file/);
   assert.match(command, /--input-history-file/);
   assert.match(command, /--no-pretty/);
@@ -68,7 +71,7 @@ test("runtime settings and nonce are applied in the launch shell", () => {
 test("Windows launch fetches the key in PowerShell", () => {
   const command = configured([mimoEndpoint], {platform: () => "windows"}).buildLaunchCommand({cwd: "D:/repo"});
   assert.match(command, /\$env:OPENAI_API_KEY=\(codeterm mem secret get/);
-  assert.match(command, /\$\(\$env:CODETERM_SESSION_BINDING_NONCE\)\.md/);
+  assert.match(command, /\$\(\$env:DOMIOS_AIDER_SESSION_ID\)\.md/);
 });
 
 test("launch loads project instructions as read-only context", () => {
@@ -710,6 +713,161 @@ test("model object textarea preserves tuning and display names", () => {
   const p = tuned(JSON.stringify([{...effortModel, displayName: "Effort test"}]));
   assert.equal(p.discoverModels()[0].displayName, "Effort test");
   assert.match(p.buildLaunchCommand({}), /'--map-tokens' '8192'/);
+});
+
+test("adapter is default, plain mode is explicit, marker preserves core nonce", () => {
+  const settings = {endpoints: [mimoEndpoint]};
+  const p = load({settingsJson: () => JSON.stringify(settings)});
+  const command = p.buildLaunchCommand({launchMarker: "ct-launch-own", sessionId: "different-binding"});
+  assert.match(command, /bash '\/installed\/plugins\/aider\/launch-adapter.sh'/);
+  assert.match(command, /DOMIOS_AIDER_SESSION_ID='ct-launch-own'/);
+  assert.doesNotMatch(command, /(?:export |\$env:)CODETERM_SESSION_BINDING_NONCE=/);
+  assert.doesNotMatch(configured([mimoEndpoint]).buildLaunchCommand({launchMarker: "ct-launch-own"}), /launch-adapter/);
+});
+
+test("Windows adapter uses an argument array and runtime secret, never its value", () => {
+  const p = load({platform: () => "windows", settingsJson: () => JSON.stringify({endpoints: [mimoEndpoint]})});
+  const command = p.buildLaunchCommand({launchMarker: "ct-launch-own"});
+  assert.match(command, /& '\/installed\/plugins\/aider\/launch-adapter.ps1'/);
+  assert.match(command, /codeterm mem secret get --name 'mimo-key'/);
+  assert.doesNotMatch(command, /CODETERM_SESSION_BINDING_NONCE|plainMode/);
+});
+
+test("missing adapter path refuses instead of silently launching plain Aider", () => {
+  const p = load({settingsJson: () => JSON.stringify({endpoints: [mimoEndpoint]}), fs: {expandHome: () => null}});
+  assert.throws(() => p.buildLaunchCommand({}), /Reinstall.*plainMode=true/);
+});
+
+test("manifest declares tool-less relay and installer/updater preserve adapter pin", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json")));
+  assert.equal(manifest.capabilities.toolLess, true);
+  assert.equal(manifest.capabilities.replyRelay, true);
+  for (const platform of ["macos", "linux", "windows"]) {
+    assert.equal(manifest.installer[platform], manifest.updater[platform]);
+    assert.match(manifest.installer[platform], /uv tool install --force aider-chat==0\.86\.2/);
+    assert.match(manifest.installer[platform], /pipx install --force aider-chat==0\.86\.2/);
+    assert.doesNotMatch(manifest.updater[platform], /pipx upgrade|uv tool upgrade/);
+  }
+});
+
+const relaySession = "ct-launch-relay";
+const byteLength = value => Buffer.byteLength(value, "utf8");
+function relayFixture(user = "Inspect é", answer = "Final answer", echoes = "") {
+  const prefix = "# aider chat started at fixture\r\n";
+  const beforeAnswer = prefix + `#### ${user}  \r\n\r\n` + echoes;
+  const response = `\r\n${answer}\r\n\r\n`;
+  const history = beforeAnswer + response + "> Tokens: 5\r\n";
+  const start = {version: 1, kind: "adapter_start", sessionId: relaySession, launchMarker: relaySession,
+    processGeneration: "boot1", aiderVersion: "0.86.2"};
+  const end = {...start, kind: "turn_complete", turnSequence: 1, userRecordStart: byteLength(prefix),
+    responseRecordStart: byteLength(beforeAnswer), responseRecordEnd: byteLength(beforeAnswer + response),
+    historyBytes: byteLength(history), outcome: "answered", complete: true};
+  delete end.aiderVersion;
+  return {history, start, end};
+}
+const jsonLines = records => records.map(r => JSON.stringify(r)).join("\n") + "\n";
+function relayRead(f, records = [f.start, f.end], afterOffset = 0, sid = relaySession) {
+  const sidecar = records === null ? null : typeof records === "string" ? records : jsonLines(records);
+  const p = load({fs: {readFile: path => {
+    assert.ok(path === `/repo/.aider/history/${sid}.md` || path === `/repo/.aider/history/${sid}.md.domios-turns.jsonl`);
+    return path.endsWith(".jsonl") ? sidecar : f.history;
+  }}});
+  return plain(p.readReplyRelayTurn("/repo", sid, afterOffset));
+}
+
+test("relay single answer has stable own-session identities and UTF-8 user offset", () => {
+  const f = relayFixture();
+  const result = relayRead(f, undefined, f.end.userRecordStart);
+  assert.equal(result.complete, true);
+  assert.equal(result.userText, "Inspect é");
+  assert.equal(result.answer, "Final answer");
+  assert.equal(result.userRecordStart, f.end.userRecordStart);
+  assert.equal(result.userTurnId, `aider:${relaySession}:user:${f.end.userRecordStart}`);
+  assert.equal(result.assistantTurnId, `aider:${relaySession}:boot1:answer:1:${f.end.responseRecordStart}`);
+  assert.deepEqual(relayRead(f), result);
+});
+
+test("relay is pending with an answer history but no authoritative completion", () => {
+  const f = relayFixture();
+  assert.equal(relayRead(f, [f.start]), null);
+  assert.equal(relayRead(f, jsonLines([f.start]) + JSON.stringify(f.end)), null);
+});
+
+test("plain session is unavailable and a start-only session is pending", () => {
+  const f = relayFixture();
+  assert.equal(relayRead(f, null).unavailable, true);
+  assert.match(relayRead(f, null).reason, /plain mode|adapter/);
+  assert.equal(relayRead(f, [] ).unavailable, true);
+  assert.equal(relayRead(f, [f.start]), null);
+});
+
+test("relay final reflection answer excludes earlier answers and thinking", () => {
+  const f = relayFixture("Review", "<thinking-content-x>hidden</thinking-content-x>\r\nGrounded final\r\n```ts\r\nconst x = 1;\r\n```",
+    "First answer\r\n> Tokens: 2\r\n> Add file to the chat?\r\nSecond answer\r\n");
+  assert.equal(relayRead(f).answer, "Grounded final\n```ts\nconst x = 1;\n```");
+});
+
+test("relay /ask keeps original payload identity despite nested input echo", () => {
+  const f = relayFixture("/ask inspect", "Final", "#### inspect  \r\n\r\n");
+  assert.equal(relayRead(f).userText, "/ask inspect");
+  assert.equal(relayRead(f).answer, "Final");
+});
+
+for (const outcome of ["error", "cancelled", "reflection_limit"]) {
+  test(`relay ${outcome} returns matching original user without partial answer`, () => {
+    const f = relayFixture("Question", "partial");
+    f.end.complete = false;
+    f.end.outcome = outcome;
+    const result = relayRead(f);
+    assert.deepEqual(Object.keys(result).sort(), ["complete", "outcome", "userRecordStart", "userText", "userTurnId"]);
+    assert.equal(result.complete, false);
+    assert.equal(result.outcome, outcome);
+    assert.equal(result.userText, "Question");
+  });
+}
+
+test("relay skips completed users before the captured delivery boundary", () => {
+  const f = relayFixture();
+  assert.equal(relayRead(f, undefined, f.end.userRecordStart + 1), null);
+});
+
+test("relay rejects wrong session, launch marker, generation and malformed records", () => {
+  for (const change of [{sessionId: "other"}, {launchMarker: "other"}, {processGeneration: "other"}, {version: 2},
+    {kind: "unknown"}, {complete: true, outcome: "error"}, {complete: false, outcome: "guessed"}]) {
+    const f = relayFixture();
+    assert.equal(relayRead(f, [f.start, {...f.end, ...change}]), null, JSON.stringify(change));
+  }
+  const f = relayFixture();
+  assert.equal(relayRead(f, jsonLines([f.start]) + "{broken}\n"), null);
+});
+
+test("relay ignores truncated final record and rejects an unsupported adapter version", () => {
+  const f = relayFixture();
+  assert.deepEqual(relayRead(f, jsonLines([f.start, f.end]) + '{"kind":'), relayRead(f));
+  assert.equal(relayRead(f, [{...f.start, aiderVersion: "0.87.0"}]).unavailable, true);
+});
+
+test("relay bounds cannot exceed history or split a Unicode character", () => {
+  for (const change of [{responseRecordEnd: 999999}, {historyBytes: 999999}, {userRecordStart: -1},
+    {responseRecordStart: 1}, {turnSequence: 0}, {userRecordStart: 1.5}]) {
+    const f = relayFixture();
+    assert.equal(relayRead(f, [f.start, {...f.end, ...change}]), null);
+  }
+  const f = relayFixture("é", "😀 final");
+  f.end.responseRecordStart += 3; // newline pair + middle of the emoji
+  assert.equal(relayRead(f), null);
+});
+
+test("relay latest process generation cannot reuse old completion", () => {
+  const f = relayFixture();
+  assert.equal(relayRead(f, [f.start, f.end, {...f.start, processGeneration: "boot2"}]), null);
+  assert.equal(relayRead(f, [f.start, f.end, {...f.start, processGeneration: "boot2"}, f.end]), null);
+});
+
+test("relay rejects path traversal and reports unreadable evidence", () => {
+  assert.equal(load().readReplyRelayTurn("/repo", "../other", 0), null);
+  const p = load({fs: {readFile: () => {throw Error("denied");}}});
+  assert.equal(p.readReplyRelayTurn("/repo", relaySession, 0).unavailable, true);
 });
 
 let failed = 0;
