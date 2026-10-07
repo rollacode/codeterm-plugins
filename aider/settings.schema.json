@@ -44,9 +44,10 @@
             {
               "kind": "textarea",
               "key": "models",
-              "label": "Model IDs",
-              "description": "One Aider/LiteLLM model ID per line, or a JSON array of strings.",
-              "default": ""
+              "label": "Models and tuning",
+              "description": "One model ID per line, or a JSON array of strings/objects. Objects: id, displayName (optional), mapTokens (nonnegative integer; 8192 suggested for large context; omit for Aider default), reasoningMode (effort or budget), reasoningEfforts ([{id, displayName, thinkingTokens for budget}]), defaultReasoningEffort (optional declared id). No reasoning flag is sent without a chosen declared level.",
+              "default": "",
+              "placeholder": "[{\"id\":\"openai/mimo-v2.6-pro\",\"mapTokens\":8192}]"
             }
           ]
         }

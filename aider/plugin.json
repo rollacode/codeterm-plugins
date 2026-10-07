@@ -69,6 +69,10 @@
     "modelLaunchArgsFormat": [
       "--model",
       "{model}"
+    ],
+    "reasoningEffortLaunchArgsFormat": [
+      "--reasoning-effort",
+      "{effort}"
     ]
   },
   "permissions": {

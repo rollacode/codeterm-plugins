@@ -19,7 +19,7 @@ For example, the normalized settings are:
       "kind": "openai",
       "apiBase": "https://api.xiaomimimo.com/v1",
       "apiKeySecret": "mimo-api-key",
-      "models": ["openai/mimo-v2.6-pro"]
+      "models": [{"id": "openai/mimo-v2.6-pro", "mapTokens": 8192}]
     },
     {
       "name": "OpenAI",
@@ -36,6 +36,38 @@ For example, the normalized settings are:
   ]
 }
 ```
+
+Model entries can be plain IDs or objects with per-model tuning. The MiMo example sets `mapTokens` to 8192, a suggested starting value for a large-context model. Any nonnegative integer is accepted; `0` disables the repo map. Omitting `mapTokens` leaves Aider's own default in effect. No model-name heuristic applies a map size automatically.
+
+Declare reasoning only when the model and endpoint accept the corresponding [Aider reasoning flags](https://aider.chat/docs/config/reasoning.html). The MiMo example leaves reasoning undeclared; it does not assume that every OpenAI-compatible endpoint implements effort or token-budget controls. An effort-style declaration looks like:
+
+```json
+{
+  "id": "openai/your-effort-model",
+  "mapTokens": 8192,
+  "reasoningMode": "effort",
+  "reasoningEfforts": [
+    {"id": "low", "displayName": "Low"},
+    {"id": "high", "displayName": "High"}
+  ],
+  "defaultReasoningEffort": "low"
+}
+```
+
+For a budget-style model, bind the same selector labels to explicit thinking budgets:
+
+```json
+{
+  "id": "anthropic/your-budget-model",
+  "reasoningMode": "budget",
+  "reasoningEfforts": [
+    {"id": "low", "displayName": "Low", "thinkingTokens": 4096},
+    {"id": "high", "displayName": "High", "thinkingTokens": 16384}
+  ]
+}
+```
+
+Replace these example IDs with the exact model IDs your endpoint supports. The per-model catalogue supplies Domios's normal reasoning selector. Core passes the chosen ID through the manifest's launch argument format; the plugin consumes it and emits `--reasoning-effort <id>` for `effort` models or `--thinking-tokens <budget>` for `budget` models. `thinkingTokens` must be a nonnegative integer (`0` can declare an off choice). `defaultReasoningEffort` optionally sets the selector default and must name a declared level. Labels and optional level `description` fields are shown in the picker. A model without a reasoning declaration has no selector. No chosen level means no reasoning flag; an undeclared level or budget is refused instead of sent to Aider. A map size or reasoning declaration on one model never applies to another selected model.
 
 Use the IDs enabled for your API account. For MiMo, add the first endpoint and select its model. For direct OpenAI or Anthropic, add the corresponding endpoint and leave API base empty to use the provider default. To migrate from the former `apiBase` / `apiKeySecret` settings, copy those values into an endpoint, add its model IDs, and select its model. Legacy top-level API settings no longer drive launch.
 

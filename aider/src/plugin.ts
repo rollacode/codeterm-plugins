@@ -13,6 +13,7 @@ import {
   utf8Length,
 } from "./history";
 
+import { modelLaunchArgs } from "./modelTuning";
 import { hasAiderActivity } from "./activity";
 import type { Endpoint } from "./endpoints";
 import { configuredEndpoints, endpointModels, launchEndpoint, selectedModel, PROVIDER_ENV } from "./endpoints";
@@ -323,16 +324,11 @@ const plugin: PluginModule = {
     const inputHistoryPath = isPowerShell
       ? `"${dirQuoted}/$($env:CODETERM_SESSION_BINDING_NONCE).input"`
       : `"${dirQuoted}/\${CODETERM_SESSION_BINDING_NONCE}.input"`;
-    const parts: string[] = ["aider"];
-    if (p.args && p.args.length > 0) {
-      for (let i = 0; i < p.args.length; i++) {
-        parts.push(quote(String(p.args[i])));
-      }
-    }
-    if (p.skipPermissions) parts.push("--yes-always");
     const settings = pluginSettings();
     const requestedModel = selectedModel(p);
     const selected = launchEndpoint(configuredEndpoints(settings), requestedModel);
+    const parts = ["aider", ...modelLaunchArgs(p.args || [], selected.entry).map(quote)];
+    if (p.skipPermissions) parts.push("--yes-always");
     if (!requestedModel) parts.push("--model", quote(selected.model));
     parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
     const configPath =

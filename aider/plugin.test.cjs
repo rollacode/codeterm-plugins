@@ -327,8 +327,8 @@ test("unconfigured catalogue is empty and launch gives an actionable error", () 
 test("catalogue uses model IDs and endpoint names as groups", () => {
   const p = configured([mimoEndpoint, {name: "Anthropic direct", kind: "anthropic", apiKeySecret: "claude-key", models: ["anthropic/claude-sonnet-4-6"]}]);
   assert.deepEqual(plain(p.discoverModels()), [
-    {id: "openai/mimo-v2.6-pro", displayName: "openai/mimo-v2.6-pro", group: "MiMo"},
-    {id: "anthropic/claude-sonnet-4-6", displayName: "anthropic/claude-sonnet-4-6", group: "Anthropic direct"},
+    {id: "openai/mimo-v2.6-pro", displayName: "openai/mimo-v2.6-pro", group: "MiMo", reasoningEfforts: []},
+    {id: "anthropic/claude-sonnet-4-6", displayName: "anthropic/claude-sonnet-4-6", group: "Anthropic direct", reasoningEfforts: []},
   ]);
 });
 test("model textarea accepts lines and JSON string arrays", () => {
@@ -468,6 +468,100 @@ test("typed input after an older completed turn is not streaming", () => {
 });
 test("old output before a settled composer is not current turn evidence", () => {
   assert.equal(classify("> Earlier question\nOld answer\n>\nOther output"), null);
+});
+
+const effortModel = {id: "openai/effort-test", mapTokens: 8192, reasoningMode: "effort", reasoningEfforts: [{id: "low", displayName: "Low"}, {id: "high", displayName: "High"}], defaultReasoningEffort: "low"};
+const budgetModel = {id: "openai/budget-test", reasoningMode: "budget", reasoningEfforts: [{id: "off", displayName: "Off", thinkingTokens: 0}, {id: "high", displayName: "High", thinkingTokens: 16384}]};
+const tuned = (models) => configured([{...mimoEndpoint, models}]);
+test("per-model tuning catalogue exposes only declared reasoning choices", () => {
+  const models = plain(tuned([effortModel, budgetModel, "openai/plain"]).discoverModels());
+  assert.deepEqual(models[0].reasoningEfforts, [{id: "low", displayName: "Low"}, {id: "high", displayName: "High"}]);
+  assert.equal(models[0].defaultReasoningEffort, "low");
+  assert.deepEqual(models[1].reasoningEfforts, [{id: "off", displayName: "Off"}, {id: "high", displayName: "High"}]);
+  assert.deepEqual(models[2].reasoningEfforts, []);
+});
+test("selected model alone supplies map tokens", () => {
+  const p = tuned([effortModel, "openai/plain"]);
+  assert.match(p.buildLaunchCommand({args: ["--model", effortModel.id]}), /'--map-tokens' '8192'/);
+  assert.doesNotMatch(p.buildLaunchCommand({args: ["--model", "openai/plain"]}), /--map-tokens/);
+});
+test("unset map tuning keeps Aider default even for MiMo", () => {
+  assert.doesNotMatch(configured([mimoEndpoint]).buildLaunchCommand({}), /--map-tokens/);
+});
+test("zero map tokens explicitly disables the repo map", () => {
+  assert.match(tuned([{id: "openai/test", mapTokens: 0}]).buildLaunchCommand({}), /'--map-tokens' '0'/);
+});
+test("invalid map token values never become launch flags", () => {
+  for (const mapTokens of [-1, 3.5, "8192", null, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.doesNotMatch(tuned([{id: "openai/test", mapTokens}]).buildLaunchCommand({}), /--map-tokens/);
+  }
+});
+test("effort model receives its chosen effort and no budget flag", () => {
+  const command = tuned([effortModel]).buildLaunchCommand({args: ["--model", effortModel.id, "--reasoning-effort", "high"]});
+  assert.match(command, /'--reasoning-effort' 'high'/);
+  assert.doesNotMatch(command, /--thinking-tokens/);
+});
+test("budget model translates a chosen level to thinking tokens", () => {
+  const command = tuned([budgetModel]).buildLaunchCommand({args: ["--model", budgetModel.id, "--reasoning-effort", "high"]});
+  assert.match(command, /'--thinking-tokens' '16384'/);
+  assert.doesNotMatch(command, /--reasoning-effort/);
+});
+test("zero thinking budget remains a declared choice", () => {
+  assert.match(tuned([budgetModel]).buildLaunchCommand({args: ["--reasoning-effort", "off"]}), /'--thinking-tokens' '0'/);
+});
+test("declared choices and a catalogue default send no flag when unchosen", () => {
+  assert.doesNotMatch(tuned([effortModel]).buildLaunchCommand({}), /--reasoning-effort|--thinking-tokens/);
+  assert.doesNotMatch(tuned([budgetModel]).buildLaunchCommand({}), /--reasoning-effort|--thinking-tokens/);
+});
+test("plain model rejects another model's reasoning choice", () => {
+  const p = tuned([effortModel, "openai/plain"]);
+  assert.throws(() => p.buildLaunchCommand({args: ["--model", "openai/plain", "--reasoning-effort", "high"]}), /does not declare reasoning level/);
+});
+test("unsupported levels fail instead of silently choosing a different level", () => {
+  assert.throws(() => tuned([effortModel]).buildLaunchCommand({args: ["--reasoning-effort", "max"]}), /does not declare reasoning level/);
+});
+test("core reasoning launch format reaches the per-model translator", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json")));
+  const format = manifest.commands.reasoningEffortLaunchArgsFormat;
+  assert.deepEqual(format, ["--reasoning-effort", "{effort}"]);
+  const args = ["--model", budgetModel.id, ...format.map(s => s.replace("{effort}", "high"))];
+  assert.match(tuned([budgetModel]).buildLaunchCommand({args}), /'--thinking-tokens' '16384'/);
+});
+test("reasoning equals syntax is consumed and normalized", () => {
+  assert.match(tuned([budgetModel]).buildLaunchCommand({args: ["--reasoning-effort=high"]}), /'--thinking-tokens' '16384'/);
+});
+test("malformed reasoning choices are rejected", () => {
+  for (const args of [["--reasoning-effort"], ["--reasoning-effort="], ["--thinking-tokens"], ["--reasoning-effort", "--model"]]) {
+    assert.throws(() => tuned([effortModel]).buildLaunchCommand({args}), /requires a declared model option/);
+  }
+});
+test("direct thinking args are gated by declared budgets", () => {
+  assert.match(tuned([budgetModel]).buildLaunchCommand({args: ["--thinking-tokens=16384"]}), /'--thinking-tokens' '16384'/);
+  assert.throws(() => tuned([budgetModel]).buildLaunchCommand({args: ["--thinking-tokens", "32768"]}), /does not declare thinking budget/);
+  assert.throws(() => tuned([effortModel]).buildLaunchCommand({args: ["--thinking-tokens", "16384"]}), /does not declare thinking budget/);
+});
+test("mixed effort and budget flags are rejected", () => {
+  assert.throws(() => tuned([budgetModel]).buildLaunchCommand({args: ["--reasoning-effort", "high", "--thinking-tokens", "16384"]}), /not both/);
+});
+test("raw map flags cannot override a selected model declaration", () => {
+  assert.throws(() => tuned([effortModel]).buildLaunchCommand({args: ["--map-tokens", "3"]}), /Configure mapTokens/);
+});
+test("invalid reasoning declarations do not advertise a selector", () => {
+  for (const model of [
+    {id: "openai/test", reasoningEfforts: [{id: "high"}]},
+    {id: "openai/test", reasoningMode: "invalid", reasoningEfforts: [{id: "high"}]},
+    {id: "openai/test", reasoningMode: "budget", reasoningEfforts: [{id: "high", thinkingTokens: -1}, {id: "medium"}, {id: "low", thinkingTokens: "4096"}]},
+  ]) assert.deepEqual(plain(tuned([model]).discoverModels())[0].reasoningEfforts, []);
+});
+test("invalid default is omitted and duplicate levels are deduplicated", () => {
+  const model = plain(tuned([{...effortModel, defaultReasoningEffort: "max", reasoningEfforts: [{id: "high"}, {id: "high"}, null]}]).discoverModels())[0];
+  assert.equal(model.defaultReasoningEffort, undefined);
+  assert.deepEqual(model.reasoningEfforts, [{id: "high", displayName: "high"}]);
+});
+test("model object textarea preserves tuning and display names", () => {
+  const p = tuned(JSON.stringify([{...effortModel, displayName: "Effort test"}]));
+  assert.equal(p.discoverModels()[0].displayName, "Effort test");
+  assert.match(p.buildLaunchCommand({}), /'--map-tokens' '8192'/);
 });
 
 let failed = 0;
