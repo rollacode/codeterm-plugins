@@ -54,10 +54,15 @@ function parseAiderHistoryDelta(prefix, fromOffset = 0) {
   let fence = null;
   let thinkingTag = null;
   let errorContinuation = false;
+  let modeCommandEcho = null;
   function flush() {
     if (!state.current) return;
     const text = state.current.lines.join("\n").trim();
-    if (text && text !== "<blank>" && state.current.end > fromOffset) {
+    const echo = state.current.role === "user" && modeCommandEcho !== null && text === modeCommandEcho;
+    if (text && text !== "<blank>") {
+      modeCommandEcho = state.current.role === "user" && !echo ? /^\/(?:ask|code|architect|context)\s+([\s\S]+)$/.exec(text)?.[1] || null : null;
+    }
+    if (!echo && text && text !== "<blank>" && state.current.end > fromOffset) {
       messages.push({
         role: state.current.role,
         blocks: [{ kind: state.current.kind, data: { text } }],
