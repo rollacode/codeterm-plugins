@@ -12,6 +12,7 @@
     "agentProvider": true,
     "toolLess": true,
     "replyRelay": true,
+    "contextAttach": { "editable": true, "readOnly": true },
     "chatPreprocessor": {
       "match": "text"
     }

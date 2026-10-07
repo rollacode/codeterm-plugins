@@ -293,6 +293,26 @@ function readRelayEvidence(history, sidecar, sessionId, afterOffset) {
   return null;
 }
 
+// aider/src/contextAttachments.ts
+function contextAttachments(value) {
+  if (value === void 0 || value === null) return { edit: [], read: [] };
+  const fail = () => {
+    throw new Error("Invalid Aider contextFiles. Supply absolute file paths in edit/read arrays with no overlap.");
+  };
+  if (typeof value !== "object" || Array.isArray(value)) return fail();
+  const files = value;
+  if (Object.keys(files).some((key) => key !== "edit" && key !== "read")) return fail();
+  const list = (items) => {
+    if (!Array.isArray(items)) return fail();
+    if (items.some((path) => typeof path !== "string" || !path.trim() || /[\0\r\n]/.test(path) || !/^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(path))) return fail();
+    return [...new Set(items)];
+  };
+  const edit = list(files.edit);
+  const read = list(files.read);
+  if (edit.some((path) => read.includes(path))) return fail();
+  return { edit, read };
+}
+
 // aider/src/endpoints.ts
 var PROVIDER_ENV = {
   openai: { key: "OPENAI_API_KEY", base: "OPENAI_API_BASE" },
@@ -647,6 +667,17 @@ var plugin = {
       if (!startupDir) throw new Error("Domios Aider adapter is missing. Reinstall the plugin or explicitly set plainMode=true.");
     }
     const parts = ["aider", ...modelLaunchArgs(p.args || [], selected.entry).map(quote)];
+    const context = contextAttachments(p.contextFiles);
+    for (const path of context.read) {
+      let readable = false;
+      try {
+        readable = host.fs.readFileHead(path, 1) !== null;
+      } catch (_) {
+      }
+      if (!readable) throw new Error(`Aider read-only context is unreadable: ${path}. Restore the file or update the task's read files.`);
+    }
+    for (const path of context.edit) parts.push("--file", quote(path));
+    for (const path of context.read) parts.push("--read", quote(path));
     if (p.toolLessInstructionsPath !== void 0 && p.toolLessInstructionsPath !== null) {
       const path = p.toolLessInstructionsPath;
       let readable = false;

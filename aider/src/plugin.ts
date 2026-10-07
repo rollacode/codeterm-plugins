@@ -16,6 +16,7 @@ import {
 import { modelLaunchArgs } from "./modelTuning";
 import { hasAiderActivity } from "./activity";
 import { readRelayEvidence } from "./replyRelay";
+import { contextAttachments } from "./contextAttachments";
 import type { Endpoint } from "./endpoints";
 import { configuredEndpoints, endpointModels, launchEndpoint, selectedModel, PROVIDER_ENV } from "./endpoints";
 
@@ -334,6 +335,14 @@ const plugin: PluginModule = {
     // Preserve aider's normal entry point in the PTY process tree. Python's
     // startup hook installs the adapter before aider.main runs, in its own venv.
     const parts = ["aider", ...modelLaunchArgs(p.args || [], selected.entry).map(quote)];
+    const context = contextAttachments(p.contextFiles);
+    for (const path of context.read) {
+      let readable = false;
+      try { readable = host.fs.readFileHead(path, 1) !== null; } catch (_) { /* refuse below */ }
+      if (!readable) throw new Error(`Aider read-only context is unreadable: ${path}. Restore the file or update the task's read files.`);
+    }
+    for (const path of context.edit) parts.push("--file", quote(path));
+    for (const path of context.read) parts.push("--read", quote(path));
     // Core owns the shared tool-less rules. A supplied file is mandatory;
     // unlike optional project/primer context, it must never be silently lost.
     if (p.toolLessInstructionsPath !== undefined && p.toolLessInstructionsPath !== null) {

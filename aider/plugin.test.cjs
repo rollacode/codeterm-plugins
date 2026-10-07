@@ -224,6 +224,74 @@ test("empty readable core file loads and resume context preserves its path", () 
   assert.ok(command.includes("--read '/core/rules.md'"));
   assert.doesNotThrow(() => p.buildLaunchCommand({cwd: "/repo"}));
 });
+
+test("context capability maps files and skills separately from the interactive brief", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json")));
+  assert.deepEqual(manifest.capabilities.contextAttach, {editable: true, readOnly: true});
+  const contextFiles = {edit: ["/repo/new file.ts", "D:/repo/caller's.ts"],
+    read: ["/host/plan-skill.md", "\\\\server\\share\\read.md"]};
+  for (const platform of ["linux", "windows"]) {
+    for (const plainMode of [true, false]) {
+      const reads = [];
+      const quotes = [];
+      const p = load({platform: () => platform,
+        settingsJson: () => JSON.stringify({endpoints: [mimoEndpoint], plainMode}),
+        shell: {quoteFor: path => {quotes.push(path); return JSON.stringify(path);}},
+        fs: {expandHome: path => path.replace("~/.codeterm", "/installed"),
+          readFileHead: path => {reads.push(path); return "";}}});
+      const task = '<domios from="tab">Whole brief\nSecond line</domios>';
+      const command = p.buildLaunchCommand({cwd: "/repo", task, contextFiles});
+      for (const path of contextFiles.edit) assert.ok(command.includes(`--file ${JSON.stringify(path)}`));
+      for (const path of contextFiles.read) assert.ok(command.includes(`--read ${JSON.stringify(path)}`));
+      assert.deepEqual(reads.slice(0, 2), contextFiles.read);
+      assert.ok(!reads.includes(contextFiles.edit[0])); // New editable files need not exist.
+      assert.ok(!quotes.includes(task));
+      assert.doesNotMatch(command, /--message(?:-file)?\b|\/add|\/read-only/);
+    }
+  }
+});
+
+test("absent or empty attachment lists preserve an interactive launch", () => {
+  const p = configured([mimoEndpoint]);
+  for (const contextFiles of [undefined, null, {edit: [], read: []}]) {
+    const command = p.buildLaunchCommand({contextFiles});
+    assert.doesNotMatch(command, /--file\b|--read\b|--message\b/);
+    assert.match(command, /--chat-history-file/);
+  }
+});
+
+test("unreadable requested context refuses instead of dropping a read file", () => {
+  for (const read of [() => null, () => {throw new Error("denied");}]) {
+    const p = configured([mimoEndpoint], {fs: {readFileHead: read}});
+    assert.throws(() => p.buildLaunchCommand({contextFiles: {edit: [], read: ["/missing/skill.md"]}}), /read-only context is unreadable/);
+  }
+});
+
+test("malformed or unsupported attachment kinds and unresolved paths refuse", () => {
+  const p = configured([mimoEndpoint]);
+  for (const contextFiles of ["/repo/file", [], {}, {edit: [], read: [], execute: []},
+    {edit: "/repo/file", read: []}, {edit: [], read: [false]}, {edit: ["relative.ts"], read: []},
+    {edit: ["C:relative.ts"], read: []}, {edit: ["/repo/bad\nfile"], read: []},
+    {edit: [], read: ["/repo/bad\0file"]}, {edit: [" "], read: []}]) {
+    assert.throws(() => p.buildLaunchCommand({contextFiles}), /Invalid Aider contextFiles/);
+  }
+});
+
+test("attachment duplicates deduplicate and edit/read overlap refuses", () => {
+  const p = configured([mimoEndpoint], {fs: {readFileHead: () => "#"}});
+  const command = p.buildLaunchCommand({contextFiles: {edit: ["/repo/edit.ts", "/repo/edit.ts"], read: ["/repo/read.md", "/repo/read.md"]}});
+  assert.equal(command.split("--file '/repo/edit.ts'").length - 1, 1);
+  assert.equal(command.split("--read '/repo/read.md'").length - 1, 1);
+  assert.throws(() => p.buildLaunchCommand({contextFiles: {edit: ["/repo/same"], read: ["/repo/same"]}}), /no overlap/);
+});
+
+test("resume context retains editable and read-only attachments", () => {
+  const p = configured([mimoEndpoint], {fs: {readFileHead: () => ""}});
+  const command = p.buildResumeCommandWithContext({sessionId: "session", cwd: "/repo",
+    contextFiles: {edit: ["/repo/edit.ts"], read: ["/host/skill.md"]}});
+  assert.ok(command.includes("--file '/repo/edit.ts'"));
+  assert.ok(command.includes("--read '/host/skill.md'"));
+});
 test("onboarding answers gitignore and documentation dialogs", () => {
   const p = load();
   assert.equal(p.launchOnboardingResponse("Add .aider* to .gitignore (recommended)? (Y)es/(N)o [Yes]:").step, "WQ==");
