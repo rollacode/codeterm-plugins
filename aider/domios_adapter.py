@@ -95,11 +95,14 @@ def install(Coder, IO, SwitchCoder, session, generation=None):
     def state(io):
         return getattr(io, "_domios_turn_state", None)
 
-    def io_init(original):
+    def append_history(original):
         def wrapped(io, *args, **kwargs):
-            original(io, *args, **kwargs)
-            if io.chat_history_file is not None:
+            # IO.__init__ writes the startup header. Publish activation before
+            # that first history event, so core cannot bind an adapter session
+            # and mistake its not-yet-written startup record for plain mode.
+            if io.chat_history_file is not None and state(io) is None:
                 io._domios_turn_state = TurnState(io, session, generation)
+            return original(io, *args, **kwargs)
         return wrapped
 
     def user_input(original):
@@ -230,7 +233,7 @@ def install(Coder, IO, SwitchCoder, session, generation=None):
                         ctx.active = None
         return wrapped
 
-    patch(IO, "__init__", io_init)
+    patch(IO, "append_chat_history", append_history)
     patch(IO, "user_input", user_input)
     patch(IO, "ai_output", ai_output)
     patch(IO, "tool_error", tool_error)

@@ -138,6 +138,21 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.records(), [{"version": 1, "kind": "adapter_start", "sessionId": "ct-launch-test",
                          "launchMarker": "ct-launch-test", "processGeneration": "generation-test", "aiderVersion": "0.86.2"}])
 
+    def test_start_is_fsynced_before_first_history_header_write(self):
+        original = FakeIO.append_chat_history.__wrapped__
+        def observe(io, *args, **kwargs):
+            self.assertFalse(self.path.exists())
+            self.assertEqual(self.records()[0]["kind"], "adapter_start")
+            return original(io, *args, **kwargs)
+        # Intercept the original append under the adapter wrapper, not after it.
+        self.restore()
+        with patch.object(FakeIO, "append_chat_history", observe):
+            restore = adapter.install(FakeCoder, FakeIO, SwitchCoder, "ct-launch-test", "generation-test")
+            try:
+                FakeIO(self.path)
+            finally:
+                restore()
+
     def test_single_answer_boundaries_are_actual_bytes(self):
         _, end = self.run_turn([{"answer": "Final ✓"}], "question é", newline="\r\n")
         raw = self.path.read_bytes()
