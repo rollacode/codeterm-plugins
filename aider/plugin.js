@@ -42,6 +42,7 @@ function utf8Length(text) {
   return bytes;
 }
 var ERROR_RE = /(?:\blitellm\.[\w.]*Error\b|\b(?:AuthenticationError|APIConnectionError|RateLimitError|BadRequestError|PermissionDeniedError|InternalServerError)\b|\b(?:Error|Exception):|\b(?:invalid|incorrect|missing) api key\b|\bEmpty response received from LLM\b)/i;
+var CHANGE_NOTICE_RE = /^(?:Applied edit to .+|Did not apply edit to .+|Commit [0-9a-f]{7,40}(?: .*)?)$/i;
 var NOISE_RE = /^(?:Aider v\d|Model:|Weak model:|Editor model:|Git repo:|Repo[ -]?[Mm]ap:|Tokens:|Added .+ to the chat|Use \/help|Cost:|Open documentation url|Add \.aider\* to \.gitignore|Please visit)/;
 function parseAiderHistoryDelta(prefix, fromOffset = 0) {
   const messages = [];
@@ -127,7 +128,10 @@ function parseAiderHistoryDelta(prefix, fromOffset = 0) {
         add("assistant", line, end);
       } else if (/^> ?/.test(line)) {
         const body = line.replace(/^> ?/, "").replace(/ {2}$/, "");
-        if (NOISE_RE.test(body) || !body.trim()) errorContinuation = false;
+        if (CHANGE_NOTICE_RE.test(body)) {
+          add("system", body, end);
+          errorContinuation = false;
+        } else if (NOISE_RE.test(body) || !body.trim()) errorContinuation = false;
         else if (ERROR_RE.test(body) || errorContinuation) {
           add("assistant", body, end);
           errorContinuation = true;
@@ -146,6 +150,162 @@ function parseAiderHistoryDelta(prefix, fromOffset = 0) {
   }
   flush();
   return { messages };
+}
+
+// aider/src/modelTuning.ts
+function modelLaunchArgs(args, model) {
+  const output = [];
+  let effort;
+  let budget;
+  for (let i = 0; i < args.length; i++) {
+    const arg = String(args[i]);
+    const flag = arg.split("=", 1)[0];
+    if (flag === "--map-tokens") throw new Error("Configure mapTokens on the selected Aider model instead of launch args.");
+    if (flag !== "--reasoning-effort" && flag !== "--thinking-tokens") {
+      output.push(arg);
+      continue;
+    }
+    const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : String(args[++i] ?? "");
+    if (!value || value.startsWith("-")) throw new Error(`${flag} requires a declared model option.`);
+    if (flag === "--reasoning-effort") effort = value;
+    else budget = value;
+  }
+  if (model.mapTokens !== void 0) output.push("--map-tokens", String(model.mapTokens));
+  if (effort !== void 0 && budget !== void 0) throw new Error("Choose a reasoning level or thinking budget, not both.");
+  if (effort !== void 0) {
+    const level = model.reasoningEfforts.find((level2) => level2.id === effort);
+    if (!level || !model.reasoningMode) throw new Error(`Aider model ${model.id} does not declare reasoning level ${effort}.`);
+    if (model.reasoningMode === "budget") output.push("--thinking-tokens", String(level.thinkingTokens));
+    else output.push("--reasoning-effort", level.id);
+  } else if (budget !== void 0) {
+    if (model.reasoningMode !== "budget" || !model.reasoningEfforts.some((level) => String(level.thinkingTokens) === budget)) {
+      throw new Error(`Aider model ${model.id} does not declare thinking budget ${budget}.`);
+    }
+    output.push("--thinking-tokens", budget);
+  }
+  return output;
+}
+
+// aider/src/activity.ts
+function hasAiderActivity(screen) {
+  const lines = String(screen || "").split(/\r?\n/).map((line) => line.trim());
+  let last = lines.length - 1;
+  while (last >= 0 && !lines[last]) last--;
+  if (last < 0 || /^(?:[a-z]+)?>$/.test(lines[last])) return false;
+  const tail = lines[last];
+  if (/^[░█ #=]+Waiting for \S/.test(tail)) return true;
+  if (/^(?:[░█ #=]+)?Updating repo map(?:\b|$)/.test(tail)) return true;
+  for (let i = last; i >= 0; i--) {
+    if (/^(?:[a-z]+)?>$/.test(lines[i])) return false;
+    if (/^(?:[a-z]+)?>\s+\S/.test(lines[i])) return i < last;
+  }
+  return false;
+}
+
+// aider/src/endpoints.ts
+var PROVIDER_ENV = {
+  openai: { key: "OPENAI_API_KEY", base: "OPENAI_API_BASE" },
+  anthropic: { key: "ANTHROPIC_API_KEY", base: "ANTHROPIC_API_BASE" },
+  groq: { key: "GROQ_API_KEY", base: "GROQ_API_BASE" },
+  openrouter: { key: "OPENROUTER_API_KEY", base: "OPENROUTER_API_BASE" }
+};
+function nonempty(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+function tokenCount(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+function modelEntries(value) {
+  if (typeof value === "string") {
+    if (value.trim().startsWith("[")) {
+      try {
+        value = JSON.parse(value);
+      } catch {
+        return [];
+      }
+    } else value = value.split(/\r?\n/);
+  }
+  if (!Array.isArray(value)) return [];
+  const models = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const raw of value) {
+    const item = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const id = nonempty(typeof raw === "string" ? raw : item.id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const model = { id, reasoningEfforts: [] };
+    if (nonempty(item.displayName)) model.displayName = nonempty(item.displayName);
+    if (tokenCount(item.mapTokens)) model.mapTokens = item.mapTokens;
+    if (item.reasoningMode === "effort" || item.reasoningMode === "budget") {
+      model.reasoningMode = item.reasoningMode;
+      const levels = Array.isArray(item.reasoningEfforts) ? item.reasoningEfforts : [];
+      const levelIds = /* @__PURE__ */ new Set();
+      for (const level of levels) {
+        if (!level || typeof level !== "object" || Array.isArray(level)) continue;
+        const levelId = nonempty(level.id);
+        if (!levelId || levelIds.has(levelId)) continue;
+        if (model.reasoningMode === "budget" && !tokenCount(level.thinkingTokens)) continue;
+        levelIds.add(levelId);
+        model.reasoningEfforts.push({
+          id: levelId,
+          displayName: nonempty(level.displayName) || levelId,
+          ...nonempty(level.description) ? { description: nonempty(level.description) } : {},
+          ...model.reasoningMode === "budget" ? { thinkingTokens: level.thinkingTokens } : {}
+        });
+      }
+      const defaultId = nonempty(item.defaultReasoningEffort);
+      if (model.reasoningEfforts.some((level) => level.id === defaultId)) model.defaultReasoningEffort = defaultId;
+    }
+    models.push(model);
+  }
+  return models;
+}
+function configuredEndpoints(settings) {
+  if (!Array.isArray(settings.endpoints)) return [];
+  const endpoints = [];
+  for (const value of settings.endpoints) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const name = nonempty(value.name);
+    const kind = nonempty(value.kind).toLowerCase();
+    const apiKeySecret = nonempty(value.apiKeySecret);
+    const models = modelEntries(value.models).filter((model) => model.id.startsWith(`${kind}/`));
+    if (!name || !Object.prototype.hasOwnProperty.call(PROVIDER_ENV, kind) || !apiKeySecret || !models.length) continue;
+    endpoints.push({ name, kind, apiKeySecret, models, ...nonempty(value.apiBase) ? { apiBase: nonempty(value.apiBase) } : {} });
+  }
+  return endpoints;
+}
+function endpointModels(endpoints) {
+  const ownership = /* @__PURE__ */ new Map();
+  for (const endpoint of endpoints) for (const model of endpoint.models) ownership.set(model.id, (ownership.get(model.id) || 0) + 1);
+  return endpoints.flatMap((endpoint) => endpoint.models.filter((model) => ownership.get(model.id) === 1).map((model) => ({
+    id: model.id,
+    displayName: model.displayName || model.id,
+    group: endpoint.name,
+    reasoningEfforts: model.reasoningEfforts.map(({ id, displayName, description }) => ({ id, displayName, ...description ? { description } : {} })),
+    ...model.defaultReasoningEffort ? { defaultReasoningEffort: model.defaultReasoningEffort } : {}
+  })));
+}
+function selectedModel(params) {
+  let model = null;
+  const args = params.args || [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = String(args[i]);
+    if (arg === "--model" || arg === "-m") {
+      if (!args[i + 1] || String(args[i + 1]).startsWith("-")) throw new Error("Aider --model requires a configured model ID.");
+      model = String(args[++i]);
+    } else if (arg.startsWith("--model=")) {
+      model = arg.slice(8);
+      if (!model) throw new Error("Aider --model requires a configured model ID.");
+    }
+  }
+  return model;
+}
+function launchEndpoint(endpoints, model) {
+  const id = model ?? endpointModels(endpoints)[0]?.id;
+  if (!id) throw new Error("Configure an Aider endpoint with a unique model ID before launching.");
+  const owners = endpoints.filter((endpoint) => endpoint.models.some((model2) => model2.id === id));
+  if (owners.length !== 1) throw new Error(owners.length ? `Aider model ${id} belongs to multiple endpoints. Configure each model ID once.` : `Aider model ${id} has no configured endpoint.`);
+  return { endpoint: owners[0], model: id, entry: owners[0].models.find((model2) => model2.id === id) };
 }
 
 // aider/src/plugin.ts
@@ -201,11 +361,10 @@ function pluginSettings() {
     return {};
   }
 }
-function withLaunchEnv(command, p) {
+function withLaunchEnv(command, p, endpoint) {
   const platform = host.platform();
   const quote = (v) => host.shell.quoteFor(v, platform);
   const isPowerShell = platform === "windows";
-  const settings = pluginSettings();
   const exports = [];
   const nonce = typeof p.sessionId === "string" && p.sessionId || typeof p.launchMarker === "string" && p.launchMarker || null;
   if (nonce) {
@@ -213,18 +372,11 @@ function withLaunchEnv(command, p) {
       isPowerShell ? `$env:CODETERM_SESSION_BINDING_NONCE=${quote(nonce)};` : `export CODETERM_SESSION_BINDING_NONCE=${quote(nonce)};`
     );
   }
-  const apiBase = typeof settings.apiBase === "string" && settings.apiBase || typeof p.apiBase === "string" && p.apiBase || null;
-  if (apiBase) {
-    exports.push(
-      isPowerShell ? `$env:OPENAI_API_BASE=${quote(apiBase)};` : `export OPENAI_API_BASE=${quote(apiBase)};`
-    );
+  const env = PROVIDER_ENV[endpoint.kind];
+  if (endpoint.apiBase) {
+    exports.push(isPowerShell ? `$env:${env.base}=${quote(endpoint.apiBase)};` : `export ${env.base}=${quote(endpoint.apiBase)};`);
   }
-  const apiKeySecret = typeof settings.apiKeySecret === "string" && settings.apiKeySecret || typeof p.apiKeySecret === "string" && p.apiKeySecret || null;
-  if (apiKeySecret) {
-    exports.push(
-      isPowerShell ? `$env:OPENAI_API_KEY=(codeterm mem secret get --name ${quote(apiKeySecret)});` : `export OPENAI_API_KEY="$(codeterm mem secret get --name ${quote(apiKeySecret)})";`
-    );
-  }
+  exports.push(isPowerShell ? `$env:${env.key}=(codeterm mem secret get --name ${quote(endpoint.apiKeySecret)});` : `export ${env.key}="$(codeterm mem secret get --name ${quote(endpoint.apiKeySecret)})";`);
   if (exports.length === 0) return command;
   return `${exports.join(" ")} ${command}`;
 }
@@ -292,28 +444,15 @@ function isCodetermOnlyCommandList(commands) {
 function isStartupDialog(question) {
   return GITIGNORE_QUESTION_RE.test(question) || DOCS_URL_QUESTION_RE.test(question);
 }
-function parsePrompt(text) {
-  const screen = String(text || "");
-  const lines = screen.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const question = lines[i].trim();
-    if (!PROMPT_QUESTION_RE.test(question)) continue;
-    if (isStartupDialog(question)) continue;
-    const options = [["Yes", "1"], ["No", "2"]];
-    return { question, options };
-  }
-  return null;
-}
 function parsePromptWithContext(text) {
-  const screen = String(text || "");
-  const lines = screen.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const question = lines[i].trim();
-    if (!PROMPT_QUESTION_RE.test(question)) continue;
-    const options = [["Yes", "1"], ["No", "2"]];
-    return { question, options };
-  }
-  return null;
+  const question = lastNonEmptyLine(String(text || ""));
+  if (!PROMPT_QUESTION_RE.test(question)) return null;
+  const options = [["Yes", "1"], ["No", "2"]];
+  return { question, options };
+}
+function parsePrompt(text) {
+  const prompt = parsePromptWithContext(text);
+  return prompt && !isStartupDialog(prompt.question) ? prompt : null;
 }
 function promptSafeChoice(prompt, screen) {
   if (!prompt || !prompt.question) return null;
@@ -343,6 +482,14 @@ var plugin = {
       if (t.indexOf(OUTPUT_SIGNALS[j]) !== -1) return true;
     }
     return false;
+  },
+  classifyTabState(snapshot) {
+    if (snapshot.agentType !== "aider") return null;
+    const screen = String(snapshot.screenText || "");
+    if (MODE_PROMPT_RE.test(lastNonEmptyLine(screen))) return null;
+    const prompt = parsePrompt(screen);
+    if (prompt) return { state: "clarifying_question", confidence: 1, data: { questions: [prompt.question] } };
+    return hasAiderActivity(screen) ? { state: "working", confidence: 1 } : null;
   },
   screenHasTui(screen) {
     const text = String(screen || "");
@@ -377,7 +524,7 @@ var plugin = {
     return parsePrompt(text) || parsePromptWithContext(text) ? ["permission_request"] : [];
   },
   discoverModels() {
-    return null;
+    return endpointModels(configuredEndpoints(pluginSettings()));
   },
   modelGroupUsage() {
     return [];
@@ -405,15 +552,13 @@ var plugin = {
     const dirQuoted = escapeDir(historyDirPath);
     const chatHistoryPath = isPowerShell ? `"${dirQuoted}/$($env:CODETERM_SESSION_BINDING_NONCE).md"` : `"${dirQuoted}/\${CODETERM_SESSION_BINDING_NONCE}.md"`;
     const inputHistoryPath = isPowerShell ? `"${dirQuoted}/$($env:CODETERM_SESSION_BINDING_NONCE).input"` : `"${dirQuoted}/\${CODETERM_SESSION_BINDING_NONCE}.input"`;
-    const parts = ["aider"];
-    if (p.args && p.args.length > 0) {
-      for (let i = 0; i < p.args.length; i++) {
-        parts.push(quote(String(p.args[i])));
-      }
-    }
-    if (p.skipPermissions) parts.push("--yes-always");
-    parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
     const settings = pluginSettings();
+    const requestedModel = selectedModel(p);
+    const selected = launchEndpoint(configuredEndpoints(settings), requestedModel);
+    const parts = ["aider", ...modelLaunchArgs(p.args || [], selected.entry).map(quote)];
+    if (p.skipPermissions) parts.push("--yes-always");
+    if (!requestedModel) parts.push("--model", quote(selected.model));
+    parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
     const configPath = typeof settings.configPath === "string" && settings.configPath || typeof p.configPath === "string" && p.configPath || null;
     if (configPath) {
       parts.push("--config", quote(configPath));
@@ -430,7 +575,7 @@ var plugin = {
       inputHistoryPath
     ].join(" ");
     const mkdir = isPowerShell ? `New-Item -ItemType Directory -Force -Path ${quote(historyDirPath)} | Out-Null;` : `mkdir -p ${quote(historyDirPath)};`;
-    return withLaunchEnv(`${mkdir} ${command} ${historyFlags}`, p);
+    return withLaunchEnv(`${mkdir} ${command} ${historyFlags}`, p, selected.endpoint);
   },
   buildResumeCommand(_sessionId, _skipPermissions) {
     return this.buildLaunchCommand({});

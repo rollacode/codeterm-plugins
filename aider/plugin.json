@@ -65,7 +65,9 @@
       "\u0003"
     ],
     "stopKeyWaitForOutput": true,
-    "autoApproveFlags": [],
+    "autoApproveFlags": [
+      "--yes-always"
+    ],
     "modelLaunchArgsFormat": [
       "--model",
       "{model}"
