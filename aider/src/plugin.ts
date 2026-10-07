@@ -11,6 +11,9 @@ import {
   utf8Length,
 } from "./history";
 
+import type { Endpoint } from "./endpoints";
+import { configuredEndpoints, endpointModels, launchEndpoint, selectedModel, PROVIDER_ENV } from "./endpoints";
+
 const TITLE_RE = /aider/i;
 const OUTPUT_MARKERS = ["aider", "Aider", "Aider Chat"];
 const OUTPUT_SIGNALS = [
@@ -67,13 +70,12 @@ function pluginSettings(): Record<string, unknown> {
   }
 }
 
-function withLaunchEnv(command: string, p: LaunchParams): string {
+function withLaunchEnv(command: string, p: LaunchParams, endpoint: Endpoint): string {
   const platform = host.platform();
   const quote = (v: string) => host.shell.quoteFor(v, platform);
   // On Windows Domios launches agents in PowerShell; the host reports the
   // platform as "windows".
   const isPowerShell = platform === "windows";
-  const settings = pluginSettings();
   const exports: string[] = [];
   const nonce =
     (typeof p.sessionId === "string" && p.sessionId) ||
@@ -86,30 +88,16 @@ function withLaunchEnv(command: string, p: LaunchParams): string {
         : `export CODETERM_SESSION_BINDING_NONCE=${quote(nonce)};`,
     );
   }
-  const apiBase =
-    (typeof settings.apiBase === "string" && settings.apiBase) ||
-    (typeof p.apiBase === "string" && p.apiBase) ||
-    null;
-  if (apiBase) {
-    exports.push(
-      isPowerShell
-        ? `$env:OPENAI_API_BASE=${quote(apiBase)};`
-        : `export OPENAI_API_BASE=${quote(apiBase)};`,
-    );
+  const env = PROVIDER_ENV[endpoint.kind];
+  if (endpoint.apiBase) {
+    exports.push(isPowerShell
+      ? `$env:${env.base}=${quote(endpoint.apiBase)};`
+      : `export ${env.base}=${quote(endpoint.apiBase)};`);
   }
-  const apiKeySecret =
-    (typeof settings.apiKeySecret === "string" && settings.apiKeySecret) ||
-    (typeof p.apiKeySecret === "string" && p.apiKeySecret) ||
-    null;
-  if (apiKeySecret) {
-    // The key is fetched at run time inside the shell so its value never
-    // appears in the command text, argv, logs or scrollback.
-    exports.push(
-      isPowerShell
-        ? `$env:OPENAI_API_KEY=(codeterm mem secret get --name ${quote(apiKeySecret)});`
-        : `export OPENAI_API_KEY="$(codeterm mem secret get --name ${quote(apiKeySecret)})";`,
-    );
-  }
+  // Only the secret's name enters the command. The value stays in the shell.
+  exports.push(isPowerShell
+    ? `$env:${env.key}=(codeterm mem secret get --name ${quote(endpoint.apiKeySecret)});`
+    : `export ${env.key}="$(codeterm mem secret get --name ${quote(endpoint.apiKeySecret)})";`);
   if (exports.length === 0) return command;
   return `${exports.join(" ")} ${command}`;
 }
@@ -277,8 +265,8 @@ const plugin: PluginModule = {
     return (parsePrompt(text) || parsePromptWithContext(text)) ? ["permission_request"] : [];
   },
 
-  discoverModels(): ModelInfo[] | null {
-    return null;
+  discoverModels(): ModelInfo[] {
+    return endpointModels(configuredEndpoints(pluginSettings()));
   },
 
   modelGroupUsage(): [] {
@@ -328,8 +316,11 @@ const plugin: PluginModule = {
       }
     }
     if (p.skipPermissions) parts.push("--yes-always");
-    parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
     const settings = pluginSettings();
+    const requestedModel = selectedModel(p);
+    const selected = launchEndpoint(configuredEndpoints(settings), requestedModel);
+    if (!requestedModel) parts.push("--model", quote(selected.model));
+    parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
     const configPath =
       (typeof settings.configPath === "string" && settings.configPath) ||
       (typeof p.configPath === "string" && p.configPath) ||
@@ -351,7 +342,7 @@ const plugin: PluginModule = {
     const mkdir = isPowerShell
       ? `New-Item -ItemType Directory -Force -Path ${quote(historyDirPath)} | Out-Null;`
       : `mkdir -p ${quote(historyDirPath)};`;
-    return withLaunchEnv(`${mkdir} ${command} ${historyFlags}`, p);
+    return withLaunchEnv(`${mkdir} ${command} ${historyFlags}`, p, selected.endpoint);
   },
 
 

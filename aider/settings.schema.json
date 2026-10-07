@@ -2,25 +2,54 @@
   {
     "kind": "section",
     "title": "Aider",
-    "description": "Launch-time configuration for the Aider CLI.",
+    "description": "Configure model endpoints. Store only secret names here.",
     "fields": [
       {
         "kind": "text",
         "key": "configPath",
         "label": "Aider config file",
-        "description": "Path to an aider YAML config file; passed as --config."
+        "description": "Optional YAML file passed as --config."
       },
       {
-        "kind": "text",
-        "key": "apiBase",
-        "label": "API base URL",
-        "description": "Base URL for the OpenAI-compatible API; exported as OPENAI_API_BASE."
-      },
-      {
-        "kind": "text",
-        "key": "apiKeySecret",
-        "label": "API key secret name",
-        "description": "Name of a Domios secret holding the API key; its value is injected only into the launch environment as OPENAI_API_KEY."
+        "kind": "array",
+        "key": "endpoints",
+        "label": "Endpoints",
+        "item_label": "Endpoint",
+        "default": [],
+        "description": "Each model ID must belong to exactly one endpoint. Supported kinds: openai, anthropic, groq, openrouter.",
+        "item": {
+          "kind": "object",
+          "fields": [
+            {
+              "kind": "text",
+              "key": "name",
+              "label": "Endpoint name"
+            },
+            {
+              "kind": "text",
+              "key": "kind",
+              "label": "Provider kind",
+              "default": "openai"
+            },
+            {
+              "kind": "text",
+              "key": "apiBase",
+              "label": "API base URL (optional)"
+            },
+            {
+              "kind": "text",
+              "key": "apiKeySecret",
+              "label": "Domios secret name"
+            },
+            {
+              "kind": "textarea",
+              "key": "models",
+              "label": "Model IDs",
+              "description": "One Aider/LiteLLM model ID per line, or a JSON array of strings.",
+              "default": ""
+            }
+          ]
+        }
       }
     ]
   }

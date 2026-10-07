@@ -15,6 +15,8 @@ function load(over = {}) {
   new vm.Script(readFileSync(join(__dirname, "plugin.js"), "utf8")).runInNewContext(context);
   return context.module.exports.default;
 }
+const mimoEndpoint = {name: "MiMo", kind: "openai", apiBase: "https://example.test/v1", apiKeySecret: "mimo-key", models: ["openai/mimo-v2.6-pro"]};
+const configured = (endpoints, over = {}) => load({settingsJson: () => JSON.stringify({endpoints}), ...over});
 const plain = (v) => JSON.parse(JSON.stringify(v));
 const parse = (text) => plain(load().parseSessionDelta(text).messages);
 const text = (row) => row.blocks[0].data.text;
@@ -35,23 +37,25 @@ test("marketplace metadata, icon and model catalogue", () => {
   assert.equal(manifest.minCodeterm, "1.12.4");
   assert.equal(manifest.icon, "icon.svg");
   assert.ok(readFileSync(join(__dirname, manifest.icon), "utf8").includes("<svg"));
-  assert.ok(manifest.models.some(m => m.id === "openai/mimo-v2.6-pro"));
+  assert.deepEqual(manifest.models, []);
+  assert.equal(manifest.defaultModel, undefined);
+  assert.equal(manifest.modelCatalogue.authority, "authoritative");
   assert.equal(manifest.spawn.composerCursorPosition, "prompt_line");
   assert.equal(manifest.spawn.inputFallbackMs, 5000);
   assert.equal(manifest.spawn.onboardingAutoAnswer, "always");
   assert.equal(manifest.spawn.hasHooks, false);
 });
-test("settings schema exposes the three launch settings", () => {
+test("settings schema exposes config and endpoint list", () => {
   const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json")));
-  assert.deepEqual(schema[0].fields.map(f => f.key).sort(), ["apiBase", "apiKeySecret", "configPath"]);
+  assert.deepEqual(schema[0].fields.map(f => f.key).sort(), ["configPath", "endpoints"]);
 });
 test("full access maps to --yes-always and stays off otherwise", () => {
-  const p = load({});
+  const p = configured([mimoEndpoint]);
   assert.match(p.buildLaunchCommand({cwd: "/work", skipPermissions: true}), /--yes-always/);
   assert.doesNotMatch(p.buildLaunchCommand({cwd: "/work"}), /--yes-always/);
 });
 test("runtime settings and nonce are applied in the launch shell", () => {
-  const p = load({settingsJson: () => JSON.stringify({apiBase: "https://example.test/v1", apiKeySecret: "mimo-key", configPath: "/work/aider.yml"})});
+  const p = load({settingsJson: () => JSON.stringify({endpoints: [mimoEndpoint], configPath: "/work/aider.yml"})});
   const command = p.buildLaunchCommand({cwd: "/work", launchMarker: "nonce", args: ["--model", "openai/mimo-v2.6-pro"]});
   assert.match(command, /OPENAI_API_BASE='https:\/\/example.test\/v1'/);
   assert.match(command, /codeterm mem secret get --name 'mimo-key'/);
@@ -62,7 +66,7 @@ test("runtime settings and nonce are applied in the launch shell", () => {
   assert.match(command, /--no-pretty/);
 });
 test("Windows launch fetches the key in PowerShell", () => {
-  const command = load({platform: () => "windows", settingsJson: () => '{"apiKeySecret":"mimo-key"}'}).buildLaunchCommand({cwd: "D:/repo"});
+  const command = configured([mimoEndpoint], {platform: () => "windows"}).buildLaunchCommand({cwd: "D:/repo"});
   assert.match(command, /\$env:OPENAI_API_KEY=\(codeterm mem secret get/);
   assert.match(command, /\$\(\$env:CODETERM_SESSION_BINDING_NONCE\)\.md/);
 });
@@ -314,6 +318,110 @@ test("every line split preserves change notices without duplicates", () => {
     if (source[i] !== "\n") continue;
     assert.deepEqual(tail([source.slice(0, i + 1), source.slice(i + 1)]).rows.map(r => [r.uuid, r.role, text(r)]), expected.map(r => [r.uuid, r.role, text(r)]));
   }
+});
+
+test("unconfigured catalogue is empty and launch gives an actionable error", () => {
+  assert.deepEqual(plain(load().discoverModels()), []);
+  assert.throws(() => load().buildLaunchCommand({}), /Configure an Aider endpoint/);
+});
+test("catalogue uses model IDs and endpoint names as groups", () => {
+  const p = configured([mimoEndpoint, {name: "Anthropic direct", kind: "anthropic", apiKeySecret: "claude-key", models: ["anthropic/claude-sonnet-4-6"]}]);
+  assert.deepEqual(plain(p.discoverModels()), [
+    {id: "openai/mimo-v2.6-pro", displayName: "openai/mimo-v2.6-pro", group: "MiMo"},
+    {id: "anthropic/claude-sonnet-4-6", displayName: "anthropic/claude-sonnet-4-6", group: "Anthropic direct"},
+  ]);
+});
+test("model textarea accepts lines and JSON string arrays", () => {
+  for (const models of ["openai/a\nopenai/b", '["openai/a","openai/b"]', ["openai/a", "openai/b"]]) {
+    assert.deepEqual(plain(configured([{...mimoEndpoint, models}]).discoverModels()).map(m => m.id), ["openai/a", "openai/b"]);
+  }
+});
+test("model IDs are trimmed and deduplicated within an endpoint", () => {
+  assert.deepEqual(plain(configured([{...mimoEndpoint, models: [" openai/a ", "openai/a", "", 7]}]).discoverModels()).map(m => m.id), ["openai/a"]);
+});
+test("invalid endpoints and incompatible model prefixes are omitted", () => {
+  const bad = [null, [], {}, {...mimoEndpoint, kind: "__proto__"}, {...mimoEndpoint, kind: "azure"}, {...mimoEndpoint, name: ""}, {...mimoEndpoint, apiKeySecret: ""}, {...mimoEndpoint, models: "[broken"}, {...mimoEndpoint, models: {}}, {...mimoEndpoint, models: ["anthropic/claude"]}];
+  assert.deepEqual(plain(configured(bad).discoverModels()), []);
+});
+test("duplicate model ownership is hidden and rejected on launch", () => {
+  const p = configured([mimoEndpoint, {...mimoEndpoint, name: "Other"}]);
+  assert.deepEqual(plain(p.discoverModels()), []);
+  assert.throws(() => p.buildLaunchCommand({args: ["--model", "openai/mimo-v2.6-pro"]}), /multiple endpoints/);
+});
+test("unconfigured selected models cannot silently use another key", () => {
+  assert.throws(() => configured([mimoEndpoint]).buildLaunchCommand({args: ["--model", "openai/unknown"]}), /no configured endpoint/);
+});
+test("first unique configured model is the launch default", () => {
+  const command = configured([mimoEndpoint]).buildLaunchCommand({});
+  assert.match(command, /--model 'openai\/mimo-v2.6-pro'/);
+  assert.match(command, /OPENAI_API_KEY/);
+});
+test("selection supports long equals and short model flags", () => {
+  const endpoint = {name: "Claude", kind: "anthropic", apiKeySecret: "claude-key", models: ["anthropic/claude-test"]};
+  for (const args of [["--model=anthropic/claude-test"], ["-m", "anthropic/claude-test"], ["--model", "anthropic/claude-test"]]) {
+    const command = configured([mimoEndpoint, endpoint]).buildLaunchCommand({args});
+    assert.match(command, /ANTHROPIC_API_KEY/);
+    assert.doesNotMatch(command, /OPENAI_API_KEY|mimo-key/);
+  }
+});
+test("last model flag determines the endpoint", () => {
+  const endpoint = {name: "Claude", kind: "anthropic", apiKeySecret: "claude-key", models: ["anthropic/claude-test"]};
+  const command = configured([mimoEndpoint, endpoint]).buildLaunchCommand({args: ["--model", "openai/mimo-v2.6-pro", "--model", "anthropic/claude-test"]});
+  assert.match(command, /ANTHROPIC_API_KEY/);
+  assert.doesNotMatch(command, /OPENAI_API_KEY/);
+});
+test("malformed model flags fail clearly", () => {
+  for (const args of [["--model"], ["--model="], ["-m", "--yes-always"]]) {
+    assert.throws(() => configured([mimoEndpoint]).buildLaunchCommand({args}), /requires a configured model ID/);
+  }
+});
+test("each provider exports only its own key and optional base", () => {
+  for (const kind of ["openai", "anthropic", "groq", "openrouter"]) {
+    const prefix = kind.toUpperCase();
+    const endpoint = {name: kind, kind, apiBase: "https://example.test/v1", apiKeySecret: "test-key", models: [`${kind}/test-model`]};
+    for (const platform of ["linux", "windows"]) {
+      const command = configured([endpoint], {platform: () => platform}).buildLaunchCommand({});
+      assert.match(command, new RegExp(`${prefix}_API_KEY`));
+      assert.match(command, new RegExp(`${prefix}_API_BASE`));
+      for (const other of ["OPENAI", "ANTHROPIC", "GROQ", "OPENROUTER"].filter(p => p !== prefix)) assert.doesNotMatch(command, new RegExp(`${other}_API_(KEY|BASE)`));
+    }
+  }
+});
+test("optional base is omitted without creating another provider base", () => {
+  const command = configured([{name: "Claude", kind: "anthropic", apiKeySecret: "claude-key", models: ["anthropic/test"]}]).buildLaunchCommand({});
+  assert.match(command, /ANTHROPIC_API_KEY/);
+  assert.doesNotMatch(command, /API_BASE/);
+});
+test("same provider endpoints select credentials by model ownership", () => {
+  const command = configured([mimoEndpoint, {name: "OpenAI", kind: "openai", apiKeySecret: "openai-direct", models: ["openai/gpt-test"]}]).buildLaunchCommand({args: ["--model", "openai/gpt-test"]});
+  assert.match(command, /secret get --name 'openai-direct'/);
+  assert.doesNotMatch(command, /mimo-key|example.test/);
+});
+test("keys are fetched only at runtime and values in settings are ignored", () => {
+  let execCalls = 0;
+  const p = configured([{...mimoEndpoint, apiKey: "SENTINEL_SECRET_VALUE"}], {exec: () => {execCalls++; throw new Error("must not fetch secrets inside VM");}});
+  const command = p.buildLaunchCommand({});
+  assert.equal(execCalls, 0);
+  assert.match(command, /codeterm mem secret get --name 'mimo-key'/);
+  assert.doesNotMatch(command, /SENTINEL_SECRET_VALUE|--api-key/);
+});
+test("catalogue reads current settings on every discovery", () => {
+  let endpoints = [];
+  const p = load({settingsJson: () => JSON.stringify({endpoints})});
+  assert.deepEqual(plain(p.discoverModels()), []);
+  endpoints = [mimoEndpoint];
+  assert.equal(p.discoverModels()[0].id, "openai/mimo-v2.6-pro");
+});
+test("invalid settings JSON yields an empty catalogue", () => {
+  assert.deepEqual(plain(load({settingsJson: () => "invalid"}).discoverModels()), []);
+});
+test("endpoint schema uses supported object array fields", () => {
+  const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json")));
+  const endpoints = schema[0].fields.find(f => f.key === "endpoints");
+  assert.equal(endpoints.kind, "array");
+  assert.equal(endpoints.item.kind, "object");
+  assert.deepEqual(endpoints.item.fields.map(f => f.key), ["name", "kind", "apiBase", "apiKeySecret", "models"]);
+  assert.equal(endpoints.item.fields.find(f => f.key === "models").kind, "textarea");
 });
 
 let failed = 0;

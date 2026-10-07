@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Andrey's CodeTerm capability plugins \u00e2\u20ac\u201d Git, Transcriber, Bitwarden. Authored in TypeScript against @codeterm/plugin-sdk, built to QuickJS-compatible plugin.js + split UI bundles.",
+  "description": "Andrey's CodeTerm capability plugins — Git, Transcriber, Bitwarden. Authored in TypeScript against @codeterm/plugin-sdk, built to QuickJS-compatible plugin.js + split UI bundles.",
   "license": "ISC",
   "repository": {
     "type": "git",
