@@ -163,6 +163,22 @@ test("thinking blocks use the collapsed host block before the answer", () => {
   assert.equal(rows[1].blocks[0].kind, "thinking");
   assert.equal(rows[2].blocks[0].kind, "text");
 });
+
+test("launch marker binds its exact file even when another tab is newer", () => {
+  const p = load({fs: {readDir: () => [
+    {name: "first.md", modifiedMs: 10},
+    {name: "second.md", modifiedMs: 20},
+  ]}});
+  for (const launchMarker of ["first", "second"]) {
+    assert.deepEqual(plain(p.detectLaunchSession({cwd: "/same", launchMarker, launchedAtMs: 0})), {sessionId: launchMarker, source: "launch_marker"});
+  }
+});
+
+test("missing launch marker file never borrows a nearby history", () => {
+  const p = load({fs: {readDir: () => [{name: "other.md", modifiedMs: Date.now()}]}});
+  assert.equal(p.detectLaunchSession({cwd: "/same", launchMarker: "mine", launchedAtMs: 0}), null);
+  assert.equal(p.detectLaunchSession({cwd: "/same", launchedAtMs: 0}), null);
+});
 test("unclosed thinking stays separate from ordinary assistant text", () => {
   const rows = parse("#### Q\n\n<thinking-content-x>\nhidden\n");
   assert.deepEqual(contents(rows), ["Q", "hidden"]);

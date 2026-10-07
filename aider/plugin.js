@@ -48,6 +48,7 @@ function parseAiderHistoryDelta(prefix, fromOffset = 0) {
   const messages = [];
   const state = { current: null };
   let offset = 0;
+  let rowOffset = 0;
   let deltaLine = 0;
   let previousHeading = false;
   let fence = null;
@@ -59,18 +60,18 @@ function parseAiderHistoryDelta(prefix, fromOffset = 0) {
     if (text && text !== "<blank>" && state.current.end > fromOffset) {
       messages.push({
         role: state.current.role,
-        blocks: [{ kind: "text", data: { text } }],
+        blocks: [{ kind: state.current.kind, data: { text } }],
         ts: null,
-        uuid: `aider:${state.current.role}:${state.current.start}`,
+        uuid: `aider:${state.current.kind === "thinking" ? "thinking" : state.current.role}:${state.current.start}`,
         ...state.current.start >= fromOffset ? { recordIndex: state.current.line } : {}
       });
     }
     state.current = null;
   }
-  function add(role, text, end) {
-    if (state.current?.role !== role) {
+  function add(role, text, end, kind = "text") {
+    if (state.current?.role !== role || state.current?.kind !== kind) {
       flush();
-      state.current = { role, lines: [], start: offset, line: deltaLine, end };
+      state.current = { role, kind, lines: [], start: rowOffset, line: deltaLine, end };
     }
     state.current.lines.push(text);
     if (text.trim()) state.current.end = end;
@@ -79,31 +80,40 @@ function parseAiderHistoryDelta(prefix, fromOffset = 0) {
   for (const record of records) {
     const raw = record.replace(/\r?\n$/, "");
     const end = offset + utf8Length(record);
+    rowOffset = offset;
     let line = raw;
     if (!fence) {
-      let visible = "";
       while (line) {
         if (thinkingTag) {
           const close = `</${thinkingTag}>`;
           const at = line.indexOf(close);
           if (at < 0) {
+            add("assistant", line, end, "thinking");
             line = "";
             break;
           }
+          if (at > 0) add("assistant", line.slice(0, at), end, "thinking");
+          flush();
           line = line.slice(at + close.length);
           thinkingTag = null;
+          rowOffset = offset + utf8Length(raw.slice(0, raw.length - line.length));
         } else {
           const open = /<thinking-content-[^>]*>/.exec(line);
-          if (!open) {
-            visible += line;
-            break;
-          }
-          visible += line.slice(0, open.index);
+          if (!open) break;
+          if (open.index > 0) add("assistant", line.slice(0, open.index), end);
+          flush();
+          rowOffset += utf8Length(line.slice(0, open.index));
           thinkingTag = open[0].slice(1, -1);
+          add("assistant", "", end, "thinking");
           line = line.slice(open.index + open[0].length);
         }
       }
-      line = visible;
+      if (thinkingTag && !raw.trim()) add("assistant", "", end, "thinking");
+    }
+    if (thinkingTag) {
+      if (offset >= fromOffset) deltaLine++;
+      offset = end;
+      continue;
     }
     const heading = !fence && /^####(?: |$)/.test(line);
     if (!fence && /^# aider chat started at /.test(line)) {
