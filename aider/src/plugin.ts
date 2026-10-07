@@ -5,12 +5,15 @@ import type {
   PluginModule,
   ResumeParams,
   SessionDeltaContext,
+  TabStateSnapshot,
+  TabStateClassification,
 } from "@codeterm/plugin-sdk";
 import {
   parseAiderHistoryDelta,
   utf8Length,
 } from "./history";
 
+import { hasAiderActivity } from "./activity";
 import type { Endpoint } from "./endpoints";
 import { configuredEndpoints, endpointModels, launchEndpoint, selectedModel, PROVIDER_ENV } from "./endpoints";
 
@@ -225,6 +228,17 @@ const plugin: PluginModule = {
       if (t.indexOf(OUTPUT_SIGNALS[j]) !== -1) return true;
     }
     return false;
+  },
+
+  classifyTabState(snapshot: TabStateSnapshot): TabStateClassification | null {
+    if (snapshot.agentType !== "aider") return null;
+    const screen = String(snapshot.screenText || "");
+    // SDK TabState has no Idle variant and exposes no cursor geometry.
+    // Leave a settled composer to core's existing prompt-line cursor evidence.
+    if (MODE_PROMPT_RE.test(lastNonEmptyLine(screen))) return null;
+    const prompt = parsePrompt(screen);
+    if (prompt) return { state: "clarifying_question", confidence: 1, data: { questions: [prompt.question] } };
+    return hasAiderActivity(screen) ? { state: "working", confidence: 1 } : null;
   },
 
   screenHasTui(screen: string): boolean {

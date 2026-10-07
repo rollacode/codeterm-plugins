@@ -54,6 +54,8 @@ Each tab records history in `<cwd>/.aider/history/<CODETERM_SESSION_BINDING_NONC
 
 Chat preserves fenced code, combines multiline user headings, hides thinking and tool chatter, and retains readable API errors. Applied edits, dry-run edit notices and commits appear as compact system rows after the answer. Permission prompts are reported only when the final nonempty screen line contains an unanswered question. Delta reads reconstruct context through `host.fs.readFileHead`, retaining stable byte-based identities across split turns. This reparses prior history on each delta; long sessions can cost more than line-oriented transcripts. No mutable parser state is shared between tabs or readers.
 
+The `classifyTabState` hook reports Aider's fixed spinner/repo-map markers and response output after a submitted input as `working`, and active permission prompts as `clarifying_question`. At an idle composer it returns no verdict: the current SDK has no idle classifier variant and no cursor geometry, so core owns idle through the declared prompt-line composer capability. This hook supplies provider evidence; the current core reactor does not map a working verdict into the displayed live activity state. Chat's `Loading chat…` attachment state is also owned by core and overrides live activity in the footer.
+
 Build and verify from the canonical checkout:
 
 ```bash

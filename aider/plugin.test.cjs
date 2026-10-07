@@ -424,6 +424,52 @@ test("endpoint schema uses supported object array fields", () => {
   assert.equal(endpoints.item.fields.find(f => f.key === "models").kind, "textarea");
 });
 
+// Representative frames reconstructed from the owner's observations and
+// Aider 0.86.2 waiting.py's fixed scan palette; not newly captured DEV output.
+const classify = (screenText, agentType = "aider") => plain(load().classifyTabState({tabId: "test", agentType, screenText}));
+test("Aider block spinner reports working", () => {
+  assert.deepEqual(classify("Aider v0.86.2\nModel: openai/mimo-v2.6-pro\n> Say hello\n  ░█       Waiting for openai/mimo-v2.6-pro\n"), {state: "working", confidence: 1});
+});
+test("Aider ASCII spinner reports working", () => {
+  assert.equal(classify("  =#       Waiting for openai/test").state, "working");
+});
+test("streaming output after a submitted user turn reports working", () => {
+  assert.equal(classify("Aider v0.86.2\n> Write a function\n```python\ndef hello():\n    print('hello')").state, "working");
+});
+test("repo map update marker reports working", () => {
+  assert.equal(classify("Aider v0.86.2\nUpdating repo map").state, "working");
+  assert.equal(classify("  █░       Updating repo map").state, "working");
+});
+test("idle prompt leaves idle geometry to core and suppresses old activity", () => {
+  const screen = "Aider v0.86.2\n> Say hello\n░█ Waiting for openai/test\nHello\nTokens: 3\n>\n\n";
+  assert.equal(classify(screen), null);
+  assert.equal(load().screenHasTui(screen), true);
+  assert.deepEqual(plain(load().detectEvents(screen)), []);
+});
+test("active question takes precedence over earlier generation", () => {
+  const screen = "Aider v0.86.2\n> Create hello.py\nHere is the code\n" + permissionQuestion;
+  assert.deepEqual(classify(screen), {state: "clarifying_question", confidence: 1, data: {questions: [permissionQuestion]}});
+});
+test("answered question returns to composer without a stale verdict", () => {
+  assert.equal(classify("Aider v0.86.2\n" + permissionQuestion + " y\nApplied edit to hello.py\n>"), null);
+});
+test("bare status prose and typed input alone are not activity evidence", () => {
+  for (const screen of ["", "Waiting for a reply", "> Typed but not submitted", "Aider v0.86.2\nModel: openai/test"]) assert.equal(classify(screen), null);
+});
+test("old spinner in scrollback does not classify an unrelated tail as working", () => {
+  assert.equal(classify("░█ Waiting for openai/test\n>\nSome unrelated line"), null);
+});
+test("classifier only handles its attributed Aider provider", () => {
+  assert.equal(classify("░█ Waiting for openai/test", "codex"), null);
+});
+
+test("typed input after an older completed turn is not streaming", () => {
+  assert.equal(classify("> Earlier question\nOld answer\n> Typed but not submitted"), null);
+});
+test("old output before a settled composer is not current turn evidence", () => {
+  assert.equal(classify("> Earlier question\nOld answer\n>\nOther output"), null);
+});
+
 let failed = 0;
 for (const [name, run] of tests) {
   try { run(); console.log(`  ok  ${name}`); }
