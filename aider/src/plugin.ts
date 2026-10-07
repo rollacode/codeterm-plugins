@@ -122,6 +122,15 @@ function historyFilePath(cwd: string, sessionId: string): string {
   return `${historyDir(cwd)}/${sessionId}.md`;
 }
 
+function resumeLaunchParams(params: ResumeParams): LaunchParams {
+  if (!/^[A-Za-z0-9_-]+$/.test(params.sessionId || "")) {
+    throw new Error("Aider resume requires the existing session ID.");
+  }
+  // Resume owns an existing history file; a new launch marker must not rename it.
+  return { ...params, sessionId: params.sessionId, launchMarker: params.sessionId,
+    restoreChatHistory: true, task: undefined };
+}
+
 interface HistoryFileEntry {
   id: string;
   path: string;
@@ -335,6 +344,7 @@ const plugin: PluginModule = {
     // Preserve aider's normal entry point in the PTY process tree. Python's
     // startup hook installs the adapter before aider.main runs, in its own venv.
     const parts = ["aider", ...modelLaunchArgs(p.args || [], selected.entry).map(quote)];
+    if (p.restoreChatHistory === true) parts.push("--restore-chat-history");
     const context = contextAttachments(p.contextFiles);
     for (const path of context.read) {
       let readable = false;
@@ -400,12 +410,12 @@ const plugin: PluginModule = {
   },
 
 
-  buildResumeCommand(_sessionId: string, _skipPermissions?: boolean): string {
-    return this.buildLaunchCommand({});
+  buildResumeCommand(sessionId: string, skipPermissions?: boolean): string {
+    return this.buildLaunchCommand(resumeLaunchParams({sessionId, skipPermissions}));
   },
 
   buildResumeCommandWithContext(params: ResumeParams): string {
-    return this.buildLaunchCommand({ ...params, task: params.systemPrompt || undefined });
+    return this.buildLaunchCommand(resumeLaunchParams(params));
   },
 
   launchOnboardingResponse(screen: string): { frameKey: string; step: string } | null {

@@ -292,6 +292,46 @@ test("resume context retains editable and read-only attachments", () => {
   assert.ok(command.includes("--file '/repo/edit.ts'"));
   assert.ok(command.includes("--read '/host/skill.md'"));
 });
+
+test("resume declares and enables history restoration in both modes and platforms", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json")));
+  assert.equal(manifest.spawn.restoresConversationHistoryOnResume, true);
+  for (const platform of ["linux", "windows"]) {
+    for (const plainMode of [true, false]) {
+      const p = load({platform: () => platform,
+        settingsJson: () => JSON.stringify({endpoints: [mimoEndpoint], plainMode})});
+      assert.match(p.buildResumeCommand("ct-original", true), /--restore-chat-history\b/);
+      assert.match(p.buildResumeCommand("ct-original", true), /--yes-always/);
+      const command = p.buildResumeCommandWithContext({sessionId: "ct-original", cwd: "/repo"});
+      assert.match(command, /DOMIOS_AIDER_SESSION_ID='ct-original'/);
+      assert.match(command, /--restore-chat-history\b/);
+      assert.match(command, /--chat-history-file/);
+      assert.doesNotMatch(command, /--message(?:-file)?\b/);
+      assert.doesNotMatch(p.buildLaunchCommand({cwd: "/repo", launchMarker: "ct-fresh"}), /--restore-chat-history\b/);
+    }
+  }
+});
+
+test("resume preserves history identity and attachments over a new launch marker", () => {
+  const p = configured([mimoEndpoint], {fs: {readFileHead: () => "", expandHome: path => path.replace("~/.codeterm", "/installed")}});
+  const command = p.buildResumeCommandWithContext({sessionId: "ct-original", launchMarker: "ct-new-launch", cwd: "/old repo",
+    contextFiles: {edit: ["/old repo/new.ts"], read: ["/host/skill.md"]}, toolLessInstructionsPath: "/host/rules.md",
+    systemPrompt: "Do not replay this as a user turn"});
+  assert.match(command, /DOMIOS_AIDER_SESSION_ID='ct-original'/);
+  assert.doesNotMatch(command, /ct-new-launch|Do not replay|(?:export |\$env:)CODETERM_SESSION_BINDING_NONCE=/);
+  assert.ok(command.includes('--chat-history-file "/old repo/.aider/history/${DOMIOS_AIDER_SESSION_ID}.md"'));
+  assert.ok(command.includes("--file '/old repo/new.ts'"));
+  assert.ok(command.includes("--read '/host/skill.md'"));
+  assert.ok(command.includes("--read '/host/rules.md'"));
+});
+
+test("resume refuses absent or invalid existing session identities", () => {
+  const p = configured([mimoEndpoint]);
+  for (const sessionId of ["", "../other", "bad/session", undefined]) {
+    assert.throws(() => p.buildResumeCommand(sessionId), /existing session ID/);
+    assert.throws(() => p.buildResumeCommandWithContext({sessionId}), /existing session ID/);
+  }
+});
 test("onboarding answers gitignore and documentation dialogs", () => {
   const p = load();
   assert.equal(p.launchOnboardingResponse("Add .aider* to .gitignore (recommended)? (Y)es/(N)o [Yes]:").step, "WQ==");
@@ -1035,10 +1075,37 @@ test("relay bounds cannot exceed history or split a Unicode character", () => {
   assert.equal(relayRead(f), null);
 });
 
-test("relay latest process generation cannot reuse old completion", () => {
+test("relay restart retains unconsumed completion with its original stable identity", () => {
   const f = relayFixture();
-  assert.equal(relayRead(f, [f.start, f.end, {...f.start, processGeneration: "boot2"}]), null);
+  assert.deepEqual(relayRead(f, [f.start, f.start, f.end]), relayRead(f)); // Startup IO reinitialization.
+  assert.deepEqual(relayRead(f, [f.start, f.end, {...f.start, processGeneration: "boot2"}]), relayRead(f));
+  assert.equal(relayRead(f, [f.start, f.end, {...f.start, processGeneration: "boot2"}], f.end.userRecordStart + 1), null);
   assert.equal(relayRead(f, [f.start, f.end, {...f.start, processGeneration: "boot2"}, f.end]), null);
+});
+
+test("relay resumed generation starts its own sequence without losing earlier turns", () => {
+  const first = relayFixture("Original brief", "First answer");
+  const second = relayFixture("Followup", "New answer");
+  const shift = byteLength(first.history);
+  const start = {...second.start, processGeneration: "boot2"};
+  const end = {...second.end, processGeneration: "boot2"};
+  for (const key of ["userRecordStart", "responseRecordStart", "responseRecordEnd", "historyBytes"]) end[key] += shift;
+  const f = {...first, history: first.history + second.history};
+  const records = [first.start, first.end, start, end];
+  assert.deepEqual(relayRead(f, records), relayRead(first));
+  const result = relayRead(f, records, first.end.userRecordStart + 1);
+  assert.equal(result.userText, "Followup");
+  assert.equal(result.answer, "New answer");
+  assert.equal(result.assistantTurnId, `aider:${relaySession}:boot2:answer:1:${end.responseRecordStart}`);
+  assert.deepEqual(relayRead(f, records, shift), result);
+});
+
+test("relay rejects restarted generation reuse and replayed old byte ranges", () => {
+  const f = relayFixture();
+  assert.equal(relayRead(f, [f.start, f.end, f.start]), null);
+  const start = {...f.start, processGeneration: "boot2"};
+  const replayed = {...f.end, processGeneration: "boot2"};
+  assert.equal(relayRead(f, [f.start, f.end, start, replayed], f.end.userRecordStart + 1), null);
 });
 
 test("relay rejects path traversal and reports unreadable evidence", () => {

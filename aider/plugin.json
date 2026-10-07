@@ -43,6 +43,7 @@
     "supportsLazySkills": false,
     "hasHooks": false,
     "sessionStartsOnFirstUserTurn": true,
+    "restoresConversationHistoryOnResume": true,
     "publicSendWaitsForStartupTurnCompletion": true,
     "supportsStructuredPrompts": false
   },

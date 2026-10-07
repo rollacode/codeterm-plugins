@@ -224,6 +224,50 @@ class AdapterTests(unittest.TestCase):
         self.assertLess(first["userRecordStart"], second["userRecordStart"])
         self.assertEqual([first["turnSequence"], second["turnSequence"]], [1, 2])
 
+    def test_restart_appends_generation_without_replaying_completed_turns(self):
+        self.run_turn([{"answer": "First answer"}], "Original brief é", newline="\r\n")
+        original_history = self.path.read_bytes()
+        original_records = self.records()
+        self.restore()
+        restore = adapter.install(FakeCoder, FakeIO, SwitchCoder, "ct-launch-test", "generation-resumed")
+        self.addCleanup(restore)
+        io = FakeIO(self.path, [{"answer": "Followup answer"}], newline="\r\n")
+        self.assertTrue(self.path.read_bytes().startswith(original_history))
+        records = self.records()
+        self.assertEqual(records[:-1], original_records)
+        self.assertEqual(records[-1]["kind"], "adapter_start")
+        self.assertEqual(records[-1]["processGeneration"], "generation-resumed")
+        self.assertIsNone(io._domios_turn_state.pending)
+        # Loading model context reads history; it must not log old input again.
+        self.path.read_text(encoding="utf-8")
+        self.assertEqual(self.records(), records)
+        FakeCoder(io).run("Followup")
+        ends = [record for record in self.records() if record["kind"] == "turn_complete"]
+        self.assertEqual(len(ends), 2)
+        self.assertEqual(ends[0], original_records[-1])
+        self.assertEqual([end["turnSequence"] for end in ends], [1, 1])
+        self.assertEqual(ends[1]["processGeneration"], "generation-resumed")
+        self.assertGreaterEqual(ends[1]["userRecordStart"], len(original_history))
+        raw = self.path.read_bytes()
+        self.assertEqual(raw.count(b"Original brief"), 1)
+        self.assertEqual(raw.count(b"#### Followup"), 1)
+        self.assertIn(b"Followup answer", raw[ends[1]["responseRecordStart"]:ends[1]["responseRecordEnd"]])
+
+    def test_restart_does_not_invent_completion_for_interrupted_old_input(self):
+        io = FakeIO(self.path)
+        io.user_input("Unfinished brief")
+        old_bytes = self.path.read_bytes()
+        self.restore()
+        restore = adapter.install(FakeCoder, FakeIO, SwitchCoder, "ct-launch-test", "generation-resumed")
+        self.addCleanup(restore)
+        resumed = FakeIO(self.path, [{"answer": "New answer"}])
+        self.assertEqual([record["kind"] for record in self.records()], ["adapter_start", "adapter_start"])
+        FakeCoder(resumed).run("New input")
+        ends = [record for record in self.records() if record["kind"] == "turn_complete"]
+        self.assertEqual(len(ends), 1)
+        self.assertGreaterEqual(ends[0]["userRecordStart"], len(old_bytes))
+        self.assertEqual(ends[0]["processGeneration"], "generation-resumed")
+
     def test_other_session_refuses_before_start_record(self):
         with self.assertRaisesRegex(adapter.AdapterError, "basename"):
             FakeIO(Path(self.tmp.name) / "wrong.md")

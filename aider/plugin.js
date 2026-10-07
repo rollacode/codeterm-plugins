@@ -243,7 +243,8 @@ function readRelayEvidence(history, sidecar, sessionId, afterOffset) {
   const lines = sidecar.split("\n");
   lines.pop();
   let generation = null;
-  let records = [];
+  const generations = /* @__PURE__ */ new Set();
+  const records = [];
   for (const line of lines) {
     if (!line.trim()) continue;
     let record;
@@ -255,8 +256,9 @@ function readRelayEvidence(history, sidecar, sessionId, afterOffset) {
     if (!record || record.version !== 1 || record.sessionId !== sessionId || record.launchMarker !== sessionId || typeof record.processGeneration !== "string" || !record.processGeneration) return null;
     if (record.kind === "adapter_start") {
       if (record.aiderVersion !== "0.86.2") return unavailable("Unsupported Aider adapter version; install aider-chat==0.86.2.");
+      if (generations.has(record.processGeneration) && (record.processGeneration !== generation || records.some((turn) => turn.processGeneration === generation))) return null;
       generation = record.processGeneration;
-      records = [];
+      generations.add(generation);
     } else if (record.kind === "turn_complete") {
       if (!generation || record.processGeneration !== generation) return null;
       records.push(record);
@@ -266,10 +268,17 @@ function readRelayEvidence(history, sidecar, sessionId, afterOffset) {
   if (history === null) return null;
   const historyBytes = utf8Length(history);
   let sequence = 0;
+  let recordGeneration = null;
+  let previousHistoryBytes = 0;
   for (const record of records) {
+    if (record.processGeneration !== recordGeneration) {
+      recordGeneration = record.processGeneration;
+      sequence = 0;
+    }
     const { userRecordStart: user, responseRecordStart: start, responseRecordEnd: end, historyBytes: size, turnSequence: seq } = record;
-    if (!integer(user) || !integer(start) || !integer(end) || !integer(size) || !integer(seq) || seq <= sequence || user >= start || start > end || end > size) return null;
+    if (!integer(user) || !integer(start) || !integer(end) || !integer(size) || !integer(seq) || seq <= sequence || user >= start || start > end || end > size || user < previousHistoryBytes) return null;
     sequence = seq;
+    previousHistoryBytes = size;
     if (size > historyBytes) return null;
     if (user < afterOffset) continue;
     if (user && byteSlice(history, user - 1, user) !== "\n") return null;
@@ -288,7 +297,7 @@ function readRelayEvidence(history, sidecar, sessionId, afterOffset) {
     if (rows.some((row) => row.role === "user")) return null;
     const answer = rows.filter((row) => row.role === "assistant").flatMap((row) => row.blocks.filter((block) => block.kind === "text").map((block) => block.data.text)).join("\n\n").trim();
     if (!answer) return null;
-    return { ...identity, complete: true, assistantTurnId: `aider:${sessionId}:${generation}:answer:${seq}:${start}`, answer };
+    return { ...identity, complete: true, assistantTurnId: `aider:${sessionId}:${record.processGeneration}:answer:${seq}:${start}`, answer };
   }
   return null;
 }
@@ -499,6 +508,18 @@ function historyDir(cwd) {
 function historyFilePath(cwd, sessionId) {
   return `${historyDir(cwd)}/${sessionId}.md`;
 }
+function resumeLaunchParams(params) {
+  if (!/^[A-Za-z0-9_-]+$/.test(params.sessionId || "")) {
+    throw new Error("Aider resume requires the existing session ID.");
+  }
+  return {
+    ...params,
+    sessionId: params.sessionId,
+    launchMarker: params.sessionId,
+    restoreChatHistory: true,
+    task: void 0
+  };
+}
 function historyFileEntries(cwd) {
   const fs = globalThis.host?.fs;
   if (!fs || typeof fs.readDir !== "function") return [];
@@ -667,6 +688,7 @@ var plugin = {
       if (!startupDir) throw new Error("Domios Aider adapter is missing. Reinstall the plugin or explicitly set plainMode=true.");
     }
     const parts = ["aider", ...modelLaunchArgs(p.args || [], selected.entry).map(quote)];
+    if (p.restoreChatHistory === true) parts.push("--restore-chat-history");
     const context = contextAttachments(p.contextFiles);
     for (const path of context.read) {
       let readable = false;
@@ -721,11 +743,11 @@ var plugin = {
     const mkdir = isPowerShell ? `New-Item -ItemType Directory -Force -Path ${quote(historyDirPath)} | Out-Null;` : `mkdir -p ${quote(historyDirPath)};`;
     return withLaunchEnv(`${mkdir} ${command} ${historyFlags}`, p, selected.endpoint, startupDir);
   },
-  buildResumeCommand(_sessionId, _skipPermissions) {
-    return this.buildLaunchCommand({});
+  buildResumeCommand(sessionId, skipPermissions) {
+    return this.buildLaunchCommand(resumeLaunchParams({ sessionId, skipPermissions }));
   },
   buildResumeCommandWithContext(params) {
-    return this.buildLaunchCommand({ ...params, task: params.systemPrompt || void 0 });
+    return this.buildLaunchCommand(resumeLaunchParams(params));
   },
   launchOnboardingResponse(screen) {
     const prompt = parsePromptWithContext(String(screen || ""));

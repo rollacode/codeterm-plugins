@@ -35,7 +35,8 @@ export function readRelayEvidence(history: string | null, sidecar: string | null
   const lines = sidecar.split("\n");
   lines.pop(); // An unterminated append is never authoritative.
   let generation: string | null = null;
-  let records: Record<string, unknown>[] = [];
+  const generations = new Set<string>();
+  const records: Record<string, unknown>[] = [];
   for (const line of lines) {
     if (!line.trim()) continue;
     let record: Record<string, unknown>;
@@ -44,8 +45,12 @@ export function readRelayEvidence(history: string | null, sidecar: string | null
         typeof record.processGeneration !== "string" || !record.processGeneration) return null;
     if (record.kind === "adapter_start") {
       if (record.aiderVersion !== "0.86.2") return unavailable("Unsupported Aider adapter version; install aider-chat==0.86.2.");
+      // Aider can rebuild IO during startup before any turn. An idempotent
+      // start is safe there, but a completed/older generation cannot restart.
+      if (generations.has(record.processGeneration) && (record.processGeneration !== generation ||
+        records.some(turn => turn.processGeneration === generation))) return null;
       generation = record.processGeneration;
-      records = [];
+      generations.add(generation);
     } else if (record.kind === "turn_complete") {
       if (!generation || record.processGeneration !== generation) return null;
       records.push(record);
@@ -55,11 +60,18 @@ export function readRelayEvidence(history: string | null, sidecar: string | null
   if (history === null) return null;
   const historyBytes = utf8Length(history);
   let sequence = 0;
+  let recordGeneration: unknown = null;
+  let previousHistoryBytes = 0;
   for (const record of records) {
+    if (record.processGeneration !== recordGeneration) {
+      recordGeneration = record.processGeneration;
+      sequence = 0;
+    }
     const { userRecordStart: user, responseRecordStart: start, responseRecordEnd: end, historyBytes: size, turnSequence: seq } = record;
     if (!integer(user) || !integer(start) || !integer(end) || !integer(size) || !integer(seq) || seq <= sequence ||
-        user >= start || start > end || end > size) return null;
+        user >= start || start > end || end > size || user < previousHistoryBytes) return null;
     sequence = seq;
+    previousHistoryBytes = size;
     if (size > historyBytes) return null; // History/sidecar reads raced; retry on next event.
     if (user < afterOffset) continue;
     if (user && byteSlice(history, user - 1, user) !== "\n") return null;
@@ -79,7 +91,7 @@ export function readRelayEvidence(history: string | null, sidecar: string | null
     const answer = rows.filter(row => row.role === "assistant")
       .flatMap(row => row.blocks.filter(block => block.kind === "text").map(block => block.data.text)).join("\n\n").trim();
     if (!answer) return null;
-    return { ...identity, complete: true, assistantTurnId: `aider:${sessionId}:${generation}:answer:${seq}:${start}`, answer };
+    return { ...identity, complete: true, assistantTurnId: `aider:${sessionId}:${record.processGeneration}:answer:${seq}:${start}`, answer };
   }
   return null;
 }
