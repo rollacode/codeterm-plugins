@@ -220,6 +220,50 @@ test("every complete-line split converges to the same clean transcript", () => {
   }
 });
 
+const permissionQuestion = "Create new file? (Y)es/(N)o [Yes]:";
+test("unanswered final permission question is reported", () => {
+  const p = load();
+  const screen = "Aider v0.86\n> old prompt\nhello.py\n" + permissionQuestion + "\n\n";
+  assert.equal(p.parsePrompt(screen).question, permissionQuestion);
+  assert.deepEqual(plain(p.detectEvents(screen)), ["permission_request"]);
+  assert.equal(p.hasEventMarkers(screen), true);
+});
+test("idle composer suppresses stale permission prompts and events", () => {
+  const p = load();
+  for (const composer of [">", "ask>", "code>"]) {
+    const screen = permissionQuestion + "\nApplied edit to hello.py\n" + composer + "\n\n";
+    assert.equal(p.parsePrompt(screen), null);
+    assert.deepEqual(plain(p.detectEvents(screen)), []);
+    assert.equal(p.hasEventMarkers(screen), false);
+    assert.equal(p.launchOnboardingResponse(screen), null);
+    assert.equal(p.launchOnboardingSafeChoice(screen), null);
+  }
+});
+test("answered question on its original line is no longer live", () => {
+  const p = load();
+  const screen = permissionQuestion + " y\n";
+  assert.equal(p.parsePrompt(screen), null);
+  assert.deepEqual(plain(p.detectEvents(screen)), []);
+});
+test("generation following a stale question does not reopen the banner", () => {
+  const p = load();
+  const screen = permissionQuestion + "\nGenerating a response...\n";
+  assert.equal(p.parsePrompt(screen), null);
+  assert.deepEqual(plain(p.detectEvents(screen)), []);
+});
+test("latest unanswered question wins over an older question", () => {
+  const p = load();
+  const last = "Run shell command? (Y)es/(N)o";
+  assert.equal(p.parsePrompt(permissionQuestion + "\n>\n" + last).question, last);
+});
+test("onboarding ignores old dialogs after the composer returns", () => {
+  const p = load();
+  const screen = "Add .aider* to .gitignore (recommended)? (Y)es/(N)o [Yes]:\nAider v0.86\n>";
+  assert.equal(p.launchOnboardingResponse(screen), null);
+  assert.equal(p.launchOnboardingSafeChoice(screen), null);
+  assert.deepEqual(plain(p.detectEvents(screen)), []);
+});
+
 let failed = 0;
 for (const [name, run] of tests) {
   try { run(); console.log(`  ok  ${name}`); }

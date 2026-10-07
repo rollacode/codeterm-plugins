@@ -195,29 +195,18 @@ function isStartupDialog(question: string): boolean {
   return GITIGNORE_QUESTION_RE.test(question) || DOCS_URL_QUESTION_RE.test(question);
 }
 
-function parsePrompt(text: string): ParsedPrompt | null {
-  const screen = String(text || "");
-  const lines = screen.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const question = lines[i].trim();
-    if (!PROMPT_QUESTION_RE.test(question)) continue;
-    if (isStartupDialog(question)) continue;
-    const options: [string, string][] = [["Yes", "1"], ["No", "2"]];
-    return { question, options };
-  }
-  return null;
+/** A question is live only at the end of the current screen. Scrollback may
+ * still contain answered questions while Aider has returned to its composer. */
+function parsePromptWithContext(text: string): ParsedPrompt | null {
+  const question = lastNonEmptyLine(String(text || ""));
+  if (!PROMPT_QUESTION_RE.test(question)) return null;
+  const options: [string, string][] = [["Yes", "1"], ["No", "2"]];
+  return { question, options };
 }
 
-function parsePromptWithContext(text: string): ParsedPrompt | null {
-  const screen = String(text || "");
-  const lines = screen.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const question = lines[i].trim();
-    if (!PROMPT_QUESTION_RE.test(question)) continue;
-    const options: [string, string][] = [["Yes", "1"], ["No", "2"]];
-    return { question, options };
-  }
-  return null;
+function parsePrompt(text: string): ParsedPrompt | null {
+  const prompt = parsePromptWithContext(text);
+  return prompt && !isStartupDialog(prompt.question) ? prompt : null;
 }
 
 function promptSafeChoice(prompt: ParsedPrompt | null | undefined, screen: string): string | null {
