@@ -2,14 +2,8 @@
   "schemaVersion": 1,
   "name": "codeterm-plugins",
   "displayName": "CodeTerm Plugins",
-  "description": "Andrey's CodeTerm capability plugins — Git, Transcriber, Bitwarden, LM Studio, Chat Preprocessor, Pebble, Grok.",
+  "description": "Andrey's CodeTerm capability plugins — Git, Transcriber, Bitwarden, Chat Preprocessor, Pebble, Grok.",
   "plugins": [
-    {
-      "id": "lmstudio",
-      "path": "lmstudio",
-      "version": "0.2.3",
-      "minCodeterm": "1.12.3"
-    },
     {
       "id": "git",
       "path": "git",

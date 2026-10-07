@@ -1,7 +1,0 @@
-{
-  "object": "list",
-  "data": [
-    { "id": "owner/model-a", "object": "model", "name": "Model A" },
-    { "id": "owner/model-b", "object": "model" }
-  ]
-}

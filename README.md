@@ -10,6 +10,8 @@ This channel is pre-registered out of the box — its plugins show up under
 - **pebble** — authenticated Pebble ring webhook receiver
 - **grok** — optional xAI Grok CLI PTY agent (not a core provider)
 
+Local model connections and structured decisions use the bundled OpenCode provider in Domios through `codeterm model-provider`. This channel ships no chat backend.
+
 ## Authoring
 
 Plugins are written in TypeScript against the published, type-only
@@ -21,7 +23,7 @@ optional view half (a React app rendered in the host's sandboxed iframe via
 
 ```bash
 npm install
-npm run build:all          # build git, bitwarden, transcriber
+npm run build:all          # build every plugin in this channel
 npm run build git          # build a single plugin
 npm run typecheck          # tsc --noEmit across all plugin sources
 npm test                   # plugin-side parser tests (via tsx)
