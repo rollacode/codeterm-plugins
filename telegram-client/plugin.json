@@ -5,6 +5,7 @@
   "hostApi": 2,
   "displayName": "Telegram Client",
   "description": "Sign in to Telegram, find chats by name, read bounded history, search message text, send plain or native HTML messages (--format plain|html), and send files for the owner with an idempotent send ledger.",
+  "pitch": "Let agents find your Telegram chats, read them and send messages for you.",
   "readme": "README.md",
   "iconHint": "✈️",
   "iconColor": "#2796D8",

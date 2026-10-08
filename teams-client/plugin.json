@@ -5,6 +5,7 @@
   "hostApi": 2,
   "displayName": "Teams Client",
   "description": "Sign in to Microsoft Teams as the Teams client (device code, no app registration), find chats by name, search message text, read bounded history, and send messages and files for the owner with an idempotent send ledger. Wraps the pinned exo-teams CLI.",
+  "pitch": "Let agents search your Teams chats and send messages and files as you.",
   "readme": "README.md",
   "iconHint": "💬",
   "iconColor": "#6264A7",
