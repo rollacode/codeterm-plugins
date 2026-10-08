@@ -983,6 +983,26 @@ test("relay final reflection answer excludes earlier answers and thinking", () =
   assert.equal(relayRead(f).answer, "Grounded final\n```ts\nconst x = 1;\n```");
 });
 
+test("relay report starts at its marker after CRLF reasoning and blank lines", () => {
+  const answer = '<domios type="report" status="in_review">\nopaque result\n</domios>';
+  const f = relayFixture("Review", "<thinking-content-x>private reasoning</thinking-content-x>\r\n\r\n" + answer.replace(/\n/g, "\r\n"));
+  const result = relayRead(f);
+  assert.equal(result.complete, true);
+  assert.equal(result.answer, answer);
+  assert.deepEqual(relayRead(f), result);
+  assert.equal(relayRead(f, undefined, f.end.historyBytes), null);
+});
+
+test("relay reflection limit never upgrades a marker-shaped answer to success", () => {
+  const f = relayFixture("Review", '<domios type="report" status="in_review">\r\nopaque result');
+  f.end.complete = false;
+  f.end.outcome = "reflection_limit";
+  const result = relayRead(f);
+  assert.equal(result.complete, false);
+  assert.equal(result.outcome, "reflection_limit");
+  assert.equal(result.answer, undefined);
+});
+
 test("relay /ask keeps original payload identity despite nested input echo", () => {
   const f = relayFixture("/ask inspect", "Final", "#### inspect  \r\n\r\n");
   assert.equal(relayRead(f).userText, "/ask inspect");
