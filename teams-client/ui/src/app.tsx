@@ -26,6 +26,8 @@ export type Health = {
   upn?: string | null;
   expiresOn?: string | null;
   loginJobId?: string | null;
+  signInUrl?: string;
+  deviceCode?: string;
 };
 
 export type Chat = { id: string; title: string; topic?: string | null; chatType?: string | null; members?: string[]; username?: string | null };
@@ -40,6 +42,23 @@ export type SendPreview = {
   restriction?: string | null;
 };
 
+export function SignInLink({ url, code }: { url: string; code?: string }) {
+  if (code) return (
+    <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+      <span style={{ fontSize: 12.5 }}>Open this page in your usual browser, enter the code, and sign in. If the code expired, choose Sign in again.</span>
+      <a href={url} target="_blank" rel="noopener noreferrer" style={{ fontWeight: 600 }}>{url}</a>
+      <pre style={{ ...codeBlock, fontSize: 16, fontWeight: 700, userSelect: "all" }}>{code}</pre>
+    </div>
+  );
+  return (
+    <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+      <span style={{ fontSize: 12.5 }}>Open this link in your usual browser on this computer and sign in. If the tab was closed or the link expired, choose Sign in again.</span>
+      <a href={url} target="_blank" rel="noopener noreferrer" style={{ fontWeight: 600 }}>Open Microsoft sign-in</a>
+      <pre style={{ ...codeBlock, whiteSpace: "pre-wrap", wordBreak: "break-all", userSelect: "all" }}>{url}</pre>
+    </div>
+  );
+}
+
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -53,6 +72,9 @@ export function App() {
   const [blockedKey, setBlockedKey] = useState("");
   const [sendInProgress, setSendInProgress] = useState(false);
   const [jobId, setJobId] = useState("");
+  const [signInUrl, setSignInUrl] = useState("");
+  const [deviceCode, setDeviceCode] = useState("");
+  const [linkPolls, setLinkPolls] = useState(0);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -62,6 +84,7 @@ export function App() {
       const current = await window.ct!.invoke("status") as Health;
       setHealth(current);
       if (current.loginJobId) setJobId(current.loginJobId);
+      if (current.signInUrl) { setSignInUrl(current.signInUrl); setDeviceCode(current.deviceCode || ""); }
       const listed = await window.ct!.invoke("accounts") as { accounts?: Account[]; error?: string };
       setAccounts(Array.isArray(listed.accounts) ? listed.accounts : []);
       const chatResult = await window.ct!.invoke("chats") as { result?: string; error?: string };
@@ -87,32 +110,13 @@ export function App() {
     setBusy(true);
     setMessage("");
     try {
-      const result = await window.ct!.invoke("loginStart") as { jobId?: string; error?: string; message?: string };
+      const result = await window.ct!.invoke("loginStart") as { done?: boolean; error?: string; message?: string; signInUrl?: string; deviceCode?: string };
       if (result.error) throw new Error(result.error);
-      setJobId(result.jobId || "");
-      setMessage(result.message || "Microsoft browser sign-in started.");
-    } catch (error) {
-      setMessage(String(error));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function checkLogin() {
-    if (!jobId) return;
-    setBusy(true);
-    try {
-      const result = await window.ct!.invoke("loginPoll", { jobId }) as {
-        done?: boolean;
-        jobId?: string;
-        state?: string;
-        error?: string;
-        message?: string;
-      };
-      if (result.done) setJobId("");
-      else if (result.jobId) setJobId(result.jobId);
-      if (result.error) setMessage(result.error);
-      else setMessage(result.message || "Sign-in is still running. Complete it in the browser, then check again.");
+      setSignInUrl(result.signInUrl || "");
+      setDeviceCode(result.deviceCode || "");
+      setLinkPolls(0);
+      setJobId(result.done ? "" : "sign-in");
+      setMessage(result.message || "Microsoft sign-in started.");
       if (result.done) await refresh();
     } catch (error) {
       setMessage(String(error));
@@ -120,6 +124,39 @@ export function App() {
       setBusy(false);
     }
   }
+
+  async function checkLogin(quiet = false) {
+    if (!jobId) return;
+    if (!quiet) setBusy(true);
+    try {
+      const result = await window.ct!.invoke("loginPoll") as {
+        done?: boolean;
+        state?: string;
+        error?: string;
+        message?: string;
+        signInUrl?: string;
+        deviceCode?: string;
+      };
+      if (result.done) { setJobId(""); setSignInUrl(""); setDeviceCode(""); }
+      else {
+        setSignInUrl(result.signInUrl || "");
+        setDeviceCode(result.deviceCode || "");
+      }
+      if (result.error) setMessage(result.error);
+      else setMessage(result.message || "Sign-in is still running. Enter the code at the Microsoft page, then check again.");
+      if (result.done) await refresh();
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      if (!quiet) setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!jobId || linkPolls >= 600) return;
+    const timer = setTimeout(() => void checkLogin(true).finally(() => setLinkPolls((count) => count + 1)), signInUrl ? 4000 : 2000);
+    return () => clearTimeout(timer);
+  }, [jobId, signInUrl, linkPolls]);
 
   async function useAccount(id: string) {
     setBusy(true);
@@ -189,7 +226,7 @@ export function App() {
     if (!preview) return;
     setBusy(true);
     setSendInProgress(true);
-    setMessage("Sending with m365. Throttling retries can take about 10 seconds or more without output; wait for this result before taking another action.");
+    setMessage("Sending through exo-teams, then reading the chat back for the message id. This can take up to a minute; wait for this result before taking another action.");
     setSendResult("");
     try {
       const response = await window.ct!.invoke("send", {
@@ -237,12 +274,13 @@ export function App() {
           </Actions>
         </Section>
       ) : section === "unknown" ? null : (
-        <Section title="Sign in" hint="Use your Microsoft 365 work or school account. Sign-in opens in your browser.">
+        <Section title="Sign in" hint="Sign in as the Teams client with your work account: you get a code to enter at Microsoft's page in your usual browser. No app approval is needed.">
           {accounts.length > 0 && <AccountList accounts={accounts} busy={busy} onUse={(id) => void useAccount(id)} />}
+          {jobId && signInUrl && <SignInLink url={signInUrl} code={deviceCode} />}
           <Actions>
             {jobId
               ? <Btn kind="primary" disabled={busy} onClick={() => void checkLogin()}>Check sign-in status</Btn>
-              : <Btn kind="primary" disabled={busy} onClick={() => void startLogin()}>{busy ? "Working…" : "Sign in with browser"}</Btn>}
+              : <Btn kind="primary" disabled={busy} onClick={() => void startLogin()}>{busy ? "Working…" : "Get sign-in code"}</Btn>}
           </Actions>
         </Section>
       )}
@@ -290,10 +328,9 @@ export function App() {
       </Section>
 
       <Disclosure summary="Security details">
-        <p style={{ margin: "0 0 6px" }}>If your tenant allows user consent, approve the m365 permissions in the browser. If it restricts user consent, a tenant administrator must approve those permissions once. This plugin does not create an Entra app registration.</p>
-        <p style={{ margin: "0 0 6px" }}>Every send is recorded in a local idempotency ledger, so a repeated key is never sent twice, and a send without a Graph message id is reported as unknown rather than delivered.</p>
-        <p style={{ margin: "0 0 6px" }}>m365 retries throttling internally. A surfaced 429 or 503 is recorded as unknown because the message may already have arrived.</p>
-        <p style={{ margin: 0 }}>Agent verbs: accounts, use, chats, history, health, preview, send, logout.</p>
+        <p style={{ margin: "0 0 6px" }}>Sign-in runs the pinned exo-teams CLI as the Microsoft Teams desktop client with a device code, so no app registration or admin consent is involved. Its tokens stay in this plugin's private, ACL-restricted directory.</p>
+        <p style={{ margin: "0 0 6px" }}>Every send is recorded in a local idempotency ledger, so a repeated key is never sent twice. exo-teams retries throttling and server errors itself, so a surfaced one is recorded as unknown because the message may already have arrived.</p>
+        <p style={{ margin: 0 }}>Agent verbs: login, login-status, health, accounts, chats, search, history, preview, send, send-to, logout.</p>
       </Disclosure>
     </main>
   );
@@ -328,7 +365,7 @@ export function PreviewCard({ preview, previewMatches, sendEnabled, busy, sendIn
             <Btn kind="primary" disabled={!sendEnabled} onClick={onSend}>{sendInProgress ? "Sending…" : "Send"}</Btn>
             <Btn disabled={busy} onClick={onEdit}>Edit</Btn>
           </Actions>
-          {previewMatches && <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--ct-muted, #9aa)" }}>Sending can pause for 10 seconds or more while Microsoft throttles. Wait for the result.</p>}
+          {previewMatches && <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--ct-muted, #9aa)" }}>Sending can take up to a minute while the chat is read back for the message id. Wait for the result.</p>}
           {sendResult && <pre role="status" style={codeBlock}>{sendResult}</pre>}
         </div>
   );

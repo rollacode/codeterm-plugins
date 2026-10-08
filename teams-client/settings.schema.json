@@ -1,18 +1,24 @@
-{
-  "type": "object",
-  "properties": {
-    "historyCount": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 50,
-      "default": 20
-    },
-    "historyMaxBytes": {
-      "type": "integer",
-      "minimum": 1024,
-      "maximum": 32768,
-      "default": 32768
-    }
-  },
-  "additionalProperties": false
-}
+[
+  {
+    "kind": "section",
+    "title": "History",
+    "fields": [
+      {
+        "kind": "number",
+        "key": "historyCount",
+        "label": "Messages per history read",
+        "default": 20,
+        "min": 1,
+        "max": 50
+      },
+      {
+        "kind": "number",
+        "key": "historyMaxBytes",
+        "label": "History size cap (bytes)",
+        "default": 32768,
+        "min": 1024,
+        "max": 32768
+      }
+    ]
+  }
+]
