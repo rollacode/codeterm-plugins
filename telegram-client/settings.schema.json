@@ -46,5 +46,20 @@
         "description": "Hard upper bound for one history response."
       }
     ]
+  },
+  {
+    "kind": "section",
+    "title": "Files",
+    "fields": [
+      {
+        "kind": "number",
+        "key": "fileMaxMiB",
+        "label": "Maximum file size",
+        "default": 50,
+        "min": 1,
+        "max": 2000,
+        "description": "send-file refuses a file larger than this many MiB with file-too-large before uploading. Telegram's own limit is 2000 MiB."
+      }
+    ]
   }
 ]
