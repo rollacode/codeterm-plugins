@@ -1,0 +1,10 @@
+{
+  "name": "@codeterm/plugin-telegram-client",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Owner-gated Telegram account access, bounded history, resolved previews, and Saved-Messages-only sending for CodeTerm.",
+  "devDependencies": {
+    "@codeterm/plugin-sdk": "^1.10.22"
+  }
+}

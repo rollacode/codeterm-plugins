@@ -1,0 +1,50 @@
+[
+  {
+    "kind": "section",
+    "title": "Telegram API credentials",
+    "fields": [
+      {
+        "kind": "api_key",
+        "env_var": "api_id",
+        "label": "Telegram API ID",
+        "description": "Secret-store field for the API ID from my.telegram.org API development tools."
+      },
+      {
+        "kind": "api_key",
+        "env_var": "api_hash",
+        "label": "Telegram API hash",
+        "description": "Secret-store field for the API hash from my.telegram.org API development tools."
+      },
+      {
+        "kind": "api_key",
+        "env_var": "login_password",
+        "label": "Two-step verification password (one-time)",
+        "description": "Only when sign-in reports password-required: pipe it on stdin with --secret login_password, then run login-password, which reads and deletes it immediately."
+      }
+    ]
+  },
+  {
+    "kind": "section",
+    "title": "History limits",
+    "fields": [
+      {
+        "kind": "number",
+        "key": "historyCount",
+        "label": "Default messages",
+        "default": 20,
+        "min": 1,
+        "max": 50,
+        "description": "Default maximum number of messages returned by history."
+      },
+      {
+        "kind": "number",
+        "key": "historyMaxBytes",
+        "label": "Maximum output bytes",
+        "default": 32768,
+        "min": 1024,
+        "max": 32768,
+        "description": "Hard upper bound for one history response."
+      }
+    ]
+  }
+]
