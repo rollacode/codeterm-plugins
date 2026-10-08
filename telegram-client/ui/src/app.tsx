@@ -395,7 +395,7 @@ export function App() {
         <p style={{ margin: "0 0 6px" }}>The pinned release identifies this device as Telegram Desktop (Windows) in Telegram’s Devices list. Your own API ID and hash replace the release binary’s shared application credentials for this account; the hash is kept in the host secret store, never in a file or a command line.</p>
         <p style={{ margin: "0 0 6px" }}>Every send is recorded in a local idempotency ledger, so a repeated key is never sent twice, and a send whose confirmation was lost is reported as unknown rather than delivered.</p>
         <p style={{ margin: "0 0 6px" }}>A two-step verification password typed here goes straight to the sign-in process and is never stored.</p>
-        <p style={{ margin: 0 }}>Agent verbs: accounts, use, chats, history, health, login, login-status, login-password, logout, preview, send.</p>
+        <p style={{ margin: 0 }}>Agent verbs: accounts, use, chats, history, health, login, login-status, login-password, logout, preview, send, send-to. Send supports --format plain|html (default plain).</p>
       </Disclosure>
     </main>
   );

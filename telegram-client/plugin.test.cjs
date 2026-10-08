@@ -62,10 +62,13 @@ function mockHost(options = {}) {
   const continuations = new Map();
   const loginJobs = new Map();
   let sequence = 0;
+  let loginCount = 0;
   let continuationSequence = 0;
   let sendMode = options.sendMode || "sent";
   let whoamiError = options.whoamiError || "";
   let historyMessages = options.historyMessages || [{ id: 1, date: 10, out: false, text: "A recent message" }];
+  let uploadMode = options.uploadMode || "sent";
+  let searchData = options.searchData || { peer: { id: 0, type: "unknown" }, messages: [] };
 
   function commandArgs(args) {
     const out = [];
@@ -92,8 +95,26 @@ function mockHost(options = {}) {
       case "history": return words.length >= 2 && words.includes("--limit");
       case "whoami": return words.length === 1;
       case "logout": return words.length === 1;
-      case "send": return (words[1] === "--" && words.length === 3) || (words[1] === "--peer" && /^id:-?[0-9]+$/.test(words[2]) && words[3] === "--" && words.length === 5);
+      case "send": {
+        words = words.filter((word, index) => word !== "--html" || index > words.indexOf("--"));
+        return (words[1] === "--" && words.length === 3) || (words[1] === "--peer" && /^id:-?[0-9]+$/.test(words[2]) && words[3] === "--" && words.length === 5);
+      }
       case "login": return words.includes("--output") && words.includes("json");
+      case "upload": {
+        const end = words.indexOf("--");
+        const flags = words.slice(1, end);
+        const peerOk = flags[0] !== "--peer" || /^id:-?[0-9]+$/.test(flags[1]);
+        const rest = flags[0] === "--peer" ? flags.slice(2) : flags;
+        return end > 0 && words.length === end + 2 && peerOk && rest.every((word) => word === "--html" || word.startsWith("--message="));
+      }
+      case "search": {
+        const end = words.indexOf("--");
+        const flags = words.slice(1, end);
+        const global = flags[0] === "--global";
+        const limit = global ? flags.slice(1) : flags;
+        return end > 0 && limit.length === 2 && limit[0] === "--limit" && /^[0-9]+$/.test(limit[1])
+          && words.length === end + (global ? 2 : 3) && (global || /^(id:-?[0-9]+|me)$/.test(words[end + 1]));
+      }
       default: return false;
     }
   }
@@ -129,12 +150,26 @@ function mockHost(options = {}) {
     if (words[0] === "send") {
       if (sendMode === "timeout") return { code: 0, stdout: "", stderr: "", simulatedTimeout: true };
       if (sendMode === "rate-limited") return { code: 1, stdout: "", stderr: "FLOOD_WAIT_30" };
+      if (sendMode === "invalid-markup") return { code: 1, stdout: "", stderr: 'tg: send: style text: parse: expected tag "b", got "i"\n' };
       if (sendMode === "rejected") return { code: 1, stdout: "", stderr: "MESSAGE_TOO_LONG" };
       if (sendMode === "no-id") return { code: 0, stdout: envelope({ ok: true }), stderr: "" };
       return { code: 0, stdout: envelope({ message: { id: 9001 } }), stderr: "" };
     }
-    if (words[0] === "login" && options.loginLog !== undefined) return { code: 0, stdout: "", stderr: options.loginLog };
-    if (words[0] === "login") return { code: 0, stdout: envelope({ id: 777 }), stderr: "QR authorization link: tg://login?token=fixture-qrauth-token\nQR LOGIN COMPLETE" };
+    if (words[0] === "upload") {
+      const file = words[words.length - 1];
+      if (uploadMode === "open-error") return { code: 1, stdout: "", stderr: `tg: open "${file}": Access is denied.\n` };
+      if (uploadMode === "rate-limited") return { code: 1, stdout: "", stderr: "tg: send: FLOOD_WAIT_45" };
+      if (uploadMode === "lost") return { code: 1, stdout: "", stderr: "", error: "timed out after 60000ms" };
+      if (uploadMode === "no-id") return { code: 0, stdout: envelope({ files: [] }), stderr: "" };
+      return { code: 0, stdout: envelope({ files: [{ path: file, message_id: 9100 }] }), stderr: "" };
+    }
+    if (words[0] === "search") return { code: 0, stdout: envelope(searchData), stderr: "" };
+    if (words[0] === "login" && options.loginLog !== undefined) return { code: options.loginExitCode || 0, stdout: "", stderr: options.loginLog };
+    if (words[0] === "login") {
+      loginCount++;
+      const token = loginCount === 1 ? "fixture-qrauth-token" : `fixture-qrauth-token-${loginCount}`;
+      return { code: 0, stdout: envelope({ id: 777 }), stderr: `QR authorization link: tg://login?token=${token}\nQR LOGIN COMPLETE` };
+    }
     return { code: 1, stdout: "", stderr: `unexpected tg command: ${words.join(" ")}` };
   }
 
@@ -156,7 +191,8 @@ function mockHost(options = {}) {
       writeFileSync(opts.logFile, `${value.stdout || ""}${value.stderr || ""}`, { mode: 0o600 });
     }
     const loginPending = !!options.loginPending && commandArgs(opts.args || [])[0] === "login";
-    jobs.set(id, { ...value, done: !loginPending });
+    const uploadPending = uploadMode === "pending" && commandArgs(opts.args || [])[0] === "upload";
+    jobs.set(id, { ...value, done: !loginPending && !uploadPending });
     if (commandArgs(opts.args || [])[0] === "login") loginJobs.set(id, { ...value, done: !loginPending });
     return { jobId: id };
   };
@@ -201,7 +237,8 @@ function mockHost(options = {}) {
       writeFile: (file, body) => { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, body, { mode: 0o600 }); return true; },
       removeFile: (file) => { try { rmSync(file); return true; } catch { return false; } },
       makeDirs: (file) => { mkdirSync(file, { recursive: true, mode: 0o700 }); return true; },
-      readDir: (dir) => { try { return fs.readdirSync(dir, { withFileTypes: true }).map((entry) => ({ name: entry.name, path: join(dir, entry.name), isFile: entry.isFile(), isDir: entry.isDirectory() })); } catch { return []; } },
+      readFileHead: (file, maxBytes) => { try { return readFileSync(file, "utf8").slice(0, maxBytes); } catch { return null; } },
+      readDir: (dir) => { try { return fs.readdirSync(dir, { withFileTypes: true }).map((entry) => ({ name: entry.name, path: join(dir, entry.name), isFile: entry.isFile(), isDir: entry.isDirectory(), size: statSync(join(dir, entry.name)).size })); } catch { return []; } },
     },
   };
 
@@ -210,10 +247,15 @@ function mockHost(options = {}) {
     setWhoamiError(value) { whoamiError = value; },
     setHistoryMessages(value) { historyMessages = value; },
     setSendMode(value) { sendMode = value; },
+    setUploadMode(value) { uploadMode = value; },
+    setSearchData(value) { searchData = value; },
+    finishJob(id) { jobs.set(id, { ...(jobs.get(id) || {}), done: true }); },
     finishLogin(id) { loginJobs.set(id, { ...(loginJobs.get(id) || {}), done: true }); },
     cleanup() { globalThis.host = new Proxy({}, { get: () => () => { throw new Error("host called at load time"); } }); rmSync(root, { recursive: true, force: true }); },
   };
 }
+
+function loginLogs(env) { return fs.readdirSync(env.root).filter((name) => /^login-.*\.log$/.test(name)); }
 
 function configureLoggedInFixture(env) {
   const selected = env.accounts.find((account) => account.default);
@@ -510,6 +552,61 @@ test("an idempotent retry with the same key returns the recorded message id with
     const rebound = plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["id:5005", "--key", "retry-1", "test"] });
     assert.match(rebound.error, /^invalid-request:.*different chat or text/i);
     assert.equal(sendCalls(env).length, 1);
+  } finally { env.cleanup(); }
+});
+
+test("formats default to plain and map HTML to the native flag", () => {
+  const parse = plugin.__test_parseSendArgs;
+  assert.equal(parse(["id:777", "<b>hello</b>"]).format, "plain");
+  for (const flags of [["--format", "html", "--key", "key"], ["--key", "key", "--format", "html"]]) {
+    assert.equal(parse(["id:777", ...flags, "<b>hello</b>"]).format, "html");
+  }
+  assert.equal(parse(["id:777", "--", "--format", "html"]).text, "--format html");
+  for (const tail of [["--format"], ["--format", "bad", "body"], ["--format", "html"], ["--format", "html", "--format", "plain", "body"]]) {
+    assert.match(parse(["id:777", ...tail]).error, /^invalid-request:/);
+  }
+  assert.deepEqual(plugin.__test_sendFormatArgs("plain"), []);
+  assert.deepEqual(plugin.__test_sendFormatArgs("html"), ["--html"]);
+  assert.throws(() => plugin.__test_sendFormatArgs("markdown"), /no native Markdown/);
+  assert.equal(plugin.__test_sendPayloadHash("body", "plain"), plugin.__test_sha256Hex("body"));
+  assert.notEqual(plugin.__test_sendPayloadHash("body", "html"), plugin.__test_sendPayloadHash("body", "plain"));
+});
+
+test("send and send-to forward HTML and bind retry keys to format", () => {
+  for (const verb of ["send", "send-to"]) {
+    const env = mockHost();
+    try {
+      configureLoggedInFixture(env);
+      const args = ["id:777", "--key", "formatted", "--format", "html", "<b>Аня 👋</b>"];
+      assert.equal(JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb, args }).result).status, "sent");
+      assert.deepEqual(sendCalls(env)[0].words, ["send", "--html", "--", "<b>Аня 👋</b>"]);
+      assert.equal(JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb, args }).result).status, "sent");
+      assert.match(plugin.onAgentCommand({ sessionId: "s", verb, args: ["id:777", "--key", "formatted", "<b>Аня 👋</b>"] }).error, /^invalid-request:/);
+      assert.equal(sendCalls(env).length, 1);
+    } finally { env.cleanup(); }
+  }
+});
+
+test("native parse failure preserves the client message and records no acceptance", () => {
+  const env = mockHost({ sendMode: "invalid-markup" });
+  try {
+    configureLoggedInFixture(env);
+    const result = plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["id:777", "--format", "html", "<b>bad</i>"] });
+    assert.equal(result.error, 'invalid-markup: tg: send: style text: parse: expected tag "b", got "i"');
+    const attempt = JSON.parse(readFileSync(plugin.__test_paths().outbox, "utf8")).attempts[0];
+    assert.equal(attempt.state, "failed");
+    assert.equal(attempt.failure, "invalid-markup");
+    assert.equal(attempt.telegramMessageId, undefined);
+  } finally { env.cleanup(); }
+});
+
+test("unsupported Markdown invokes no client and writes no outbox", () => {
+  const env = mockHost();
+  try {
+    configureLoggedInFixture(env);
+    assert.match(plugin.onAgentCommand({ sessionId: "s", verb: "send-to", args: ["id:777", "--format", "markdown", "**hi**"] }).error, /no native Markdown/);
+    assert.equal(env.calls.length, 0);
+    assert.equal(existsSync(plugin.__test_paths().outbox), false);
   } finally { env.cleanup(); }
 });
 
@@ -905,7 +1002,7 @@ test("view login flow reads the QR log and confirms the selected account", () =>
     assert.equal(done.state, "logged-in");
     assert.equal(done.currentAccount, "default");
     assert.match(done.output, /QR LOGIN COMPLETE/);
-    assert.equal(existsSync(join(env.root, "login-default.log")), false);
+    assert.deepEqual(loginLogs(env), []);
     const current = plugin.viewCall("status");
     assert.equal(current.currentAccount, "default");
     assert.equal(current.account.name, "Owner");
@@ -937,6 +1034,85 @@ test("agent login returns the QR payload and tg link without returning the store
     assert.doesNotMatch(complete.result, new RegExp(apiHash));
     assert.ok(env.closedJobs.includes(JSON.parse(started.result).jobId), "completed detached login job is released");
     for (const call of env.calls) for (const arg of call.args) assert.equal(arg.includes(apiHash), false);
+  } finally { env.cleanup(); }
+});
+
+test("a second login while a QR login is pending cancels the old job and its log, then shows only the fresh QR", () => {
+  const env = mockHost({ loginPending: true, secrets: { api_id: "887766", api_hash: "1234567890abcdef1234567890abcdef" } });
+  try {
+    plugin.__test_resetLoginJobs();
+    const first = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login", args: [] }).result);
+    assert.equal(first.qrPayload, "tg://login?token=fixture-qrauth-token");
+    const firstLogs = loginLogs(env);
+    assert.equal(firstLogs.length, 1);
+
+    const second = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login", args: [] }).result);
+    assert.notEqual(second.jobId, first.jobId, "a second login starts a new job instead of returning the pending one");
+    assert.ok(env.closedJobs.includes(first.jobId), "the pending job is closed through the host job API");
+    assert.equal(second.qrPayload, "tg://login?token=fixture-qrauth-token-2");
+    assert.equal(decodeQrSvg(second.qrSvg), second.tgLink);
+    const secondLogs = loginLogs(env);
+    assert.equal(secondLogs.length, 1, "the cancelled job's log is removed");
+    assert.notDeepEqual(secondLogs, firstLogs, "each job writes its own log file");
+    assert.match(plugin.__test_loginPoll(first.jobId).error, /Unknown login job/);
+
+    const status = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login-status", args: [] }).result);
+    assert.equal(status.jobId, second.jobId);
+    assert.equal(status.qrPayload, second.qrPayload, "login-status never shows the stale QR");
+    const view = plugin.viewCall("status", {});
+    assert.equal(view.loginJobId, second.jobId);
+
+    const launches = env.calls.filter((call) => call.words[0] === "login");
+    assert.equal(launches.length, 2);
+    for (const call of launches) {
+      assert.equal(call.detach, true);
+      assert.equal(call.timeoutMs, 15 * 60_000, "a host that waits on detached jobs must not kill the QR login at its 30 s default");
+    }
+
+    env.finishLogin(second.jobId);
+    const done = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login-status", args: [] }).result);
+    assert.equal(done.state, "logged-in");
+    assert.deepEqual(loginLogs(env), []);
+  } finally { env.cleanup(); }
+});
+
+test("when the host reports tg's own non-zero exit, the 2FA prompt in the log still wins over a generic failure", () => {
+  const env = mockHost({ loginPending: true, loginLog: TG_2FA_PROMPT_LOG, loginExitCode: 1, secrets: { api_id: "887766", api_hash: "1234567890abcdef1234567890abcdef" } });
+  try {
+    plugin.__test_resetLoginJobs();
+    const started = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login", args: [] }).result);
+    env.finishLogin(started.jobId);
+    const status = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login-status", args: [] }).result);
+    assert.equal(status.state, "password-required");
+    assert.equal(status.next, "ask-password");
+  } finally { env.cleanup(); }
+  const crashed = mockHost({ loginPending: true, loginLog: "", loginExitCode: 2, secrets: { api_id: "887766", api_hash: "1234567890abcdef1234567890abcdef" } });
+  try {
+    plugin.__test_resetLoginJobs();
+    const started = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "login", args: [] }).result);
+    crashed.finishLogin(started.jobId);
+    assert.match(plugin.onAgentCommand({ sessionId: "s", verb: "login-status", args: [] }).error, /login needs attention/);
+  } finally { crashed.cleanup(); }
+});
+
+test("file and search request errors carry no text-send chat-id hint; text send keeps it", () => {
+  const env = mockHost({ chats: sendFixtureChats });
+  try {
+    configureLoggedInFixture(env);
+    const errors = [
+      plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["me", "report.pdf"] }).error,
+      plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["anna", ownerFile(env)] }).error,
+      plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["id:4242", ownerFile(env, "empty.txt", "")] }).error,
+      plugin.onAgentCommand({ sessionId: "s", verb: "send-file-status", args: ["nope"] }).error,
+      plugin.onAgentCommand({ sessionId: "s", verb: "search-messages", args: ["x", "--chat", "anna"] }).error,
+      plugin.onAgentCommand({ sessionId: "s", verb: "search-messages", args: ["x", "--limit", "0"] }).error,
+    ];
+    for (const error of errors) {
+      assert.match(error, /^invalid-request: /);
+      assert.equal(error.includes("Find the chat id"), false, error);
+      assert.equal(error.includes("then send again"), false, error);
+    }
+    assert.match(plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["Anna", "hi"] }).error, /Find the chat id with `chats <name>`/);
   } finally { env.cleanup(); }
 });
 
@@ -1184,7 +1360,7 @@ test("login-password reads the one-shot stdin secret, deletes it, and hands it t
     assert.equal(login.env.TG_PASSWORD, password);
     assert.ok(login.args.includes("default"), "the pending account label is reused");
     for (const call of env.calls) for (const arg of call.args) assert.equal(arg.includes(password), false, "password never in argv");
-    assert.equal(existsSync(join(env.root, "login-default.log")), false);
+    assert.deepEqual(loginLogs(env), []);
     for (const entry of fs.readdirSync(env.root)) {
       const file = join(env.root, entry);
       if (statSync(file).isFile()) assert.equal(readFileSync(file, "utf8").includes(password), false, `${entry} never holds the password`);
@@ -1312,6 +1488,304 @@ test("view renders configured setup, the signed-in account, and a masked input f
   const code = renderToStaticMarkup(React.createElement(LoginStepForm, { step: steps.classifyLoginOutput("Code (sent via Telegram): tg: callback: EOF").step, busy: false, onSubmit() {} }));
   assert.match(code, /Enter the code sent via Telegram/);
   assert.doesNotMatch(code, /<input/);
+});
+
+const messages = require("./src/messages.ts");
+const FILE_SECRET_BODY = "FILE-CONTENT-MARKER-never-leaves-the-file";
+
+function uploadCalls(env) { return env.calls.filter((call) => call.words[0] === "upload"); }
+function searchCalls(env) { return env.calls.filter((call) => call.words[0] === "search"); }
+function ownerFile(env, name = "report.pdf", body = FILE_SECRET_BODY) {
+  const dir = join(env.root, "owner files");
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, name);
+  writeFileSync(file, body);
+  return file;
+}
+function outboxText() { const file = plugin.__test_paths().outbox; return existsSync(file) ? readFileSync(file, "utf8") : ""; }
+
+test("send-file and search-messages argument parsing", () => {
+  assert.deepEqual(messages.parseSendFileArgs(["Anna", "C:\\Users\\me\\a b.pdf", "--message", "here you go", "--key", "f-1"]),
+    { chat: "Anna", path: "C:\\Users\\me\\a b.pdf", caption: "here you go", key: "f-1", format: "plain" });
+  assert.equal(messages.parseSendFileArgs(["id:1", "/tmp/x.txt", "--format", "html"]).format, "html");
+  assert.match(messages.parseSendFileArgs(["id:1", "report.pdf"]).error, /must be absolute/);
+  assert.match(messages.parseSendFileArgs(["id:1", "/tmp/x", "--format", "markdown"]).error, /no native Markdown/);
+  assert.match(messages.parseSendFileArgs(["id:1", "/tmp/x", "--message", "a", "b"]).error, /Unexpected argument "b"/);
+  assert.match(messages.parseSendFileArgs(["id:1", "/tmp/x", "--key", "bad key"]).error, /--key needs/);
+  assert.match(messages.parseSendFileArgs(["id:1"]).error, /^Usage: send-file/);
+  for (const value of ["C:\\a", "c:/a", "\\\\server\\share\\a", "/a"]) assert.equal(messages.isAbsolutePath(value), true, value);
+  for (const value of ["a", ".\\a", "~/a", "C:a"]) assert.equal(messages.isAbsolutePath(value), false, value);
+  assert.equal(messages.parentDir("C:\\x\\y.pdf"), "C:\\x");
+  assert.equal(messages.parentDir("C:\\y.pdf"), "C:\\");
+  assert.equal(messages.parentDir("/y.pdf"), "/");
+  assert.equal(messages.baseName("/home/me/y.pdf"), "y.pdf");
+
+  assert.deepEqual(messages.parseSearchArgs(["quarterly", "invoice", "--chat", "Anna Ivanova", "--limit", "5"]), { query: "quarterly invoice", chat: "Anna Ivanova", limit: 5 });
+  assert.deepEqual(messages.parseSearchArgs(["--limit", "3", "--", "--chat", "x"]), { query: "--chat x", chat: undefined, limit: 3 });
+  assert.equal(messages.parseSearchArgs(["hello"]).limit, 20);
+  for (const limit of ["0", "51", "x", "-1"]) assert.match(messages.parseSearchArgs(["q", "--limit", limit]).error, /from 1 to 50/);
+  assert.match(messages.parseSearchArgs(["--chat", "Anna"]).error, /must not be empty/);
+  assert.match(messages.parseSearchArgs(["q", "--chat"]).error, /needs a value/);
+});
+
+test("upload output yields exactly one server message id or none", () => {
+  assert.equal(messages.uploadedMessageId({ files: [{ path: "/x", message_id: 9100 }] }), "9100");
+  assert.equal(messages.uploadedMessageId({ files: [] }), null);
+  assert.equal(messages.uploadedMessageId({ files: [{ message_id: 1 }, { message_id: 2 }] }), null, "a directory upload is never treated as one file");
+  assert.equal(messages.uploadedMessageId({ files: [{ message_id: 0 }] }), null);
+  assert.equal(messages.uploadedMessageId(null), null);
+});
+
+test("search hits carry chat, sender, time, snippet and id; global attribution is partial with pinned tg", () => {
+  const anna = { id: "id:4242", title: "Anna Ivanova", type: "user", username: "@anya" };
+  const chat = messages.searchHits({ peer: { id: 4242, type: "user", name: "Anna Ivanova" }, messages: [
+    { id: 11, date: 1700000000, out: false, text: "the invoice is attached" },
+    { id: 12, date: 1700000100, out: true, text: "thanks for the invoice" },
+    { id: 13, date: 1700000200, out: false, media: "document" },
+  ] }, "invoice", "chat", anna);
+  assert.equal(chat.chatAttribution, "complete");
+  assert.deepEqual(chat.hits[0], { messageId: "11", date: 1700000000, time: "2023-11-14T22:13:20.000Z", chat: anna, sender: { id: "id:4242", name: "Anna Ivanova", username: "@anya", self: false }, out: false, snippet: "the invoice is attached" });
+  assert.deepEqual(chat.hits[1].sender, { id: null, name: "you", username: null, self: true });
+  assert.equal(chat.hits[2].snippet, "[document]");
+
+  const global = messages.searchHits({ peer: { id: 5005, type: "chat", name: "Binaura Team" }, messages: [
+    { id: 21, date: 1, from: { id: 4343, type: "user", name: "Anna Petrova" }, text: "invoice v2" },
+    { id: 22, date: 2, text: "invoice from a DM" },
+    { id: 23, date: 3, peer: { id: 6006, type: "channel", name: "Release Notes" }, from: { id: 6006, type: "channel", name: "Release Notes" }, text: "invoice notes" },
+    { id: "junk", text: "invoice dropped" },
+  ] }, "invoice", "global", null);
+  assert.equal(global.chatAttribution, "partial");
+  assert.deepEqual(global.hits.map((hit) => hit.chat && hit.chat.id), ["id:5005", null, "id:6006"], "first hit takes the result peer; a per-hit peer is honored when tg reports one");
+  assert.equal(global.hits[0].sender.name, "Anna Petrova");
+  assert.equal(global.hits[1].sender, null);
+
+  const long = `${"a".repeat(500)} needle ${"b".repeat(500)}`;
+  const cut = messages.snippet(long, "needle");
+  assert.ok(cut.includes("needle"));
+  assert.ok(cut.startsWith("…") && cut.endsWith("…"));
+  assert.ok(cut.length <= messages.SNIPPET_CHARS + 2);
+});
+
+test("send-file resolves a person by name, uploads with the caption, and returns the server message id; contents never leave the file", () => {
+  const env = mockHost({ chats: sendFixtureChats });
+  try {
+    configureLoggedInFixture(env);
+    const file = ownerFile(env);
+    const result = plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["Anna Ivanova", file, "--message", "here you go", "--key", "file-1"] });
+    assert.equal(result.error, undefined, result.error);
+    const sent = JSON.parse(result.result);
+    assert.equal(sent.status, "sent");
+    assert.equal(sent.telegramMessageId, "9100");
+    assert.equal(sent.kind, "file");
+    assert.equal(sent.fileBytes, Buffer.byteLength(FILE_SECRET_BODY));
+    assert.equal(sent.destination.id, "id:4242");
+    assert.deepEqual(uploadCalls(env).map((call) => call.words), [["upload", "--peer", "id:4242", "--message=here you go", "--", file]]);
+    const call = uploadCalls(env)[0];
+    assert.ok(call.timeoutMs >= 60_000, "uploads get a size-scaled timeout, not the 5 s send bound");
+    const ledger = JSON.parse(outboxText());
+    assert.equal(ledger.attempts[0].kind, "file");
+    assert.equal(ledger.attempts[0].state, "sent");
+    for (const text of [JSON.stringify(env.calls), outboxText(), result.result]) {
+      assert.equal(text.includes(FILE_SECRET_BODY), false, "file contents are never read into argv, results or the ledger");
+    }
+    assert.equal(outboxText().includes("here you go"), false, "the ledger stores a caption hash, not the caption");
+
+    const again = plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["Anna Ivanova", file, "--message", "here you go", "--key", "file-1"] });
+    assert.deepEqual(JSON.parse(again.result), sent);
+    assert.equal(uploadCalls(env).length, 1, "a sent key never uploads again");
+    const rebound = plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["Anna Ivanova", file, "--message", "other", "--key", "file-1"] });
+    assert.match(rebound.error, /^invalid-request:.*different chat, file, caption, or format/);
+    const textReuse = plugin.onAgentCommand({ sessionId: "s", verb: "send", args: ["id:4242", "--key", "file-1", "hi"] });
+    assert.match(textReuse.error, /^invalid-request:/);
+    assert.equal(uploadCalls(env).length, 1);
+    assert.equal(sendCalls(env).length, 0);
+  } finally { env.cleanup(); }
+});
+
+test("send-file to Saved Messages, a group, and with HTML caption uses the native flags", () => {
+  const env = mockHost({ chats: sendFixtureChats });
+  try {
+    configureLoggedInFixture(env);
+    const file = ownerFile(env, "photo.jpg");
+    assert.equal(JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["me", file] }).result).destination.label, "Saved Messages");
+    assert.equal(JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["id:5005", file, "--message", "<b>new</b>", "--format", "html"] }).result).status, "sent");
+    assert.deepEqual(uploadCalls(env).map((call) => call.words), [
+      ["upload", "--", file],
+      ["upload", "--peer", "id:5005", "--message=<b>new</b>", "--html", "--", file],
+    ]);
+  } finally { env.cleanup(); }
+});
+
+test("send-file refuses missing, directory, empty, oversized and unreadable files with typed errors before any upload or ledger write", () => {
+  const big = 1024 * 1024 + 1;
+  const env = mockHost({ chats: sendFixtureChats, settings: { fileMaxMiB: 1 } });
+  try {
+    configureLoggedInFixture(env);
+    const send = (file) => plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["id:4242", file] });
+    assert.match(send(join(env.root, "owner files", "missing.pdf")).error, /^file-not-found: .*missing\.pdf does not exist/);
+    const dir = join(env.root, "owner files", "folder");
+    mkdirSync(dir, { recursive: true });
+    assert.match(send(dir).error, /^file-not-found:/);
+    assert.match(send(ownerFile(env, "empty.txt", "")).error, /^invalid-request: empty\.txt is empty/);
+    assert.match(send(ownerFile(env, "big.bin", "x".repeat(big))).error, /^file-too-large: big\.bin is 1\.0 MiB, over the 1\.0 MiB limit\. Raise "Maximum file size"/);
+    assert.match(send("relative.pdf").error, /^invalid-request: The file path must be absolute/);
+    assert.equal(uploadCalls(env).length, 0);
+    assert.equal(outboxText(), "", "no attempt is recorded for a refused file");
+  } finally { env.cleanup(); }
+  const locked = mockHost({ chats: sendFixtureChats });
+  try {
+    configureLoggedInFixture(locked);
+    const file = ownerFile(locked, "locked.docx");
+    globalThis.host.fs.readFileHead = () => null;
+    assert.match(plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["id:4242", file] }).error, /^file-unreadable: .*locked\.docx exists but could not be opened/);
+    assert.equal(uploadCalls(locked).length, 0);
+  } finally { locked.cleanup(); }
+});
+
+test("a long upload returns uploading, then send-file-status reads back the message id; a lost job becomes unknown", () => {
+  const env = mockHost({ chats: sendFixtureChats, uploadMode: "pending" });
+  try {
+    configureLoggedInFixture(env);
+    const file = ownerFile(env);
+    const first = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["id:4242", file, "--key", "slow-1"] }).result);
+    assert.equal(first.status, "uploading");
+    assert.match(first.next, /send-file-status slow-1/);
+    assert.equal(JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "send-file-status", args: ["slow-1"] }).result).status, "uploading");
+    assert.equal(JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["id:4242", file, "--key", "slow-1"] }).result).status, "uploading", "re-invoking the same key polls instead of uploading again");
+    assert.equal(uploadCalls(env).length, 1);
+    assert.equal(plugin.viewCall("status", {}).sendState.state, "pending");
+    const jobId = [...env.jobs.keys()].pop();
+    env.finishJob(jobId);
+    const done = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "send-file-status", args: ["slow-1"] }).result);
+    assert.equal(done.status, "sent");
+    assert.equal(done.telegramMessageId, "9100");
+    assert.ok(env.closedJobs.includes(jobId));
+
+    plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["id:4242", file, "--key", "slow-2"] });
+    plugin.__test_resetFileJobs();
+    assert.match(plugin.onAgentCommand({ sessionId: "s", verb: "send-file-status", args: ["slow-2"] }).error, /^unknown:/);
+    assert.match(plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["id:4242", file, "--key", "slow-2"] }).error, /^unknown:/, "an unknown file key is never re-uploaded");
+    assert.equal(uploadCalls(env).length, 2);
+    assert.match(plugin.onAgentCommand({ sessionId: "s", verb: "send-file-status", args: ["nope"] }).error, /^invalid-request: No file send is recorded/);
+  } finally { env.cleanup(); }
+});
+
+test("health settles a finished upload so the ledger records it without a status call", () => {
+  const env = mockHost({ chats: sendFixtureChats, uploadMode: "pending" });
+  try {
+    configureLoggedInFixture(env);
+    plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["id:4242", ownerFile(env), "--key", "bg-1"] });
+    env.finishJob([...env.jobs.keys()].pop());
+    assert.equal(JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "health", args: [] }).result).sendState.state, "sent");
+  } finally { env.cleanup(); }
+});
+
+test("upload failures map to the send taxonomy: open error is definitive, flood is rate-limited, a lost or id-less result is unknown", () => {
+  const env = mockHost({ chats: sendFixtureChats });
+  try {
+    configureLoggedInFixture(env);
+    const file = ownerFile(env);
+    const send = (key) => plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["id:4242", file, "--key", key] });
+    env.setUploadMode("open-error");
+    assert.match(send("e-1").error, /^upstream-rejected: .*Access is denied/);
+    env.setUploadMode("rate-limited");
+    assert.match(send("e-2").error, /^rate-limited:/);
+    assert.match(send("e-2").error, /^rate-limited:/, "the recorded deadline refuses an early retry");
+    assert.equal(uploadCalls(env).length, 2);
+    env.setUploadMode("lost");
+    assert.match(send("e-3").error, /^unknown:/);
+    env.setUploadMode("no-id");
+    assert.match(send("e-4").error, /^unknown:/);
+    env.setUploadMode("sent");
+    assert.equal(JSON.parse(send("e-1").result).status, "sent", "a definitive failure may be retried explicitly under its key");
+    const states = Object.fromEntries(JSON.parse(outboxText()).attempts.map((attempt) => [attempt.idempotencyKey, attempt.state]));
+    assert.deepEqual(states, { "e-1": "sent", "e-2": "rate_limited", "e-3": "unknown", "e-4": "unknown" });
+    assert.equal(outboxText().includes(FILE_SECRET_BODY), false);
+  } finally { env.cleanup(); }
+});
+
+test("send-file follows the owner's agent send restriction and ambiguous names send nothing", () => {
+  const env = mockHost({ chats: sendFixtureChats });
+  try {
+    configureLoggedInFixture(env);
+    plugin.viewCall("setSendScope", { mode: "only", chats: [{ id: "id:5005", title: "Binaura Team" }] });
+    const file = ownerFile(env);
+    assert.match(plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["id:4242", file] }).error, /^chat-not-allowed:/);
+    const ambiguous = plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["anna", file] }).error;
+    assert.match(ambiguous, /^invalid-request: Several chats match "anna": Anna Ivanova \(id:4242, @anya, user\); Anna Petrova \(id:4343, user\)/);
+    assert.match(plugin.onAgentCommand({ sessionId: "s", verb: "send-file", args: ["Nobody Here", file] }).error, /^chat-not-found: .*"Nobody Here"/);
+    assert.equal(uploadCalls(env).length, 0);
+  } finally { env.cleanup(); }
+});
+
+test("search-messages runs a server-side global search and keeps the chat lookup verb unchanged", () => {
+  const env = mockHost({ chats: sendFixtureChats, searchData: { peer: { id: 5005, type: "chat", name: "Binaura Team" }, messages: [
+    { id: 31, date: 1700000000, from: { id: 4242, type: "user", name: "Anna Ivanova", username: "anya" }, text: "invoice for October" },
+    { id: 32, date: 1699990000, text: "old invoice" },
+  ] } });
+  try {
+    configureLoggedInFixture(env);
+    const out = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "search-messages", args: ["invoice"] }).result);
+    assert.deepEqual(searchCalls(env).map((call) => call.words), [["search", "--global", "--limit", "20", "--", "invoice"]]);
+    assert.equal(out.scope, "global");
+    assert.equal(out.chatAttribution, "partial");
+    assert.match(out.note, /--chat/);
+    assert.deepEqual(out.hits.map((hit) => [hit.messageId, hit.chat && hit.chat.title, hit.sender && hit.sender.name]), [["31", "Binaura Team", "Anna Ivanova"], ["32", null, null]]);
+    assert.equal(out.hits[0].time, "2023-11-14T22:13:20.000Z");
+    assert.equal(env.calls.some((call) => call.words[0] === "chats"), false, "a global search needs no chat lookup");
+    const lookup = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "chats", args: ["Anna", "Ivanova"] }).result);
+    assert.equal(lookup.match.id, "id:4242");
+    assert.equal(searchCalls(env).length, 1);
+  } finally { env.cleanup(); }
+});
+
+test("search-messages --chat resolves a name to one chat, searches only it, and attributes every hit", () => {
+  const env = mockHost({ chats: sendFixtureChats, searchData: { peer: { id: 4242, type: "user", name: "Anna Ivanova" }, messages: [
+    { id: 41, date: 10, out: false, text: "the contract draft" },
+    { id: 42, date: 11, out: true, text: "contract signed" },
+  ] } });
+  try {
+    configureLoggedInFixture(env);
+    const out = JSON.parse(plugin.onAgentCommand({ sessionId: "s", verb: "search-messages", args: ["contract", "--chat", "Anna Ivanova", "--limit", "5"] }).result);
+    assert.deepEqual(searchCalls(env).map((call) => call.words), [["search", "--limit", "5", "--", "id:4242", "contract"]]);
+    assert.equal(out.scope, "chat");
+    assert.equal(out.chatAttribution, "complete");
+    assert.deepEqual(out.hits.map((hit) => [hit.chat.id, hit.sender.name, hit.sender.self]), [["id:4242", "Anna Ivanova", false], ["id:4242", "you", true]]);
+    plugin.onAgentCommand({ sessionId: "s", verb: "search-messages", args: ["note", "--chat", "saved"] });
+    assert.deepEqual(searchCalls(env).pop().words, ["search", "--limit", "20", "--", "me", "note"]);
+    const ambiguous = plugin.onAgentCommand({ sessionId: "s", verb: "search-messages", args: ["x", "--chat", "anna"] }).error;
+    assert.match(ambiguous, /^invalid-request: Several chats match "anna".*nothing was searched/);
+    assert.match(plugin.onAgentCommand({ sessionId: "s", verb: "search-messages", args: ["x", "--limit", "99"] }).error, /^invalid-request: --limit/);
+    assert.equal(searchCalls(env).length, 2);
+  } finally { env.cleanup(); }
+});
+
+test("search-messages output stays within 32 KiB however long the matched messages are", () => {
+  const huge = Array.from({ length: 50 }, (_, i) => ({ id: i + 1, date: 1, from: { id: 9, type: "user", name: "N".repeat(4000) }, text: `match ${"z".repeat(5000)}` }));
+  const env = mockHost({ chats: sendFixtureChats, searchData: { peer: { id: 5005, type: "chat", name: "Binaura Team" }, messages: huge } });
+  try {
+    configureLoggedInFixture(env);
+    const raw = plugin.onAgentCommand({ sessionId: "s", verb: "search-messages", args: ["match", "--limit", "50"] }).result;
+    assert.ok(Buffer.byteLength(raw) <= 32 * 1024);
+    const out = JSON.parse(raw);
+    assert.equal(out.truncated, true);
+    assert.ok(out.hits.length > 0 && out.hits.length < 50);
+  } finally { env.cleanup(); }
+});
+
+test("manifest and settings let agents discover send-file and search-messages", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  assert.match(manifest.description, /files/i);
+  assert.match(manifest.description, /search/i);
+  assert.match(manifest.configHelp, /`send-file <chat-id-or-name> <absolute-file-path>/);
+  assert.match(manifest.configHelp, /`send-file-status <key>`/);
+  assert.match(manifest.configHelp, /`search-messages <query> \[--chat <chat-id-or-name>\] \[--limit N\]`/);
+  const settings = JSON.parse(readFileSync(join(__dirname, "settings.schema.json"), "utf8"));
+  const field = settings.flatMap((section) => section.fields || []).find((item) => item.key === "fileMaxMiB");
+  assert.deepEqual([field.default, field.min, field.max], [messages.FILE_DEFAULT_MIB, 1, messages.FILE_MAX_MIB]);
+  const readme = readFileSync(join(__dirname, "README.md"), "utf8");
+  assert.match(readme, /`send-file /);
+  assert.match(readme, /`search-messages /);
 });
 
 async function main() {
