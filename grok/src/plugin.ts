@@ -6,6 +6,7 @@ import type {
   PluginModule,
   ResumeParams,
 } from "@codeterm/plugin-sdk";
+import { recordedTextDiff } from "@codeterm/plugin-sdk";
 
 const TITLE_RE = /\bgrok\b/i;
 const OUTPUT_FINGERPRINTS = [
@@ -53,7 +54,23 @@ interface ModelsCache {
 }
 
 function quote(value: string): string {
-  return host.shell.quoteFor(String(value || ""), host.platform());
+  const text = String(value || "");
+  const platform = host.platform();
+  const special = platform === "windows" ? /([\r\n\u2018-\u201f])/ : /([\r\n])/;
+  if (!special.test(text) && !(platform === "windows" && text.includes('"'))) {
+    return host.shell.quoteFor(text, platform);
+  }
+  const parts = text.split(special).map((part) => {
+    if (platform === "windows" && special.test(part)) return `[char]${part.charCodeAt(0)}`;
+    if (part === "\n") return platform === "windows" ? "[char]10" : "$'\\n'";
+    if (part === "\r") return platform === "windows" ? "[char]13" : "$'\\r'";
+    return host.shell.quoteFor(part, platform);
+  });
+  if (platform !== "windows") return parts.join("");
+  const literal = `(${parts.join(" + ")})`;
+  if (!text.includes('"')) return literal;
+  return `(& { param($value) if ($PSVersionTable.PSVersion.Major -lt 7 -or $PSNativeCommandArgumentPassing -eq 'Legacy') { `
+    + String.raw`[regex]::Replace($value, '(\\*)"', '$1$1\"') } else { $value } } ${literal})`;
 }
 
 function hasFlag(parts: string[], flag: string): boolean {
@@ -157,6 +174,18 @@ function grokUpdateToChat(row: Record<string, unknown>, seq: number): Record<str
     ? params.update as Record<string, unknown>
     : null;
   const kind = update ? String(update.sessionUpdate || "") : "";
+  if (kind === "tool_call_update" && update?.status === "completed" && Array.isArray(update.content)) {
+    const diffs = update.content.flatMap((block: unknown) => {
+      if (!block || typeof block !== "object") return [];
+      const diff = block as Record<string, unknown>;
+      return diff.type === "diff" ? recordedTextDiff(diff.path, diff.oldText, diff.newText) : [];
+    });
+    if (diffs.length && typeof update.toolCallId === "string") {
+      return { id: `grok-edit-${update.toolCallId}`, type: "tool_result", content: "", seq,
+        toolId: update.toolCallId, toolName: "file_change", toolKind: "edit", toolError: false,
+        fileDiffs: diffs };
+    }
+  }
   let type = "";
   if (kind === "user_message_chunk") type = "user";
   else if (kind === "agent_thought_chunk") type = "thinking";
@@ -306,7 +335,7 @@ const plugin: PluginModule = {
     const parts = ["grok"];
     appendLaunchFlags(parts, p);
     const task = starterTask(p);
-    if (task) parts.push(quote(task));
+    if (task) parts.push("--", quote(task));
     return parts.join(" ");
   },
 

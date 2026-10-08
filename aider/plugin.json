@@ -83,6 +83,9 @@
     ]
   },
   "permissions": {
+    "subprocess": {
+      "allow": ["git"]
+    },
     "network": {
       "allow": []
     }

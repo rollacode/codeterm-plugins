@@ -4,6 +4,11 @@ Spawn tasks arrive through Domios's confirmed PTY input after Aider is ready. Th
 
 Optional Aider CLI provider for Domios Chat UI, installed from the `codeterm-plugins` channel. Requires CodeTerm 1.12.4 or later and an `aider` executable on PATH. The installer and updater prefer `uv tool install --force aider-chat==0.86.2`, with `pipx install --force aider-chat==0.86.2` as the alternative. They never upgrade past the supported version.
 
+The Changes view reads exact patches from the commits recorded after Aider's
+applied-edit notices. The plugin requests the `git` subprocess permission for
+these read-only lookups. Failed edits, dry runs, proposals, unreadable commits,
+and sessions using `--no-git` or `--no-auto-commits` supply no recorded diff.
+
 The plugin declares editable and read-only context attachment support. Core supplies resolved task files and materialized plan skills through `contextFiles: {edit: [...], read: [...]}`. Editable files become repeated `--file` arguments; read-only inputs become repeated `--read` arguments, separate from the single interactive task turn. New editable files are allowed. Invalid attachment kinds, relative paths, edit/read overlaps, and unreadable read-only files refuse launch instead of silently losing context.
 
 Aider can remove line breaks from bracketed-paste input. The manifest declares `turnEvidenceNormalization.dropLineBreaks` so core compares the prepared payload and stored user turn symmetrically. The relay reader preserves the raw stored user text and exact UTF-8 offsets; it does not rewrite evidence.

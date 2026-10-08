@@ -1,7 +1,10 @@
+import type { RecordedFileDiff } from "@codeterm/plugin-sdk";
+
 /** Pure parser for Aider's markdown history. Positions are UTF-8 byte offsets. */
 export interface HistoryRow {
   role: "user" | "assistant" | "system";
-  blocks: Array<{ kind: "text" | "thinking"; data: { text: string } }>;
+  blocks: Array<{ kind: "text" | "thinking"; data: { text: string } }
+    | { kind: "tool_result"; data: { tool_use_id: string; content: string; is_error: false; file_diffs: RecordedFileDiff[] } }>;
   ts: number | null;
   uuid: string;
   recordIndex?: number;
@@ -24,7 +27,7 @@ const NOISE_RE = /^(?:Aider v\d|Model:|Weak model:|Editor model:|Git repo:|Repo[
 /** `prefix` ends at the host's complete-line delta boundary. Older row content
  * is used only as context; rows are emitted when their visible content grew
  * after `fromOffset`. Stable UUIDs let the host merge split rows in place. */
-export function parseAiderHistoryDelta(prefix: string, fromOffset = 0): { messages: HistoryRow[] } {
+export function parseAiderHistoryDelta(prefix: string, fromOffset = 0, commitDiffs?: (hash: string, paths: string[]) => RecordedFileDiff[]): { messages: HistoryRow[] } {
   const messages: HistoryRow[] = [];
   const state: { current: { role: "user" | "assistant" | "system"; kind: "text" | "thinking"; lines: string[]; start: number; line: number; end: number } | null } = { current: null };
   let offset = 0;
@@ -35,6 +38,7 @@ export function parseAiderHistoryDelta(prefix: string, fromOffset = 0): { messag
   let thinkingTag: string | null = null;
   let errorContinuation = false;
   let modeCommandEcho: string | null = null;
+  const appliedPaths = new Set<string>();
 
   function flush() {
     if (!state.current) return;
@@ -114,10 +118,14 @@ export function parseAiderHistoryDelta(prefix: string, fromOffset = 0): { messag
     const heading = !fence && /^####(?: |$)/.test(line);
     if (!fence && /^# aider chat started at /.test(line)) {
       flush();
+      appliedPaths.clear();
       previousHeading = false;
       errorContinuation = false;
     } else if (heading) {
-      if (!previousHeading) flush();
+      if (!previousHeading) {
+        flush();
+        appliedPaths.clear();
+      }
       const body = line.slice(5).replace(/ {2}$/, "");
       if (body.trim() && body.trim() !== "<blank>") add("user", body, end);
       else if (!body.trim() && previousHeading && state.current?.role === "user") add("user", "", end);
@@ -135,6 +143,20 @@ export function parseAiderHistoryDelta(prefix: string, fromOffset = 0): { messag
       } else if (/^> ?/.test(line)) {
         const body = line.replace(/^> ?/, "").replace(/ {2}$/, "");
         if (CHANGE_NOTICE_RE.test(body)) {
+          const applied = /^Applied edit to (.+)$/.exec(body);
+          if (applied) appliedPaths.add(applied[1]);
+          const commit = /^Commit ([0-9a-f]{7,40})(?: |$)/.exec(body);
+          if (commit) {
+            const diffs = end > fromOffset && appliedPaths.size ? commitDiffs?.(commit[1], [...appliedPaths]) ?? [] : [];
+            if (diffs.length) {
+              flush();
+              messages.push({ role: "assistant", ts: null, uuid: `aider:edit:${offset}`,
+                ...(offset >= fromOffset ? { recordIndex: deltaLine } : {}),
+                blocks: [{ kind: "tool_result", data: { tool_use_id: `aider-commit:${commit[1]}:${offset}`,
+                  content: body, is_error: false, file_diffs: diffs } }] });
+            }
+            appliedPaths.clear();
+          }
           add("system", body, end);
           errorContinuation = false;
         } else if (NOISE_RE.test(body) || !body.trim()) errorContinuation = false;
