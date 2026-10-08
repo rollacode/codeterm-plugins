@@ -23,6 +23,31 @@ __export(plugin_exports, {
   default: () => plugin_default
 });
 module.exports = __toCommonJS(plugin_exports);
+
+// node_modules/@codeterm/plugin-sdk/src/fileDiffs.ts
+function textLines(text) {
+  return text ? text.replace(/\n$/, "").split("\n") : [];
+}
+function recordedTextDiff(path, oldText, newText) {
+  if (typeof path !== "string" || !path.trim() || typeof oldText !== "string" || typeof newText !== "string" || oldText === newText) return [];
+  const old = textLines(oldText);
+  const next = textLines(newText);
+  return [{
+    path,
+    additions: next.length,
+    deletions: old.length,
+    truncated: true,
+    hunks: [{
+      oldStart: 1,
+      oldLines: old.length,
+      newStart: 1,
+      newLines: next.length,
+      lines: [...old.map((line) => `-${line}`), ...next.map((line) => `+${line}`)]
+    }]
+  }];
+}
+
+// grok/src/plugin.ts
 var TITLE_RE = /\bgrok\b/i;
 var OUTPUT_FINGERPRINTS = [
   "Grok Build TUI",
@@ -137,6 +162,26 @@ function grokUpdateToChat(row, seq) {
   const params = row.params && typeof row.params === "object" ? row.params : null;
   const update = params && params.update && typeof params.update === "object" ? params.update : null;
   const kind = update ? String(update.sessionUpdate || "") : "";
+  if (kind === "tool_call_update" && update?.status === "completed" && Array.isArray(update.content)) {
+    const diffs = update.content.flatMap((block) => {
+      if (!block || typeof block !== "object") return [];
+      const diff = block;
+      return diff.type === "diff" ? recordedTextDiff(diff.path, diff.oldText, diff.newText) : [];
+    });
+    if (diffs.length && typeof update.toolCallId === "string") {
+      return {
+        id: `grok-edit-${update.toolCallId}`,
+        type: "tool_result",
+        content: "",
+        seq,
+        toolId: update.toolCallId,
+        toolName: "file_change",
+        toolKind: "edit",
+        toolError: false,
+        fileDiffs: diffs
+      };
+    }
+  }
   let type = "";
   if (kind === "user_message_chunk") type = "user";
   else if (kind === "agent_thought_chunk") type = "thinking";

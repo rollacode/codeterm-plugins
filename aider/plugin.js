@@ -44,7 +44,7 @@ function utf8Length(text) {
 var ERROR_RE = /(?:\blitellm\.[\w.]*Error\b|\b(?:AuthenticationError|APIConnectionError|RateLimitError|BadRequestError|PermissionDeniedError|InternalServerError)\b|\b(?:Error|Exception):|\b(?:invalid|incorrect|missing) api key\b|\bEmpty response received from LLM\b)/i;
 var CHANGE_NOTICE_RE = /^(?:Applied edit to .+|Did not apply edit to .+|Commit [0-9a-f]{7,40}(?: .*)?)$/i;
 var NOISE_RE = /^(?:Aider v\d|Model:|Weak model:|Editor model:|Git repo:|Repo[ -]?[Mm]ap:|Tokens:|Added .+ to the chat|Use \/help|Cost:|Open documentation url|Add \.aider\* to \.gitignore|Please visit)/;
-function parseAiderHistoryDelta(prefix, fromOffset = 0) {
+function parseAiderHistoryDelta(prefix, fromOffset = 0, commitDiffs) {
   const messages = [];
   const state = { current: null };
   let offset = 0;
@@ -55,6 +55,7 @@ function parseAiderHistoryDelta(prefix, fromOffset = 0) {
   let thinkingTag = null;
   let errorContinuation = false;
   let modeCommandEcho = null;
+  const appliedPaths = /* @__PURE__ */ new Set();
   function flush() {
     if (!state.current) return;
     const text = state.current.lines.join("\n").trim();
@@ -123,10 +124,14 @@ function parseAiderHistoryDelta(prefix, fromOffset = 0) {
     const heading = !fence && /^####(?: |$)/.test(line);
     if (!fence && /^# aider chat started at /.test(line)) {
       flush();
+      appliedPaths.clear();
       previousHeading = false;
       errorContinuation = false;
     } else if (heading) {
-      if (!previousHeading) flush();
+      if (!previousHeading) {
+        flush();
+        appliedPaths.clear();
+      }
       const body = line.slice(5).replace(/ {2}$/, "");
       if (body.trim() && body.trim() !== "<blank>") add("user", body, end);
       else if (!body.trim() && previousHeading && state.current?.role === "user") add("user", "", end);
@@ -144,6 +149,28 @@ function parseAiderHistoryDelta(prefix, fromOffset = 0) {
       } else if (/^> ?/.test(line)) {
         const body = line.replace(/^> ?/, "").replace(/ {2}$/, "");
         if (CHANGE_NOTICE_RE.test(body)) {
+          const applied = /^Applied edit to (.+)$/.exec(body);
+          if (applied) appliedPaths.add(applied[1]);
+          const commit = /^Commit ([0-9a-f]{7,40})(?: |$)/.exec(body);
+          if (commit) {
+            const diffs = end > fromOffset && appliedPaths.size ? commitDiffs?.(commit[1], [...appliedPaths]) ?? [] : [];
+            if (diffs.length) {
+              flush();
+              messages.push({
+                role: "assistant",
+                ts: null,
+                uuid: `aider:edit:${offset}`,
+                ...offset >= fromOffset ? { recordIndex: deltaLine } : {},
+                blocks: [{ kind: "tool_result", data: {
+                  tool_use_id: `aider-commit:${commit[1]}:${offset}`,
+                  content: body,
+                  is_error: false,
+                  file_diffs: diffs
+                } }]
+              });
+            }
+            appliedPaths.clear();
+          }
           add("system", body, end);
           errorContinuation = false;
         } else if (NOISE_RE.test(body) || !body.trim()) errorContinuation = false;
@@ -286,7 +313,9 @@ function readRelayEvidence(history, sidecar, sessionId, afterOffset) {
     if (userSource === null || !userSource.startsWith("#### ")) return null;
     const userRow = parseAiderHistoryDelta(userSource).messages.find((row) => row.role === "user");
     if (!userRow || userRow.uuid !== "aider:user:0") return null;
-    const identity = { userTurnId: `aider:${sessionId}:user:${user}`, userRecordStart: user, userText: userRow.blocks[0].data.text };
+    const userBlock = userRow.blocks.find((block) => block.kind === "text");
+    if (!userBlock || userBlock.kind !== "text") return null;
+    const identity = { userTurnId: `aider:${sessionId}:user:${user}`, userRecordStart: user, userText: userBlock.data.text };
     if (record.complete === false && ["error", "cancelled", "reflection_limit"].includes(String(record.outcome))) {
       return { ...identity, complete: false, outcome: record.outcome };
     }
@@ -295,7 +324,7 @@ function readRelayEvidence(history, sidecar, sessionId, afterOffset) {
     if (response === null) return null;
     const rows = parseAiderHistoryDelta(response).messages;
     if (rows.some((row) => row.role === "user")) return null;
-    const answer = rows.filter((row) => row.role === "assistant").flatMap((row) => row.blocks.filter((block) => block.kind === "text").map((block) => block.data.text)).join("\n\n").trim();
+    const answer = rows.filter((row) => row.role === "assistant").flatMap((row) => row.blocks.flatMap((block) => block.kind === "text" ? [block.data.text] : [])).join("\n\n").trim();
     if (!answer) return null;
     return { ...identity, complete: true, assistantTurnId: `aider:${sessionId}:${record.processGeneration}:answer:${seq}:${start}`, answer };
   }
@@ -320,6 +349,84 @@ function contextAttachments(value) {
   const read = list(files.read);
   if (edit.some((path) => read.includes(path))) return fail();
   return { edit, read };
+}
+
+// node_modules/@codeterm/plugin-sdk/src/fileDiffs.ts
+function recordedPatchDiff(path, patch, kind) {
+  if (!path.trim()) return [];
+  const hunks = [];
+  let current;
+  for (const line of patch.replace(/\n$/, "").split("\n")) {
+    const header = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (header) {
+      current = { oldStart: Number(header[1]), oldLines: Number(header[2] ?? 1), newStart: Number(header[3]), newLines: Number(header[4] ?? 1), lines: [] };
+      hunks.push(current);
+    } else if (current) {
+      if (!/^[ +\-\\]/.test(line)) return [];
+      current.lines.push(line);
+    }
+  }
+  if (hunks.some((h) => h.lines.filter((l) => /^[ -]/.test(l)).length !== h.oldLines || h.lines.filter((l) => /^[ +]/.test(l)).length !== h.newLines)) return [];
+  if (!hunks.length && kind === "modify") return [];
+  const lines = hunks.flatMap((h) => h.lines);
+  return [{
+    path,
+    kind,
+    additions: lines.filter((l) => l.startsWith("+")).length,
+    deletions: lines.filter((l) => l.startsWith("-")).length,
+    hunks
+  }];
+}
+
+// aider/src/fileDiffs.ts
+function gitPath(line) {
+  let value = line.slice(4);
+  if (value.startsWith('"')) {
+    try {
+      value = JSON.parse(value);
+    } catch (_) {
+      return null;
+    }
+  }
+  return value === "/dev/null" ? null : /^[ab]\//.test(value) ? value.slice(2) : null;
+}
+function gitOutput(args) {
+  try {
+    const result = JSON.parse(host.exec(JSON.stringify({ bin: "git", timeoutMs: 5e3, args })));
+    return result?.code === 0 && typeof result.stdout === "string" ? result.stdout : null;
+  } catch (_) {
+    return null;
+  }
+}
+function aiderCommitDiffs(sessionKey, hash, paths) {
+  const cwd = /^(.*)[\\/]\.aider[\\/]history[\\/][^\\/]+\.md$/.exec(sessionKey)?.[1];
+  if (!cwd || !/^[0-9a-f]{7,40}$/.test(hash)) return [];
+  const root = gitOutput(["-C", cwd, "rev-parse", "--show-toplevel"])?.trimEnd();
+  if (!root) return [];
+  const diffs = [];
+  for (const path of new Set(paths)) {
+    const patch = gitOutput(["-C", root, "-c", "core.quotePath=false", "--literal-pathspecs", "show", "--format=", "--no-color", "--no-notes", "--no-ext-diff", "--no-textconv", "--no-renames", "--root", hash, "--", path]);
+    if (!patch?.startsWith("diff --git ")) continue;
+    const kind = /^new file mode /m.test(patch) ? "add" : /^deleted file mode /m.test(patch) ? "delete" : "modify";
+    const oldHeader = patch.match(/^--- .+$/m)?.[0];
+    const newHeader = patch.match(/^\+\+\+ .+$/m)?.[0];
+    const recordedPath = newHeader && gitPath(newHeader) || oldHeader && gitPath(oldHeader);
+    if (recordedPath) {
+      diffs.push(...recordedPatchDiff(recordedPath, patch, kind));
+    } else if (/^Binary files .+ differ$/m.test(patch) || kind !== "modify" && !/^@@ /m.test(patch)) {
+      const header = patch.split("\n")[0];
+      const expected = `diff --git a/${path} b/${path}`;
+      if (header === expected) diffs.push({
+        path,
+        kind,
+        additions: 0,
+        deletions: 0,
+        hunks: [],
+        .../^Binary files /m.test(patch) ? { binary: true } : {}
+      });
+    }
+  }
+  return diffs;
 }
 
 // aider/src/endpoints.ts
@@ -516,6 +623,10 @@ function resumeLaunchParams(params) {
     ...params,
     sessionId: params.sessionId,
     launchMarker: params.sessionId,
+    contextFiles: params.contextFiles ?? void 0,
+    toolLessInstructionsPath: params.toolLessInstructionsPath ?? void 0,
+    agentName: params.agentName ?? void 0,
+    instanceId: params.instanceId ?? void 0,
     restoreChatHistory: true,
     task: void 0
   };
@@ -836,10 +947,11 @@ var plugin = {
   },
   parseSessionDelta(chunk, context) {
     const text = String(chunk || "");
-    if (!context || context.from_offset === 0) return parseAiderHistoryDelta(text);
+    const commitDiffs = context ? (hash, paths) => aiderCommitDiffs(context.session_key, hash, paths) : void 0;
+    if (!context || context.from_offset === 0) return parseAiderHistoryDelta(text, 0, commitDiffs);
     const prefix = host.fs.readFileHead(context.session_key, context.from_offset + utf8Length(text));
     if (prefix === null) return { messages: [] };
-    return parseAiderHistoryDelta(prefix, context.from_offset);
+    return parseAiderHistoryDelta(prefix, context.from_offset, commitDiffs);
   },
   checkIntegration() {
     return {
