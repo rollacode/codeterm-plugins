@@ -46,6 +46,7 @@ test("marketplace metadata, icon and model catalogue", () => {
   assert.equal(manifest.spawn.inputFallbackMs, 5000);
   assert.equal(manifest.spawn.onboardingAutoAnswer, "always");
   assert.equal(manifest.spawn.hasHooks, false);
+  assert.deepEqual(manifest.permissions.subprocess.allow, ["git"]);
 });
 test("settings schema exposes config and endpoint list", () => {
   const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json")));
@@ -1112,6 +1113,43 @@ test("relay rejects path traversal and reports unreadable evidence", () => {
   assert.equal(load().readReplyRelayTurn("/repo", "../other", 0), null);
   const p = load({fs: {readFile: () => {throw Error("denied");}}});
   assert.equal(p.readReplyRelayTurn("/repo", relaySession, 0).unavailable, true);
+});
+
+test("recorded applied edits resolve their own commit into Changes diffs", () => {
+  const history = readFileSync(join(__dirname, "tests/fixtures/recorded-edit.md"), "utf8");
+  const patch = readFileSync(join(__dirname, "tests/fixtures/recorded-edit.patch"), "utf8");
+  const expected = JSON.parse(readFileSync(join(__dirname, "tests/fixtures/recorded-edit.expected.json"), "utf8"));
+  const context = { session_key: "/repo/.aider/history/fixture.md", from_offset: 0 };
+  const calls = [];
+  const p = load({exec: raw => {
+    const opts = JSON.parse(raw);
+    calls.push(opts);
+    assert.equal(opts.bin, "git");
+    if (opts.args.includes("rev-parse")) {
+      assert.deepEqual(opts.args, ["-C", "/repo", "rev-parse", "--show-toplevel"]);
+      return JSON.stringify({code: 0, stdout: "/repo\n"});
+    }
+    assert.deepEqual(opts.args, ["-C", "/repo", "-c", "core.quotePath=false", "--literal-pathspecs", "show", "--format=", "--no-color", "--no-notes", "--no-ext-diff", "--no-textconv", "--no-renames", "--root", "680496f", "--", "sample.txt"]);
+    return JSON.stringify({code: 0, stdout: patch});
+  }, fs: {readFileHead: () => history}});
+  const diffs = result => plain(result).messages.flatMap(row => row.blocks).flatMap(block => block.data.file_diffs || []);
+  const full = p.parseSessionDelta(history, context);
+  assert.deepEqual(diffs(full), expected);
+  assert.equal(calls.length, 2);
+  const commitStart = history.indexOf("> Commit ");
+  const offset = Buffer.byteLength(history.slice(0, commitStart));
+  assert.deepEqual(diffs(p.parseSessionDelta(history.slice(commitStart), {...context, from_offset: offset})), expected,
+    "a commit appended after its applied notice retains the turn evidence");
+  const row = plain(full).messages.find(row => row.blocks[0].kind === "tool_result");
+  assert.equal(row.blocks[0].data.is_error, false);
+  assert.match(row.uuid, /^aider:edit:\d+$/);
+  assert.deepEqual(diffs(p.parseSessionDelta(history.replace("Applied edit to", "Did not apply edit to"), context)), []);
+  assert.deepEqual(diffs(p.parseSessionDelta(history.replace("> Commit ", "#### /commit\n\n> Commit "), context)), [],
+    "a later user's commit never inherits a previous turn's edits");
+  assert.deepEqual(diffs(p.parseSessionDelta(history, { ...context, session_key: "/unrelated/history.md" })), []);
+  const unavailable = load({exec: () => JSON.stringify({code: 128, stdout: ""})});
+  assert.deepEqual(diffs(unavailable.parseSessionDelta(history, context)), [], "unavailable commit never falls back to proposed SEARCH text");
+  assert.deepEqual(diffs(p.parseSessionDelta(history.replace("680496f", "invalid"), context)), []);
 });
 
 let failed = 0;

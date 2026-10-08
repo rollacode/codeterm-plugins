@@ -17,6 +17,7 @@ import { modelLaunchArgs } from "./modelTuning";
 import { hasAiderActivity } from "./activity";
 import { readRelayEvidence } from "./replyRelay";
 import { contextAttachments } from "./contextAttachments";
+import { aiderCommitDiffs } from "./fileDiffs";
 import type { Endpoint } from "./endpoints";
 import { configuredEndpoints, endpointModels, launchEndpoint, selectedModel, PROVIDER_ENV } from "./endpoints";
 
@@ -128,6 +129,8 @@ function resumeLaunchParams(params: ResumeParams): LaunchParams {
   }
   // Resume owns an existing history file; a new launch marker must not rename it.
   return { ...params, sessionId: params.sessionId, launchMarker: params.sessionId,
+    contextFiles: params.contextFiles ?? undefined, toolLessInstructionsPath: params.toolLessInstructionsPath ?? undefined,
+    agentName: params.agentName ?? undefined, instanceId: params.instanceId ?? undefined,
     restoreChatHistory: true, task: undefined };
 }
 
@@ -411,11 +414,11 @@ const plugin: PluginModule = {
 
 
   buildResumeCommand(sessionId: string, skipPermissions?: boolean): string {
-    return this.buildLaunchCommand(resumeLaunchParams({sessionId, skipPermissions}));
+    return this.buildLaunchCommand!(resumeLaunchParams({sessionId, skipPermissions}));
   },
 
   buildResumeCommandWithContext(params: ResumeParams): string {
-    return this.buildLaunchCommand(resumeLaunchParams(params));
+    return this.buildLaunchCommand!(resumeLaunchParams(params));
   },
 
   launchOnboardingResponse(screen: string): { frameKey: string; step: string } | null {
@@ -527,11 +530,12 @@ const plugin: PluginModule = {
 
   parseSessionDelta(chunk: string, context?: SessionDeltaContext): unknown {
     const text = String(chunk || "");
-    if (!context || context.from_offset === 0) return parseAiderHistoryDelta(text);
+    const commitDiffs = context ? (hash: string, paths: string[]) => aiderCommitDiffs(context.session_key, hash, paths) : undefined;
+    if (!context || context.from_offset === 0) return parseAiderHistoryDelta(text, 0, commitDiffs);
     // Evidence, backfill and live tail readers can call independently.
     const prefix = host.fs.readFileHead(context.session_key, context.from_offset + utf8Length(text));
     if (prefix === null) return { messages: [] };
-    return parseAiderHistoryDelta(prefix, context.from_offset);
+    return parseAiderHistoryDelta(prefix, context.from_offset, commitDiffs);
   },
 
   checkIntegration(): unknown {

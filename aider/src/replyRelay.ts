@@ -79,7 +79,9 @@ export function readRelayEvidence(history: string | null, sidecar: string | null
     if (userSource === null || !userSource.startsWith("#### ")) return null;
     const userRow = parseAiderHistoryDelta(userSource).messages.find(row => row.role === "user");
     if (!userRow || userRow.uuid !== "aider:user:0") return null;
-    const identity = { userTurnId: `aider:${sessionId}:user:${user}`, userRecordStart: user, userText: userRow.blocks[0].data.text };
+    const userBlock = userRow.blocks.find(block => block.kind === "text");
+    if (!userBlock || userBlock.kind !== "text") return null;
+    const identity = { userTurnId: `aider:${sessionId}:user:${user}`, userRecordStart: user, userText: userBlock.data.text };
     if (record.complete === false && ["error", "cancelled", "reflection_limit"].includes(String(record.outcome))) {
       return { ...identity, complete: false, outcome: record.outcome as "error" | "cancelled" | "reflection_limit" };
     }
@@ -89,7 +91,7 @@ export function readRelayEvidence(history: string | null, sidecar: string | null
     const rows = parseAiderHistoryDelta(response).messages;
     if (rows.some(row => row.role === "user")) return null;
     const answer = rows.filter(row => row.role === "assistant")
-      .flatMap(row => row.blocks.filter(block => block.kind === "text").map(block => block.data.text)).join("\n\n").trim();
+      .flatMap(row => row.blocks.flatMap(block => block.kind === "text" ? [block.data.text] : [])).join("\n\n").trim();
     if (!answer) return null;
     return { ...identity, complete: true, assistantTurnId: `aider:${sessionId}:${record.processGeneration}:answer:${seq}:${start}`, answer };
   }
