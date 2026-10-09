@@ -113,6 +113,7 @@
     "modelSwitch": "live_command",
     "modelSwitchCommands": {
       "turnCompletion": {
+        "source": "session_file",
         "eventPointer": "/params/update/sessionUpdate",
         "eventValue": "turn_completed",
         "sessionPointer": "/params/sessionId",
