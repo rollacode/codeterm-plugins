@@ -24,7 +24,7 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
-// node_modules/@codeterm/plugin-sdk/src/fileDiffs.ts
+// ../codeterm/packages/plugin-sdk/src/fileDiffs.ts
 function textLines(text) {
   return text ? text.replace(/\n$/, "").split("\n") : [];
 }

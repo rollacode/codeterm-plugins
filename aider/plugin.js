@@ -351,7 +351,7 @@ function contextAttachments(value) {
   return { edit, read };
 }
 
-// node_modules/@codeterm/plugin-sdk/src/fileDiffs.ts
+// ../codeterm/packages/plugin-sdk/src/fileDiffs.ts
 function recordedPatchDiff(path, patch, kind) {
   if (!path.trim()) return [];
   const hunks = [];
