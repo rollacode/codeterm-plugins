@@ -159,7 +159,6 @@ function updateText(update) {
   return "";
 }
 function canonicalToolKind(kind) {
-  if (kind === "list") return "read";
   if (kind === "write") return "edit";
   if (kind === "execute") return "command";
   return typeof kind === "string" && ["command", "edit", "read", "search", "task", "fetch", "web", "image"].includes(kind) ? kind : "generic";

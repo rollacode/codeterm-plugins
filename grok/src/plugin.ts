@@ -173,7 +173,6 @@ function updateText(update: Record<string, unknown> | null): string {
 }
 
 function canonicalToolKind(kind: unknown): string {
-  if (kind === "list") return "read";
   if (kind === "write") return "edit";
   if (kind === "execute") return "command";
   return typeof kind === "string" && ["command", "edit", "read", "search", "task", "fetch", "web", "image"].includes(kind)

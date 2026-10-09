@@ -596,7 +596,7 @@ tests.push(["captured live list tool uses a supported renderer kind and preserve
   const plugin = load(hostFor({files:{[file]:fixture}}));
   const messages = plugin.readStructuredChat(cwd,id).messages;
   assert.equal(messages.length,2);
-  assert.equal(messages[0].toolKind,"read");
+  assert.equal(messages[0].toolKind,"generic");
   assert.equal(messages[0].toolInput.target_directory,records[0].params.update.rawInput.target_directory);
   assert.equal(messages[0].timestamp,String(records[0].params._meta.agentTimestampMs));
   assert.equal(messages[1].toolResult,records[2].params.update.rawOutput.Content.content);
