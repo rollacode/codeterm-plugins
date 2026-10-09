@@ -162,6 +162,19 @@ function grokUpdateToChat(row, seq) {
   const params = row.params && typeof row.params === "object" ? row.params : null;
   const update = params && params.update && typeof params.update === "object" ? params.update : null;
   const kind = update ? String(update.sessionUpdate || "") : "";
+  if (kind === "tool_call" && typeof update?.toolCallId === "string") {
+    const meta2 = update._meta;
+    return {
+      id: `grok-call-${update.toolCallId}`,
+      type: "tool_call",
+      content: "",
+      seq,
+      toolId: update.toolCallId,
+      toolName: meta2?.["x.ai/tool"]?.name ?? String(update.title || "tool"),
+      toolKind: meta2?.["x.ai/tool"]?.kind ?? String(update.kind || "other"),
+      toolInput: JSON.stringify(update.rawInput ?? {})
+    };
+  }
   if (kind === "tool_call_update" && update?.status === "completed" && Array.isArray(update.content)) {
     const diffs = update.content.flatMap((block) => {
       if (!block || typeof block !== "object") return [];
@@ -181,6 +194,22 @@ function grokUpdateToChat(row, seq) {
         fileDiffs: diffs
       };
     }
+  }
+  if (kind === "tool_call_update" && typeof update?.toolCallId === "string" && (update.status === "completed" || update.status === "failed")) {
+    const text = Array.isArray(update.content) ? update.content.flatMap((block) => {
+      if (!block || typeof block !== "object") return [];
+      const item = block;
+      const value = item.type === "text" ? item.text : item.content?.text;
+      return typeof value === "string" ? [value] : [];
+    }).join("\n") : "";
+    return {
+      id: `grok-result-${update.toolCallId}`,
+      type: "tool_result",
+      content: text || (typeof update.rawOutput === "string" ? update.rawOutput : ""),
+      seq,
+      toolId: update.toolCallId,
+      toolError: update.status === "failed"
+    };
   }
   let type = "";
   if (kind === "user_message_chunk") type = "user";

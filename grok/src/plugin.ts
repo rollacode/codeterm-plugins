@@ -178,6 +178,13 @@ function grokUpdateToChat(row: Record<string, unknown>, seq: number): Record<str
     ? params.update as Record<string, unknown>
     : null;
   const kind = update ? String(update.sessionUpdate || "") : "";
+  if (kind === "tool_call" && typeof update?.toolCallId === "string") {
+    const meta = update._meta as {"x.ai/tool"?: {name?: string; kind?: string}} | undefined;
+    return {id: `grok-call-${update.toolCallId}`, type: "tool_call", content: "", seq,
+      toolId: update.toolCallId, toolName: meta?.["x.ai/tool"]?.name ?? String(update.title || "tool"),
+      toolKind: meta?.["x.ai/tool"]?.kind ?? String(update.kind || "other"),
+      toolInput: JSON.stringify(update.rawInput ?? {})};
+  }
   if (kind === "tool_call_update" && update?.status === "completed" && Array.isArray(update.content)) {
     const diffs = update.content.flatMap((block: unknown) => {
       if (!block || typeof block !== "object") return [];
@@ -189,6 +196,18 @@ function grokUpdateToChat(row: Record<string, unknown>, seq: number): Record<str
         toolId: update.toolCallId, toolName: "file_change", toolKind: "edit", toolError: false,
         fileDiffs: diffs };
     }
+  }
+  if (kind === "tool_call_update" && typeof update?.toolCallId === "string"
+    && (update.status === "completed" || update.status === "failed")) {
+    const text = Array.isArray(update.content) ? update.content.flatMap(block => {
+      if (!block || typeof block !== "object") return [];
+      const item = block as {type?: string; text?: string; content?: {text?: string}};
+      const value = item.type === "text" ? item.text : item.content?.text;
+      return typeof value === "string" ? [value] : [];
+    }).join("\n") : "";
+    return {id: `grok-result-${update.toolCallId}`, type: "tool_result",
+      content: text || (typeof update.rawOutput === "string" ? update.rawOutput : ""), seq,
+      toolId: update.toolCallId, toolError: update.status === "failed"};
   }
   let type = "";
   if (kind === "user_message_chunk") type = "user";

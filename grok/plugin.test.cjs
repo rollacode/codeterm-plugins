@@ -453,16 +453,20 @@ tests.push(["completed recorded edit diffs reach the built structured chat expor
   const plugin = load(hostFor({ files: { [file]: fixture } }));
   const read = (cursor) => JSON.parse(JSON.stringify(plugin.readStructuredChat("/work/app", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", cursor)));
   const result = read(null);
-  assert.equal(result.messages.length, 1);
-  assert.equal(result.messages[0].type, "tool_result");
-  assert.equal(result.messages[0].toolError, false);
-  assert.deepEqual(result.messages[0].fileDiffs, expected);
+  assert.equal(result.messages.length, 2);
+  assert.equal(result.messages[0].type, "tool_call");
+  assert.equal(result.messages[1].type, "tool_result");
+  assert.equal(result.messages[1].toolError, false);
+  assert.equal(result.messages[0].toolId, result.messages[1].toolId);
+  assert.deepEqual(result.messages[1].fileDiffs, expected);
   assert.deepEqual(read(result.cursor).messages, [], "a completed edit is not replayed");
   const completionIndex = fixture.trimEnd().split("\n").findIndex(line => JSON.parse(line).params.update.status === "completed");
   assert.deepEqual(read(String(completionIndex)).messages[0].fileDiffs, expected, "completion in a later read keeps the recorded diff");
   const failedFixture = fixture.replace('"status": "completed"', '"status": "failed"');
   const failedPlugin = load(hostFor({ files: { [file]: failedFixture } }));
-  assert.deepEqual(JSON.parse(JSON.stringify(failedPlugin.readStructuredChat("/work/app", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").messages)), []);
+  const failed = failedPlugin.readStructuredChat("/work/app", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").messages;
+  assert.equal(failed[1].toolError, true);
+  assert.equal(failed[1].fileDiffs, undefined);
 }]);
 
 
@@ -562,6 +566,25 @@ tests.push(["restore metadata resolves exact ids and inventories directory-shape
   assert.equal(plugin.findSession(id), null);
   assert.equal(plugin.sessionExists(cwd,id), false);
   assert.equal(plugin.enumerateSessions().length, 0);
+}]);
+
+tests.push(["read-only tool calls and failed results retain exact call identity and recorded output", () => {
+  const cwd = "/work/app", id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const file = `/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}/${id}/updates.jsonl`;
+  const updates = [
+    {sessionUpdate:"tool_call",toolCallId:"own-call",title:"read",rawInput:{path:"opaque.txt"}},
+    {sessionUpdate:"tool_call_update",toolCallId:"own-call",status:"in_progress"},
+    {sessionUpdate:"tool_call_update",toolCallId:"own-call",status:"failed",content:[{type:"content",content:{type:"text",text:"opaque failure"}}]},
+  ];
+  const plugin = load(hostFor({files:{[file]:updates.map(update=>JSON.stringify({params:{update}})).join("\n")}}));
+  const messages = plugin.readStructuredChat(cwd,id).messages;
+  assert.equal(messages.length,2);
+  assert.equal(messages[0].type,"tool_call");
+  assert.equal(messages[0].toolName,"read");
+  assert.equal(JSON.parse(messages[0].toolInput).path,"opaque.txt");
+  assert.equal(messages[1].toolId,messages[0].toolId);
+  assert.equal(messages[1].content,"opaque failure");
+  assert.equal(messages[1].toolError,true);
 }]);
 
 let failed = 0;
