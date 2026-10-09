@@ -458,11 +458,11 @@ var plugin = {
   parseUsage(rawText, nowMs) {
     const data = safeJson(String(rawText || ""));
     if (!data) return null;
-    const spendCents = typeof data.spendCents === "number" ? data.spendCents : null;
+    const spendCents = data.billingMode === "api" && typeof data.spendCents === "number" && Number.isFinite(data.spendCents) && data.spendCents >= 0 ? data.spendCents : null;
     const weeklyPct = typeof data.weeklyPct === "number" && Number.isFinite(data.weeklyPct) && data.weeklyPct >= 0 && data.weeklyPct <= 100 ? data.weeklyPct : null;
     const weeklyResetsAtMs = typeof data.weeklyResetsAtMs === "number" && Number.isFinite(data.weeklyResetsAtMs) ? data.weeklyResetsAtMs : null;
     const hasWeekly = weeklyPct !== null && weeklyResetsAtMs !== null;
-    if (spendCents === null && !hasWeekly) return null;
+    if (spendCents === null && !hasWeekly && data.billingMode !== "subscription") return null;
     return {
       provider: "grok",
       account_id: null,
@@ -479,12 +479,11 @@ var plugin = {
     };
   },
   fetchUsage(nowMs) {
-    const ticks = latestSessionCostTicks();
+    const credential = safeJson(String(host.credentialPublic(GROK_AUTH_CREDENTIAL) || ""));
+    if (typeof credential?.userId !== "string" || !credential.userId) return null;
     const weekly = fetchWeeklyUsage();
-    const spendCents = ticks == null ? null : Math.round(ticks / 1e7);
-    if (spendCents === null && weekly.weeklyPct === null) return null;
     return JSON.stringify({
-      spendCents,
+      billingMode: "subscription",
       weeklyPct: weekly.weeklyPct,
       weeklyResetsAtMs: weekly.weeklyResetsAtMs,
       fetchedAtMs: nowMs
@@ -548,27 +547,5 @@ function grokClientVersion() {
     cachedGrokClientVersion = null;
   }
   return cachedGrokClientVersion;
-}
-function latestSessionCostTicks() {
-  const root = sessionsRoot();
-  if (!root || !host.fs.fileExists(root)) return null;
-  const cwdDirs = host.fs.readDir(root) || [];
-  let bestTicks = null;
-  let bestUpdated = "";
-  for (let i = 0; i < cwdDirs.length; i++) {
-    if (!cwdDirs[i].isDir) continue;
-    const sessions = host.fs.readDir(cwdDirs[i].path) || [];
-    for (let j = 0; j < sessions.length; j++) {
-      if (!sessions[j].isDir || !isUuid(sessions[j].name)) continue;
-      const usage = host.fs.readJson(joinPath(sessions[j].path, "usage.json"));
-      if (!usage || !usage.session || typeof usage.session.costUsdTicks !== "number") continue;
-      const updated = typeof usage.updatedAt === "string" ? String(usage.updatedAt) : "";
-      if (bestTicks == null || updated > bestUpdated) {
-        bestTicks = usage.session.costUsdTicks;
-        bestUpdated = updated;
-      }
-    }
-  }
-  return bestTicks;
 }
 var plugin_default = plugin;

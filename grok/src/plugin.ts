@@ -37,15 +37,6 @@ interface GrokSummary {
   session_summary?: string;
 }
 
-interface GrokUsageFile {
-  session?: {
-    inputTokens?: number;
-    outputTokens?: number;
-    totalTokens?: number;
-    costUsdTicks?: number;
-  };
-}
-
 interface ActiveSession {
   session_id?: string;
   pid?: number;
@@ -503,12 +494,14 @@ const plugin: PluginModule = {
 
   parseUsage(rawText: string, nowMs: number): unknown {
     const data = safeJson(String(rawText || "")) as {
+      billingMode?: unknown;
       spendCents?: unknown;
       weeklyPct?: unknown;
       weeklyResetsAtMs?: unknown;
     } | null;
     if (!data) return null;
-    const spendCents = typeof data.spendCents === "number" ? data.spendCents : null;
+    const spendCents = data.billingMode === "api" && typeof data.spendCents === "number"
+      && Number.isFinite(data.spendCents) && data.spendCents >= 0 ? data.spendCents : null;
     const weeklyPct = typeof data.weeklyPct === "number"
       && Number.isFinite(data.weeklyPct)
       && data.weeklyPct >= 0
@@ -520,7 +513,7 @@ const plugin: PluginModule = {
       ? data.weeklyResetsAtMs
       : null;
     const hasWeekly = weeklyPct !== null && weeklyResetsAtMs !== null;
-    if (spendCents === null && !hasWeekly) return null;
+    if (spendCents === null && !hasWeekly && data.billingMode !== "subscription") return null;
     return {
       provider: "grok",
       account_id: null,
@@ -538,12 +531,11 @@ const plugin: PluginModule = {
   },
 
   fetchUsage(nowMs: number): unknown {
-    const ticks = latestSessionCostTicks();
+    const credential = safeJson(String(host.credentialPublic(GROK_AUTH_CREDENTIAL) || "")) as { userId?: unknown } | null;
+    if (typeof credential?.userId !== "string" || !credential.userId) return null;
     const weekly = fetchWeeklyUsage();
-    const spendCents = ticks == null ? null : Math.round(ticks / 10_000_000);
-    if (spendCents === null && weekly.weeklyPct === null) return null;
     return JSON.stringify({
-      spendCents,
+      billingMode: "subscription",
       weeklyPct: weekly.weeklyPct,
       weeklyResetsAtMs: weekly.weeklyResetsAtMs,
       fetchedAtMs: nowMs,
@@ -623,31 +615,6 @@ function grokClientVersion(): string | null {
     cachedGrokClientVersion = null;
   }
   return cachedGrokClientVersion;
-}
-
-function latestSessionCostTicks(): number | null {
-  const root = sessionsRoot();
-  if (!root || !host.fs.fileExists(root)) return null;
-  const cwdDirs = host.fs.readDir(root) || [];
-  let bestTicks: number | null = null;
-  let bestUpdated = "";
-  for (let i = 0; i < cwdDirs.length; i++) {
-    if (!cwdDirs[i].isDir) continue;
-    const sessions = host.fs.readDir(cwdDirs[i].path) || [];
-    for (let j = 0; j < sessions.length; j++) {
-      if (!sessions[j].isDir || !isUuid(sessions[j].name)) continue;
-      const usage = host.fs.readJson(joinPath(sessions[j].path, "usage.json")) as GrokUsageFile | null;
-      if (!usage || !usage.session || typeof usage.session.costUsdTicks !== "number") continue;
-      const updated = typeof (usage as { updatedAt?: string }).updatedAt === "string"
-        ? String((usage as { updatedAt: string }).updatedAt)
-        : "";
-      if (bestTicks == null || updated > bestUpdated) {
-        bestTicks = usage.session.costUsdTicks;
-        bestUpdated = updated;
-      }
-    }
-  }
-  return bestTicks;
 }
 
 export default plugin;

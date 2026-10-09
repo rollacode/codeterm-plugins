@@ -302,7 +302,7 @@ const tests = [
     assert.equal(plugin.readStructuredChat(cwd, id, first.cursor).messages.length, 0);
   }],
 
-  ["usage snapshot maps session costUsdTicks into spend cents", () => {
+  ["session compute cost is never advertised as account-cycle spending", () => {
     const cwd = "/work/app";
     const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
     const root = `/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}`;
@@ -319,10 +319,8 @@ const tests = [
       },
     }));
     const raw = plugin.fetchUsage(1);
-    assert.equal(JSON.parse(raw).spendCents, 49);
-    const snap = plugin.parseUsage(raw, 1);
-    assert.equal(snap.spend_cents, 49);
-    assert.equal(snap.session_pct, null);
+    assert.equal(raw, null);
+    assert.equal(plugin.parseUsage(raw, 1), null);
   }],
 
   ["manifest declares the Grok OAuth credential and billing proxy permission", () => {
@@ -340,7 +338,7 @@ const tests = [
     assert.ok(manifest.permissions.network.allow.includes("cli-chat-proxy.grok.com"));
   }],
 
-  ["weekly OAuth billing maps the percentage and reset while preserving session spend", () => {
+  ["weekly OAuth billing reports subscription percentage and reset without compute cost", () => {
     const cwd = "/work/app";
     const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
     const root = `/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}`;
@@ -381,7 +379,7 @@ const tests = [
     const snap = plugin.parseUsage(raw, 1);
     assert.equal(snap.weekly_pct, 42.5);
     assert.equal(snap.weekly_resets_at_ms, Date.parse("2026-09-25T19:45:46Z"));
-    assert.equal(snap.spend_cents, 49);
+    assert.equal(snap.spend_cents, null);
     assert.equal(request.url, "https://cli-chat-proxy.grok.com/v1/billing?format=credits");
     assert.equal(request.method, "GET");
     assert.equal(request.headers["X-XAI-Token-Auth"], "xai-grok-cli");
@@ -397,7 +395,7 @@ const tests = [
     assert.equal(JSON.stringify(request).includes("test-oauth-bearer"), false);
   }],
 
-  ["failed, malformed, absent, and non-weekly billing keep limits null and spend intact", () => {
+  ["unreported subscription limits never fall back to compute cost", () => {
     const cwd = "/work/app";
     const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
     const root = `/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}`;
@@ -435,7 +433,7 @@ const tests = [
       const snap = plugin.parseUsage(plugin.fetchUsage(1), 1);
       assert.equal(snap.weekly_pct, null);
       assert.equal(snap.weekly_resets_at_ms, null);
-      assert.equal(snap.spend_cents, 49);
+      assert.equal(snap.spend_cents, null);
     }
   }],
 
