@@ -1,7 +1,7 @@
 {
   "id": "grok",
-  "version": "0.1.0",
-  "minCodeterm": "1.11.4",
+  "version": "0.1.1",
+  "minCodeterm": "1.14.0",
   "hostApi": 2,
   "displayName": "Grok",
   "description": "xAI Grok CLI — optional PTY agent. Install the grok binary separately; not a core provider.",
@@ -15,6 +15,11 @@
       "timeoutSecs": 30
     },
     "taskDelivery": "inline_flag",
+    "providerReadiness": {
+      "kind": "structural_composer",
+      "timeoutSecs": 30
+    },
+    "composerCursorPosition": "visible_anywhere",
     "systemPromptDelivery": {
       "kind": "external"
     },
@@ -24,7 +29,8 @@
     "sessionIdInjection": "none",
     "statusBarRows": 1,
     "supportsLazySkills": false,
-    "hasHooks": false
+    "hasHooks": false,
+    "sessionStartsOnFirstUserTurn": true
   },
   "models": [
     {

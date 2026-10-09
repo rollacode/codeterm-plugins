@@ -23,6 +23,31 @@ __export(plugin_exports, {
   default: () => plugin_default
 });
 module.exports = __toCommonJS(plugin_exports);
+
+// ../codeterm/packages/plugin-sdk/src/fileDiffs.ts
+function textLines(text) {
+  return text ? text.replace(/\n$/, "").split("\n") : [];
+}
+function recordedTextDiff(path, oldText, newText) {
+  if (typeof path !== "string" || !path.trim() || typeof oldText !== "string" || typeof newText !== "string" || oldText === newText) return [];
+  const old = textLines(oldText);
+  const next = textLines(newText);
+  return [{
+    path,
+    additions: next.length,
+    deletions: old.length,
+    truncated: true,
+    hunks: [{
+      oldStart: 1,
+      oldLines: old.length,
+      newStart: 1,
+      newLines: next.length,
+      lines: [...old.map((line) => `-${line}`), ...next.map((line) => `+${line}`)]
+    }]
+  }];
+}
+
+// grok/src/plugin.ts
 var TITLE_RE = /\bgrok\b/i;
 var OUTPUT_FINGERPRINTS = [
   "Grok Build TUI",
@@ -30,6 +55,7 @@ var OUTPUT_FINGERPRINTS = [
   "Compactions remaining"
 ];
 var TUI_FRAGMENTS = ["grok build tui", "compactions remaining"];
+var COMPOSER_FRAME_RE = /^╭─+╮\r?\n│[ \t]*>[ \t]*│\r?\n╰─[^\r\n]*─╯[ \t]*$/m;
 var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var ALWAYS_APPROVE = "--always-approve";
 var BYPASS_PERMISSIONS = ["--permission-mode", "bypassPermissions"];
@@ -37,7 +63,22 @@ var GROK_AUTH_CREDENTIAL = "grokAuth";
 var GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 var cachedGrokClientVersion;
 function quote(value) {
-  return host.shell.quoteFor(String(value || ""), host.platform());
+  const text = String(value || "");
+  const platform = host.platform();
+  const special = platform === "windows" ? /([\r\n\u2018-\u201f])/ : /([\r\n])/;
+  if (!special.test(text) && !(platform === "windows" && text.includes('"'))) {
+    return host.shell.quoteFor(text, platform);
+  }
+  const parts = text.split(special).map((part) => {
+    if (platform === "windows" && special.test(part)) return `[char]${part.charCodeAt(0)}`;
+    if (part === "\n") return platform === "windows" ? "[char]10" : "$'\\n'";
+    if (part === "\r") return platform === "windows" ? "[char]13" : "$'\\r'";
+    return host.shell.quoteFor(part, platform);
+  });
+  if (platform !== "windows") return parts.join("");
+  const literal = `(${parts.join(" + ")})`;
+  if (!text.includes('"')) return literal;
+  return `(& { param($value) if ($PSVersionTable.PSVersion.Major -lt 7 -or $PSNativeCommandArgumentPassing -eq 'Legacy') { ` + String.raw`[regex]::Replace($value, '(\\*)"', '$1$1\"') } else { $value } } ${literal})`;
 }
 function hasFlag(parts, flag) {
   for (let i = 0; i < parts.length; i++) if (parts[i] === flag) return true;
@@ -122,6 +163,26 @@ function grokUpdateToChat(row, seq) {
   const params = row.params && typeof row.params === "object" ? row.params : null;
   const update = params && params.update && typeof params.update === "object" ? params.update : null;
   const kind = update ? String(update.sessionUpdate || "") : "";
+  if (kind === "tool_call_update" && update?.status === "completed" && Array.isArray(update.content)) {
+    const diffs = update.content.flatMap((block) => {
+      if (!block || typeof block !== "object") return [];
+      const diff = block;
+      return diff.type === "diff" ? recordedTextDiff(diff.path, diff.oldText, diff.newText) : [];
+    });
+    if (diffs.length && typeof update.toolCallId === "string") {
+      return {
+        id: `grok-edit-${update.toolCallId}`,
+        type: "tool_result",
+        content: "",
+        seq,
+        toolId: update.toolCallId,
+        toolName: "file_change",
+        toolKind: "edit",
+        toolError: false,
+        fileDiffs: diffs
+      };
+    }
+  }
   let type = "";
   if (kind === "user_message_chunk") type = "user";
   else if (kind === "agent_thought_chunk") type = "thinking";
@@ -242,6 +303,7 @@ var plugin = {
     return hits >= 2 || t.indexOf("Grok Build TUI") !== -1;
   },
   screenHasTui(screen) {
+    if (COMPOSER_FRAME_RE.test(String(screen || ""))) return true;
     const lower = String(screen || "").toLowerCase();
     for (let i = 0; i < TUI_FRAGMENTS.length; i++) {
       if (lower.indexOf(TUI_FRAGMENTS[i]) !== -1) return true;
@@ -264,7 +326,7 @@ var plugin = {
     const parts = ["grok"];
     appendLaunchFlags(parts, p);
     const task = starterTask(p);
-    if (task) parts.push(quote(task));
+    if (task) parts.push("--", quote(task));
     return parts.join(" ");
   },
   buildResumeCommand(sessionId, skipPermissions) {

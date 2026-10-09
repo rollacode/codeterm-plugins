@@ -1,0 +1,64 @@
+[
+  {
+    "kind": "section",
+    "title": "Aider",
+    "description": "Configure model endpoints. Store only secret names here.",
+    "fields": [
+      {
+        "kind": "toggle",
+        "key": "plainMode",
+        "label": "Plain Aider (no automatic replies)",
+        "default": false,
+        "description": "Explicitly bypass the pinned Domios adapter. Chat still works; automatic replies to other tabs are unavailable."
+      },
+      {
+        "kind": "text",
+        "key": "configPath",
+        "label": "Aider config file",
+        "description": "Optional YAML file passed as --config."
+      },
+      {
+        "kind": "array",
+        "key": "endpoints",
+        "label": "Endpoints",
+        "item_label": "Endpoint",
+        "default": [],
+        "description": "Each model ID must belong to exactly one endpoint. Supported kinds: openai, anthropic, groq, openrouter.",
+        "item": {
+          "kind": "object",
+          "fields": [
+            {
+              "kind": "text",
+              "key": "name",
+              "label": "Endpoint name"
+            },
+            {
+              "kind": "text",
+              "key": "kind",
+              "label": "Provider kind",
+              "default": "openai"
+            },
+            {
+              "kind": "text",
+              "key": "apiBase",
+              "label": "API base URL (optional)"
+            },
+            {
+              "kind": "text",
+              "key": "apiKeySecret",
+              "label": "Domios secret name"
+            },
+            {
+              "kind": "textarea",
+              "key": "models",
+              "label": "Models and tuning",
+              "description": "One model ID per line, or a JSON array of strings/objects. Objects: id, displayName (optional), mapTokens (nonnegative integer; 8192 suggested for large context; omit for Aider default), reasoningMode (effort or budget), reasoningEfforts ([{id, displayName, thinkingTokens for budget}]), defaultReasoningEffort (optional declared id). No reasoning flag is sent without a chosen declared level.",
+              "default": "",
+              "placeholder": "[{\"id\":\"openai/mimo-v2.6-pro\",\"mapTokens\":8192}]"
+            }
+          ]
+        }
+      }
+    ]
+  }
+]

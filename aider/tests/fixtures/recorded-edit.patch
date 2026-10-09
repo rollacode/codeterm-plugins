@@ -1,0 +1,7 @@
+diff --git a/sample.txt b/sample.txt
+index a5c5ccd..2045c5e 100644
+--- a/sample.txt
++++ b/sample.txt
+@@ -1 +1 @@
+-before
++after

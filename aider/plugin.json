@@ -1,0 +1,94 @@
+{
+  "id": "aider",
+  "version": "0.1.0",
+  "minCodeterm": "1.14.0",
+  "hostApi": 2,
+  "displayName": "Aider",
+  "binaryName": "aider",
+  "cliBinary": "aider",
+  "entry": "plugin.js",
+  "settingsSchema": "settings.schema.json",
+  "capabilities": {
+    "agentProvider": true,
+    "toolLess": true,
+    "replyRelay": true,
+    "contextAttach": { "editable": true, "readOnly": true },
+    "chatPreprocessor": {
+      "match": "text"
+    }
+  },
+  "spawn": {
+    "readinessStrategy": {
+      "kind": "poll_shell_prompt",
+      "timeoutSecs": 60
+    },
+    "providerReadiness": {
+      "kind": "structural_composer",
+      "timeoutSecs": 60
+    },
+    "composerCursorPosition": "prompt_line",
+    "turnEvidenceNormalization": { "dropLineBreaks": true },
+    "taskDelivery": "pty_input",
+    "systemPromptDelivery": {
+      "kind": "external"
+    },
+    "verifySubmit": {
+      "kind": "tui_input_drained"
+    },
+    "sessionIdInjection": "none",
+    "inputFallbackMs": 5000,
+    "onboardingAutoAnswer": "always",
+    "statusBarRows": 2,
+    "agentStateStatusReconciliation": true,
+    "supportsLazySkills": false,
+    "hasHooks": false,
+    "sessionStartsOnFirstUserTurn": true,
+    "restoresConversationHistoryOnResume": true,
+    "publicSendWaitsForStartupTurnCompletion": true,
+    "supportsStructuredPrompts": false
+  },
+  "models": [],
+  "modelCatalogue": {
+    "authority": "authoritative",
+    "liveDiscoveryRequired": true
+  },
+  "installer": {
+    "macos": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat==0.86.2; else pipx install --force aider-chat==0.86.2; fi",
+    "linux": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat==0.86.2; else pipx install --force aider-chat==0.86.2; fi",
+    "windows": "if (Get-Command uv -ErrorAction SilentlyContinue) { uv tool install --force aider-chat==0.86.2 } else { pipx install --force aider-chat==0.86.2 }"
+  },
+  "updater": {
+    "macos": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat==0.86.2; else pipx install --force aider-chat==0.86.2; fi",
+    "linux": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat==0.86.2; else pipx install --force aider-chat==0.86.2; fi",
+    "windows": "if (Get-Command uv -ErrorAction SilentlyContinue) { uv tool install --force aider-chat==0.86.2 } else { pipx install --force aider-chat==0.86.2 }"
+  },
+  "commands": {
+    "compact": "/clear",
+    "freshContext": "/clear",
+    "exit": "/exit",
+    "stopKeys": [
+      "\u0003"
+    ],
+    "stopKeyWaitForOutput": true,
+    "autoApproveFlags": [
+      "--yes-always"
+    ],
+    "modelLaunchArgsFormat": [
+      "--model",
+      "{model}"
+    ],
+    "reasoningEffortLaunchArgsFormat": [
+      "--reasoning-effort",
+      "{effort}"
+    ]
+  },
+  "permissions": {
+    "subprocess": {
+      "allow": ["git"]
+    },
+    "network": {
+      "allow": []
+    }
+  },
+  "icon": "icon.svg"
+}

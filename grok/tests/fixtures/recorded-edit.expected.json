@@ -1,0 +1,28 @@
+[
+  {
+    "path": "setup-image-invocation.md",
+    "additions": 10,
+    "deletions": 0,
+    "truncated": true,
+    "hunks": [
+      {
+        "oldStart": 1,
+        "oldLines": 0,
+        "newStart": 1,
+        "newLines": 10,
+        "lines": [
+          "+# setup image_gen invocation 1/1",
+          "+",
+          "+tool: image_gen",
+          "+model_session: grok-4.6",
+          "+aspect_ratio: 16:9",
+          "+prompt: |",
+          "+  A close tactile abstract of two warm copper-amber liquid springs exchanging a single rounded glass-smooth droplet in midair. Soft side light in a small dark room, shallow depth, physical oily metal surfaces, quiet elegant still. Cinematic 16:9, materials only, no typography.",
+          "+",
+          "+purpose: required reference/pin for reference_to_video; abstract springs/droplet only.",
+          "+existing_reference: none suitable found"
+        ]
+      }
+    ]
+  }
+]

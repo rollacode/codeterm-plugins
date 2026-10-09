@@ -1,0 +1,9 @@
+[
+  {
+    "path": "sample.txt",
+    "kind": "modify",
+    "additions": 1,
+    "deletions": 1,
+    "hunks": [{ "oldStart": 1, "oldLines": 1, "newStart": 1, "newLines": 1, "lines": ["-before", "+after"] }]
+  }
+]

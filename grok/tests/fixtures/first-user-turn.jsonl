@@ -1,0 +1,3 @@
+{"timestamp":1791173869,"params":{"update":{"sessionUpdate":"hook_execution"}}}
+{"timestamp":1791173870,"params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Grok first turn exact marker 7f2a"}}},"_meta":{"eventId":"grok-first-user-turn","agentTimestampMs":1791173870000}}
+{"timestamp":1791173872,"params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Acknowledged."}}},"_meta":{"eventId":"grok-first-assistant-turn","agentTimestampMs":1791173872000}}
