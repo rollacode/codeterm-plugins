@@ -17,7 +17,7 @@
     "taskDelivery": "inline_flag",
     "providerReadiness": {
       "kind": "structural_composer",
-      "timeoutSecs": 30
+      "timeoutSecs": 180
     },
     "composerCursorPosition": "visible_anywhere",
     "systemPromptDelivery": {

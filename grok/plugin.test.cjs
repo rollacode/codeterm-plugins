@@ -112,6 +112,7 @@ const tests = [
     const screen = readFileSync(join(__dirname, "fixtures", "idle-composer.txt"), "utf8");
     const plugin = load(hostFor());
     assert.equal(manifest.spawn.providerReadiness.kind, "structural_composer");
+    assert.equal(manifest.spawn.providerReadiness.timeoutSecs, 180);
     assert.equal(manifest.spawn.composerCursorPosition, "visible_anywhere");
     assert.equal(plugin.screenHasTui(screen), true);
     assert.equal(plugin.screenHasTui(screen.split("\n").map(line => "  " + line + "  ").join("\n")), true);
