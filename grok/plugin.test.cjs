@@ -625,7 +625,11 @@ tests.push(["live identity reads only the exact session summary and rejects trav
   assert.equal(plugin.sessionModelIdentityPath(cwd,"../../foreign"),null);
   assert.equal(plugin.sessionModelIdentityPath(cwd,"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),null);
   files[path].info.id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
-  assert.equal(plugin.sessionModelIdentityPath(cwd,id),null);
+  assert.equal(plugin.sessionModelIdentityPath(cwd,id),path);
+  assert.equal(plugin.detectSessionModel(cwd,id),null);
+  assert.equal(plugin.detectSessionReasoningEffort(cwd,id),null);
+  files[path]="{";
+  assert.equal(plugin.sessionModelIdentityPath(cwd,id),path);
   assert.equal(plugin.detectSessionModel(cwd,id),null);
   assert.equal(plugin.detectSessionReasoningEffort(cwd,id),null);
 }]);

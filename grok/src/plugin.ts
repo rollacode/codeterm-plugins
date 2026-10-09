@@ -517,8 +517,9 @@ const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: 
   },
 
   sessionModelIdentityPath(cwd: string, sessionId: string): string | null {
+    if (!isUuid(sessionId)) return null;
     const dir = sessionDir(cwd, sessionId);
-    if (!dir || !readSummary(cwd, sessionId)) return null;
+    if (!dir) return null;
     const path = joinPath(dir, "summary.json");
     return host.fs.fileExists(path) ? path : null;
   },

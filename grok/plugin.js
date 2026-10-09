@@ -501,8 +501,9 @@ var plugin = {
     return model ? String(model) : null;
   },
   sessionModelIdentityPath(cwd, sessionId) {
+    if (!isUuid(sessionId)) return null;
     const dir = sessionDir(cwd, sessionId);
-    if (!dir || !readSummary(cwd, sessionId)) return null;
+    if (!dir) return null;
     const path = joinPath(dir, "summary.json");
     return host.fs.fileExists(path) ? path : null;
   },
