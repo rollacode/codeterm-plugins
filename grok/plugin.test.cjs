@@ -129,7 +129,7 @@ const tests = [
     assert.equal(manifest.cliBinary, "grok");
     assert.equal(manifest.version, pkg.version);
     assert.equal(manifest.version, entry.version);
-    assert.equal(manifest.minCodeterm, "1.11.4");
+    assert.equal(manifest.minCodeterm, "1.14.0");
     assert.equal(manifest.minCodeterm, entry.minCodeterm);
     assert.deepEqual(manifest.commands.autoApproveFlags, ["--always-approve"]);
     assert.equal(manifest.spawn.systemPromptDelivery.kind, "external");

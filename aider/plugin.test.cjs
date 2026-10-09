@@ -36,7 +36,7 @@ test("marketplace metadata, icon and model catalogue", () => {
   assert.equal(manifest.version, channel.version);
   assert.equal(channel.path, "aider");
   assert.equal(channel.minCodeterm, manifest.minCodeterm);
-  assert.equal(manifest.minCodeterm, "1.12.4");
+  assert.equal(manifest.minCodeterm, "1.14.0");
   assert.equal(manifest.icon, "icon.svg");
   assert.ok(readFileSync(join(__dirname, manifest.icon), "utf8").includes("<svg"));
   assert.deepEqual(manifest.models, []);

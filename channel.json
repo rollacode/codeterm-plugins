@@ -43,8 +43,8 @@
     {
       "id": "grok",
       "path": "grok",
-      "version": "0.1.0",
-      "minCodeterm": "1.11.4"
+      "version": "0.1.1",
+      "minCodeterm": "1.14.0"
     },
     {
       "id": "telegram-client",
@@ -62,7 +62,7 @@
       "id": "aider",
       "path": "aider",
       "version": "0.1.0",
-      "minCodeterm": "1.12.4"
+      "minCodeterm": "1.14.0"
     }
   ]
 }
