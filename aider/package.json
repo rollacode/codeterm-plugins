@@ -1,0 +1,8 @@
+{
+  "name": "@codeterm/plugin-aider",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CodeTerm optional Aider CLI agent provider.",
+  "devDependencies": { "@codeterm/plugin-sdk": "^1.4.7" }
+}

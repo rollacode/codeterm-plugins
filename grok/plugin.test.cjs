@@ -446,6 +446,25 @@ const tests = [
   }],
 ];
 
+tests.push(["completed recorded edit diffs reach the built structured chat export", () => {
+  const fixture = readFileSync(join(__dirname, "tests/fixtures/recorded-edit.jsonl"), "utf8");
+  const expected = JSON.parse(readFileSync(join(__dirname, "tests/fixtures/recorded-edit.expected.json"), "utf8"));
+  const file = "/tmp/home/.grok/sessions/%2Fwork%2Fapp/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/updates.jsonl";
+  const plugin = load(hostFor({ files: { [file]: fixture } }));
+  const read = (cursor) => JSON.parse(JSON.stringify(plugin.readStructuredChat("/work/app", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", cursor)));
+  const result = read(null);
+  assert.equal(result.messages.length, 1);
+  assert.equal(result.messages[0].type, "tool_result");
+  assert.equal(result.messages[0].toolError, false);
+  assert.deepEqual(result.messages[0].fileDiffs, expected);
+  assert.deepEqual(read(result.cursor).messages, [], "a completed edit is not replayed");
+  const completionIndex = fixture.trimEnd().split("\n").findIndex(line => JSON.parse(line).params.update.status === "completed");
+  assert.deepEqual(read(String(completionIndex)).messages[0].fileDiffs, expected, "completion in a later read keeps the recorded diff");
+  const failedFixture = fixture.replace('"status": "completed"', '"status": "failed"');
+  const failedPlugin = load(hostFor({ files: { [file]: failedFixture } }));
+  assert.deepEqual(JSON.parse(JSON.stringify(failedPlugin.readStructuredChat("/work/app", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").messages)), []);
+}]);
+
 let failed = 0;
 for (const [name, run] of tests) {
   try {

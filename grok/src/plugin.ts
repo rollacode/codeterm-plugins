@@ -6,6 +6,7 @@ import type {
   PluginModule,
   ResumeParams,
 } from "@codeterm/plugin-sdk";
+import { recordedTextDiff } from "@codeterm/plugin-sdk";
 
 const TITLE_RE = /\bgrok\b/i;
 const OUTPUT_FINGERPRINTS = [
@@ -174,6 +175,18 @@ function grokUpdateToChat(row: Record<string, unknown>, seq: number): Record<str
     ? params.update as Record<string, unknown>
     : null;
   const kind = update ? String(update.sessionUpdate || "") : "";
+  if (kind === "tool_call_update" && update?.status === "completed" && Array.isArray(update.content)) {
+    const diffs = update.content.flatMap((block: unknown) => {
+      if (!block || typeof block !== "object") return [];
+      const diff = block as Record<string, unknown>;
+      return diff.type === "diff" ? recordedTextDiff(diff.path, diff.oldText, diff.newText) : [];
+    });
+    if (diffs.length && typeof update.toolCallId === "string") {
+      return { id: `grok-edit-${update.toolCallId}`, type: "tool_result", content: "", seq,
+        toolId: update.toolCallId, toolName: "file_change", toolKind: "edit", toolError: false,
+        fileDiffs: diffs };
+    }
+  }
   let type = "";
   if (kind === "user_message_chunk") type = "user";
   else if (kind === "agent_thought_chunk") type = "thinking";
