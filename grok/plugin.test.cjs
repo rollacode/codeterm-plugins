@@ -48,6 +48,18 @@ function hostFor(over = {}) {
 }
 
 const tests = [
+  ["staged switching declares only own-session turn completion records", () => {
+    const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+    const declaration = manifest.commands.modelSwitchCommands.turnCompletion;
+    const pointer = (record, path) => path.slice(1).split("/").reduce((value, key) => value?.[key], record);
+    const complete = (record, session) => pointer(record, declaration.eventPointer) === declaration.eventValue
+      && pointer(record, declaration.sessionPointer) === session;
+    const event = (sessionId, sessionUpdate) => ({ params: { sessionId, update: { sessionUpdate } } });
+    assert.equal(complete(event("own", "turn_completed"), "own"), true);
+    assert.equal(complete(event("foreign", "turn_completed"), "own"), false);
+    assert.equal(complete(event("own", "agent_message_chunk"), "own"), false);
+    assert.equal(complete(event("own", "idle"), "own"), false);
+  }],
   ["multiline launch and resume keep exact native arguments in one shell line", () => {
     const dir = mkdtempSync(join(tmpdir(), "grok-argv-"));
     const fixture = join(dir, "argv.cjs");
@@ -513,6 +525,8 @@ tests.push(["model switching resumes the exact session with per-model effort cat
   const manifest=JSON.parse(readFileSync(join(__dirname,"plugin.json"),"utf8"));
   assert.equal(manifest.commands.modelSwitch,"live_command");
   assert.deepEqual(manifest.commands.modelSwitchCommands, {
+    turnCompletion:{eventPointer:"/params/update/sessionUpdate",eventValue:"turn_completed",sessionPointer:"/params/sessionId",
+      startEventValue:"user_message_chunk",turnPointer:"/params/update/prompt_id",activeTurnPointer:"/params/_meta/promptId"},
     confirmationSource:{kind:"session_identity"},
     model:{command:"/model {model}"},
     effort:{command:"/effort {effort}"},

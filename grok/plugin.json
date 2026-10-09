@@ -112,6 +112,14 @@
     ],
     "modelSwitch": "live_command",
     "modelSwitchCommands": {
+      "turnCompletion": {
+        "eventPointer": "/params/update/sessionUpdate",
+        "eventValue": "turn_completed",
+        "sessionPointer": "/params/sessionId",
+        "startEventValue": "user_message_chunk",
+        "turnPointer": "/params/update/prompt_id",
+        "activeTurnPointer": "/params/_meta/promptId"
+      },
       "confirmationSource": { "kind": "session_identity" },
       "model": { "command": "/model {model}" },
       "effort": { "command": "/effort {effort}" }
