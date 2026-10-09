@@ -158,10 +158,18 @@ function updateText(update) {
   }
   return "";
 }
+function canonicalToolKind(kind) {
+  if (kind === "list") return "read";
+  if (kind === "write") return "edit";
+  if (kind === "execute") return "command";
+  return typeof kind === "string" && ["command", "edit", "read", "search", "task", "fetch", "web", "image"].includes(kind) ? kind : "generic";
+}
 function grokUpdateToChat(row, seq) {
   const params = row.params && typeof row.params === "object" ? row.params : null;
   const update = params && params.update && typeof params.update === "object" ? params.update : null;
   const kind = update ? String(update.sessionUpdate || "") : "";
+  const sourceMeta = params?._meta;
+  const timestamp = typeof sourceMeta?.agentTimestampMs === "number" ? String(sourceMeta.agentTimestampMs) : void 0;
   if (kind === "tool_call" && typeof update?.toolCallId === "string") {
     const meta2 = update._meta;
     return {
@@ -169,10 +177,15 @@ function grokUpdateToChat(row, seq) {
       type: "tool_call",
       content: "",
       seq,
+      timestamp,
       toolId: update.toolCallId,
       toolName: meta2?.["x.ai/tool"]?.name ?? String(update.title || "tool"),
-      toolKind: meta2?.["x.ai/tool"]?.kind ?? String(update.kind || "other"),
-      toolInput: JSON.stringify(update.rawInput ?? {})
+      toolKind: canonicalToolKind(meta2?.["x.ai/tool"]?.kind ?? update.kind),
+      toolSummary: String(update.title || meta2?.["x.ai/tool"]?.name || "tool"),
+      toolArgs: JSON.stringify(update.rawInput ?? {}),
+      toolInput: update.rawInput ?? {},
+      toolCallSourceId: `grok-call-${update.toolCallId}`,
+      toolPairing: "exact"
     };
   }
   if (kind === "tool_call_update" && update?.status === "completed" && Array.isArray(update.content)) {
@@ -187,11 +200,14 @@ function grokUpdateToChat(row, seq) {
         type: "tool_result",
         content: "",
         seq,
+        timestamp,
         toolId: update.toolCallId,
         toolName: "file_change",
         toolKind: "edit",
         toolError: false,
-        fileDiffs: diffs
+        fileDiffs: diffs,
+        toolCallSourceId: `grok-call-${update.toolCallId}`,
+        toolPairing: "exact"
       };
     }
   }
@@ -202,13 +218,19 @@ function grokUpdateToChat(row, seq) {
       const value = item.type === "text" ? item.text : item.content?.text;
       return typeof value === "string" ? [value] : [];
     }).join("\n") : "";
+    const output = update.rawOutput;
+    const result = text || (typeof update.rawOutput === "string" ? update.rawOutput : typeof output?.Content?.content === "string" ? output.Content.content : "");
     return {
       id: `grok-result-${update.toolCallId}`,
       type: "tool_result",
-      content: text || (typeof update.rawOutput === "string" ? update.rawOutput : ""),
+      content: result,
       seq,
+      timestamp,
+      toolResult: result,
       toolId: update.toolCallId,
-      toolError: update.status === "failed"
+      toolError: update.status === "failed",
+      toolCallSourceId: `grok-call-${update.toolCallId}`,
+      toolPairing: "exact"
     };
   }
   let type = "";

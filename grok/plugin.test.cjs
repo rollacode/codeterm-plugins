@@ -581,10 +581,27 @@ tests.push(["read-only tool calls and failed results retain exact call identity 
   assert.equal(messages.length,2);
   assert.equal(messages[0].type,"tool_call");
   assert.equal(messages[0].toolName,"read");
-  assert.equal(JSON.parse(messages[0].toolInput).path,"opaque.txt");
+  assert.equal(messages[0].toolInput.path,"opaque.txt");
+  assert.equal(messages[0].toolKind,"generic");
   assert.equal(messages[1].toolId,messages[0].toolId);
   assert.equal(messages[1].content,"opaque failure");
   assert.equal(messages[1].toolError,true);
+}]);
+
+tests.push(["captured live list tool uses a supported renderer kind and preserves its result", () => {
+  const fixture = readFileSync(join(__dirname,"tests/fixtures/read-only-list.jsonl"),"utf8");
+  const records = fixture.trim().split("\n").map(JSON.parse);
+  const cwd = "/work/app", id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const file = `/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}/${id}/updates.jsonl`;
+  const plugin = load(hostFor({files:{[file]:fixture}}));
+  const messages = plugin.readStructuredChat(cwd,id).messages;
+  assert.equal(messages.length,2);
+  assert.equal(messages[0].toolKind,"read");
+  assert.equal(messages[0].toolInput.target_directory,records[0].params.update.rawInput.target_directory);
+  assert.equal(messages[0].timestamp,String(records[0].params._meta.agentTimestampMs));
+  assert.equal(messages[1].toolResult,records[2].params.update.rawOutput.Content.content);
+  assert.equal(messages[1].toolCallSourceId,messages[0].id);
+  assert.equal(messages[1].toolPairing,"exact");
 }]);
 
 let failed = 0;
