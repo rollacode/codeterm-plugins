@@ -97,7 +97,7 @@
     "windows": "grok update"
   },
   "commands": {
-    "stopKey": "\u001b",
+    "stopKey": "\u0003",
     "autoApproveFlags": [
       "--always-approve"
     ],

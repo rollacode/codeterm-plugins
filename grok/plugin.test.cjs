@@ -604,6 +604,11 @@ tests.push(["captured live list tool uses a supported renderer kind and preserve
   assert.equal(messages[1].toolPairing,"exact");
 }]);
 
+tests.push(["stop declares the cancellation key advertised by the native Grok composer", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname,"plugin.json"),"utf8"));
+  assert.equal(manifest.commands.stopKey,"\x03");
+}]);
+
 let failed = 0;
 for (const [name, run] of tests) {
   try {
