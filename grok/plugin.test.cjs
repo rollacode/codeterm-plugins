@@ -114,6 +114,7 @@ const tests = [
     assert.equal(manifest.spawn.providerReadiness.kind, "structural_composer");
     assert.equal(manifest.spawn.composerCursorPosition, "visible_anywhere");
     assert.equal(plugin.screenHasTui(screen), true);
+    assert.equal(plugin.screenHasTui(screen.split("\n").map(line => "  " + line + "  ").join("\n")), true);
     assert.equal(plugin.screenHasTui(screen.replace(/\r?\n/g, "\r\n")), true);
     assert.equal(plugin.screenHasTui(screen.replace(/Grok 4\.6 \(high\)/, "Opaque model")), true);
     assert.equal(plugin.screenHasTui("│ > │"), false);

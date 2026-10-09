@@ -24,7 +24,7 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
-// ../codeterm/packages/plugin-sdk/src/fileDiffs.ts
+// ../grok-chat/packages/plugin-sdk/src/fileDiffs.ts
 function textLines(text) {
   return text ? text.replace(/\n$/, "").split("\n") : [];
 }
@@ -303,7 +303,7 @@ var plugin = {
     return hits >= 2 || t.indexOf("Grok Build TUI") !== -1;
   },
   screenHasTui(screen) {
-    if (COMPOSER_FRAME_RE.test(String(screen || ""))) return true;
+    if (COMPOSER_FRAME_RE.test(String(screen || "").split(/\r?\n/).map((line) => line.trim()).join("\n"))) return true;
     const lower = String(screen || "").toLowerCase();
     for (let i = 0; i < TUI_FRAGMENTS.length; i++) {
       if (lower.indexOf(TUI_FRAGMENTS[i]) !== -1) return true;

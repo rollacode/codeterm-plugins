@@ -308,7 +308,7 @@ const plugin: PluginModule = {
   },
 
   screenHasTui(screen: string): boolean {
-    if (COMPOSER_FRAME_RE.test(String(screen || ""))) return true;
+    if (COMPOSER_FRAME_RE.test(String(screen || "").split(/\r?\n/).map(line => line.trim()).join("\n"))) return true;
     const lower = String(screen || "").toLowerCase();
     for (let i = 0; i < TUI_FRAGMENTS.length; i++) {
       if (lower.indexOf(TUI_FRAGMENTS[i]) !== -1) return true;
