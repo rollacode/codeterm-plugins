@@ -1,6 +1,8 @@
 const assert = require("node:assert/strict");
-const { readFileSync } = require("node:fs");
-const { join } = require("node:path");
+const { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync, realpathSync } = require("node:fs");
+const { tmpdir, homedir } = require("node:os");
+const { spawnSync } = require("node:child_process");
+const { join, dirname } = require("node:path");
 const vm = require("node:vm");
 
 const pluginPath = join(__dirname, "plugin.js");
@@ -29,7 +31,7 @@ function hostFor(over = {}) {
       toNative: (p) => (over.platform === "windows" ? String(p).replace(/\//g, "\\") : p),
     },
     shell: {
-      quoteFor: (v) => `'${v}'`,
+      quoteFor: (v, platform) => "'" + String(v).replace(/'/g, platform === "windows" ? "''" : "'\\''") + "'",
     },
     fs: {
       fileExists: (p) => Object.prototype.hasOwnProperty.call(files, p) || Object.prototype.hasOwnProperty.call(dirs, p),
@@ -46,6 +48,65 @@ function hostFor(over = {}) {
 }
 
 const tests = [
+  ["multiline launch and resume keep exact native arguments in one shell line", () => {
+    const dir = mkdtempSync(join(tmpdir(), "grok-argv-"));
+    const fixture = join(dir, "argv.cjs");
+    writeFileSync(fixture, "process.stdout.write(JSON.stringify(process.argv.slice(2)))");
+    const text = "-=opaque\r\nsecond\n'quoted' \"double\" $HOME `literal` $(throw 'executed') \\ путь ☃\n"
+      + String.raw`one\"two\\"three` + "\n"
+      + "\u2018single\u2019 \u201cdouble\u201d -= marker \u201a \u201b \u201e \u201f\n";
+    const shells = process.platform === "win32"
+      ? [["windows", "powershell.exe"], ["windows", "pwsh.exe"], ["linux", "C:/Program Files/Git/bin/bash.exe"]]
+      : [["linux", "bash"], ...(process.platform === "darwin" ? [["macos", "zsh"]] : [])];
+    try {
+      for (const [platform, shell] of shells) {
+        if (shell.includes("/") && !existsSync(shell)) continue;
+        const host = hostFor({ platform });
+        const plugin = load(host);
+        const cases = [
+          [plugin.buildLaunchCommand({ task: text }), ["--always-approve", "--", text]],
+          [plugin.buildResumeCommandWithContext({ sessionId: "fixture-session", systemPrompt: text }),
+            ["--always-approve", "--resume", "fixture-session", "--system-prompt-override", text.trim()]],
+        ];
+        for (const [command, expected] of cases) {
+          assert.doesNotMatch(command, /[\r\n]/, shell);
+          const exe = host.shell.quoteFor(process.execPath.replace(/\\/g, "/"), platform);
+          const script = host.shell.quoteFor(fixture.replace(/\\/g, "/"), platform);
+          const invocation = command.replace(/^grok/, `${platform === "windows" ? "& " : ""}${exe} ${script}`);
+          const args = platform === "windows"
+            ? ["-NoProfile", "-NonInteractive", "-Command", invocation] : ["-c", invocation];
+          const result = spawnSync(shell, args, { encoding: "utf8", windowsHide: true, timeout: 20000 });
+          if (result.error?.code === "ENOENT" && shell === "pwsh.exe") continue;
+          assert.equal(result.status, 0, `${shell}: ${result.stderr || result.error}`);
+          assert.deepEqual(JSON.parse(result.stdout), expected, shell);
+        }
+      }
+    } finally {
+      assert.equal(dirname(realpathSync(dir)), realpathSync(tmpdir()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }],
+  ["native Grok parser keeps option-shaped prompts positional", () => {
+    const executable = join(homedir(), ".grok", "bin", process.platform === "win32" ? "grok.exe" : "grok");
+    if (!existsSync(executable)) return;
+    const platform = process.platform === "win32" ? "windows" : "linux";
+    const host = hostFor({ platform });
+    const plugin = load(host);
+    const invalidMode = "__parser_probe_invalid__";
+    const command = plugin.buildLaunchCommand({ args: ["--permission-mode", invalidMode], task: "-=opaque-fixture" });
+    const invocation = command.replace(/^grok/, `${platform === "windows" ? "& " : ""}${host.shell.quoteFor(executable, platform)}`);
+    const result = spawnSync(platform === "windows" ? "powershell.exe" : "bash",
+      platform === "windows" ? ["-NoProfile", "-NonInteractive", "-Command", invocation + "; exit $LASTEXITCODE"] : ["-c", invocation],
+      { encoding: "utf8", windowsHide: true, timeout: 15000 });
+    assert.equal(result.status, 2, result.stderr || result.error);
+    assert.ok(result.stderr.includes(invalidMode), result.stderr);
+    assert.ok(result.stderr.includes("--permission-mode"), result.stderr);
+    assert.doesNotMatch(result.stderr, /unexpected argument/);
+    const control = spawnSync(executable, ["--permission-mode", invalidMode, "-=opaque-fixture"],
+      { encoding: "utf8", windowsHide: true, timeout: 15000 });
+    assert.equal(control.status, 2);
+    assert.match(control.stderr, /unexpected argument/);
+  }],
   ["manifest versions agree with channel", () => {
     const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
     const pkg = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf8"));
@@ -60,6 +121,23 @@ const tests = [
     assert.equal(manifest.minCodeterm, entry.minCodeterm);
     assert.deepEqual(manifest.commands.autoApproveFlags, ["--always-approve"]);
     assert.equal(manifest.spawn.systemPromptDelivery.kind, "external");
+  }],
+
+  ["first-turn capability parses the Grok structured transcript fixture", () => {
+    const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+    assert.equal(manifest.spawn.sessionStartsOnFirstUserTurn, true);
+    const cwd = "/work/app";
+    const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const transcript = readFileSync(join(__dirname, "tests", "fixtures", "first-user-turn.jsonl"), "utf8");
+    const path = "/tmp/home/.grok/sessions/" + encodeURIComponent(cwd) + "/" + id + "/updates.jsonl";
+    const plugin = load(hostFor({ files: { [path]: transcript } }));
+    const chat = plugin.readStructuredChat(cwd, id, null);
+    const users = chat.messages.filter((message) => message.type === "user");
+    assert.equal(users.length, 1);
+    assert.equal(users[0].content, "Grok first turn exact marker 7f2a");
+    assert.equal(users[0].seq, 1);
+    assert.equal(chat.messages.filter((message) => message.type === "assistant").length, 1);
+    assert.equal(plugin.readStructuredChat(cwd, id, chat.cursor).messages.length, 0);
   }],
 
   ["launch always includes --always-approve", () => {

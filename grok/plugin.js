@@ -37,7 +37,22 @@ var GROK_AUTH_CREDENTIAL = "grokAuth";
 var GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 var cachedGrokClientVersion;
 function quote(value) {
-  return host.shell.quoteFor(String(value || ""), host.platform());
+  const text = String(value || "");
+  const platform = host.platform();
+  const special = platform === "windows" ? /([\r\n\u2018-\u201f])/ : /([\r\n])/;
+  if (!special.test(text) && !(platform === "windows" && text.includes('"'))) {
+    return host.shell.quoteFor(text, platform);
+  }
+  const parts = text.split(special).map((part) => {
+    if (platform === "windows" && special.test(part)) return `[char]${part.charCodeAt(0)}`;
+    if (part === "\n") return platform === "windows" ? "[char]10" : "$'\\n'";
+    if (part === "\r") return platform === "windows" ? "[char]13" : "$'\\r'";
+    return host.shell.quoteFor(part, platform);
+  });
+  if (platform !== "windows") return parts.join("");
+  const literal = `(${parts.join(" + ")})`;
+  if (!text.includes('"')) return literal;
+  return `(& { param($value) if ($PSVersionTable.PSVersion.Major -lt 7 -or $PSNativeCommandArgumentPassing -eq 'Legacy') { ` + String.raw`[regex]::Replace($value, '(\\*)"', '$1$1\"') } else { $value } } ${literal})`;
 }
 function hasFlag(parts, flag) {
   for (let i = 0; i < parts.length; i++) if (parts[i] === flag) return true;
@@ -264,7 +279,7 @@ var plugin = {
     const parts = ["grok"];
     appendLaunchFlags(parts, p);
     const task = starterTask(p);
-    if (task) parts.push(quote(task));
+    if (task) parts.push("--", quote(task));
     return parts.join(" ");
   },
   buildResumeCommand(sessionId, skipPermissions) {
