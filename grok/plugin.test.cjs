@@ -106,6 +106,18 @@ const tests = [
       { encoding: "utf8", windowsHide: true, timeout: 15000 });
     assert.equal(control.status, 2);
     assert.match(control.stderr, /unexpected argument/);
+    }],
+  ["fresh lazy launch declares and recognizes its captured empty composer", () => {
+    const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+    const screen = readFileSync(join(__dirname, "fixtures", "idle-composer.txt"), "utf8");
+    const plugin = load(hostFor());
+    assert.equal(manifest.spawn.providerReadiness.kind, "structural_composer");
+    assert.equal(manifest.spawn.composerCursorPosition, "visible_anywhere");
+    assert.equal(plugin.screenHasTui(screen), true);
+    assert.equal(plugin.screenHasTui(screen.replace(/\r?\n/g, "\r\n")), true);
+    assert.equal(plugin.screenHasTui(screen.replace(/Grok 4\.6 \(high\)/, "Opaque model")), true);
+    assert.equal(plugin.screenHasTui("│ > │"), false);
+    assert.equal(plugin.screenHasTui(screen.replace(/│ >[^\n]*/, "│ Select an option │")), false);
   }],
   ["manifest versions agree with channel", () => {
     const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));

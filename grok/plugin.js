@@ -30,6 +30,7 @@ var OUTPUT_FINGERPRINTS = [
   "Compactions remaining"
 ];
 var TUI_FRAGMENTS = ["grok build tui", "compactions remaining"];
+var COMPOSER_FRAME_RE = /^╭─+╮\r?\n│[ \t]*>[ \t]*│\r?\n╰─[^\r\n]*─╯[ \t]*$/m;
 var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var ALWAYS_APPROVE = "--always-approve";
 var BYPASS_PERMISSIONS = ["--permission-mode", "bypassPermissions"];
@@ -257,6 +258,7 @@ var plugin = {
     return hits >= 2 || t.indexOf("Grok Build TUI") !== -1;
   },
   screenHasTui(screen) {
+    if (COMPOSER_FRAME_RE.test(String(screen || ""))) return true;
     const lower = String(screen || "").toLowerCase();
     for (let i = 0; i < TUI_FRAGMENTS.length; i++) {
       if (lower.indexOf(TUI_FRAGMENTS[i]) !== -1) return true;
