@@ -538,6 +538,32 @@ tests.push(["resume binding rejects preexisting marker files and stale or foreig
   assert.equal(plugin.detectLaunchSession(evidence).source, "launch_marker");
 }]);
 
+tests.push(["restore metadata resolves exact ids and inventories directory-shaped sessions", () => {
+  const cwd = "/work/app", id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const root = "/tmp/home/.grok/sessions", cwdDir = root + "/" + encodeURIComponent(cwd), dir = cwdDir + "/" + id;
+  const files = {
+    [dir + "/summary.json"]: { info: { id, cwd }, created_at: "2026-10-09T08:00:00Z", generated_title: "Opaque title" },
+    [dir + "/updates.jsonl"]: JSON.stringify({params:{update:{sessionUpdate:"user_message_chunk",content:{text:"opaque user"}},_meta:{eventId:"own-turn",agentTimestampMs:1791532800000}}}) + "\n",
+  };
+  const dirs = { [root]: [{isDir:true,path:cwdDir}], [cwdDir]: [{name:id,isDir:true,path:dir}] };
+  const plugin = load(hostFor({files,dirs}));
+  const metadata = plugin.findSession(id);
+  assert.equal(metadata.sessionId, id);
+  assert.equal(metadata.projectPath, cwd);
+  assert.equal(metadata.filePath, dir + "/updates.jsonl");
+  assert.equal(metadata.createdTs, Date.parse("2026-10-09T08:00:00Z") / 1000);
+  assert.equal(plugin.enumerateSessions().length, 1);
+  assert.equal(plugin.sessionFilePath(cwd,id), metadata.filePath);
+  const parsed = plugin.parseSessionMessages(files[metadata.filePath]);
+  assert.equal(parsed[0].role,"user");
+  assert.equal(parsed[0].text,"opaque user");
+  assert.equal(parsed[0].ts,1791532800);
+  files[dir + "/summary.json"].info.id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  assert.equal(plugin.findSession(id), null);
+  assert.equal(plugin.sessionExists(cwd,id), false);
+  assert.equal(plugin.enumerateSessions().length, 0);
+}]);
+
 let failed = 0;
 for (const [name, run] of tests) {
   try {

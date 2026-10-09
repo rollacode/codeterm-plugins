@@ -31,6 +31,7 @@ interface GrokManifest {
 interface GrokSummary {
   info?: { id?: string; cwd?: string };
   created_at?: string;
+  updated_at?: string;
   current_model_id?: string;
   reasoning_effort?: string;
   generated_title?: string;
@@ -111,8 +112,7 @@ function sessionDir(cwd: string, sessionId: string): string | null {
 }
 
 function sessionExistsAt(cwd: string, sessionId: string): boolean {
-  const dir = sessionDir(cwd, sessionId);
-  return !!dir && host.fs.fileExists(joinPath(dir, "summary.json"));
+  return isUuid(sessionId) && readSummary(cwd, sessionId)?.info?.id === sessionId;
 }
 
 function readSummary(cwd: string, sessionId: string): GrokSummary | null {
@@ -245,6 +245,19 @@ function listSessionIds(cwd: string): string[] {
     if (host.fs.fileExists(joinPath(joinPath(dir, name), "summary.json"))) ids.push(name);
   }
   return ids;
+}
+
+function sessionMetadata(dir: string, sessionId: string): Record<string, unknown> | null {
+  const summary = host.fs.readJson(joinPath(dir, "summary.json")) as GrokSummary | null;
+  if (summary?.info?.id !== sessionId || !summary.info.cwd) return null;
+  const filePath = joinPath(dir, "updates.jsonl");
+  return {
+    sessionId, provider: "grok", projectPath: summary.info.cwd,
+    title: summary.generated_title ?? null, summary: summary.session_summary ?? null,
+    filePath, transcriptPath: filePath,
+    createdTs: parseTimeMs(summary.created_at) === null ? null : Math.floor(parseTimeMs(summary.created_at)! / 1000),
+    modifiedTs: parseTimeMs(summary.updated_at) === null ? null : Math.floor(parseTimeMs(summary.updated_at)! / 1000),
+  };
 }
 
 function discoverFromCache(): ModelInfo[] | null {
@@ -391,6 +404,22 @@ const plugin: PluginModule = {
     return host.fs.fileExists(path) ? path : null;
   },
 
+  sessionFilePath(cwd: string, sessionId: string): string | null {
+    const dir = sessionDir(cwd, sessionId);
+    if (!dir || !sessionExistsAt(cwd, sessionId)) return null;
+    const path = joinPath(dir, "updates.jsonl");
+    return host.fs.fileExists(path) ? path : null;
+  },
+
+  parseSessionMessages(text: string): unknown[] {
+    return String(text).split("\n").flatMap((line, seq) => {
+      const row = safeJson(line);
+      const message = row && typeof row === "object" ? grokUpdateToChat(row as Record<string, unknown>, seq) : null;
+      if (!message || !["user", "assistant"].includes(String(message.type))) return [];
+      return [{role: message.type, text: message.content, ts: Math.floor(Number(message.timestamp) / 1000), isMeta: false}];
+    });
+  },
+
   usesStructuredChat(): boolean {
     return true;
   },
@@ -485,11 +514,25 @@ const plugin: PluginModule = {
     const cwdDirs = host.fs.readDir(root) || [];
     for (let i = 0; i < cwdDirs.length; i++) {
       if (!cwdDirs[i].isDir) continue;
-      const summaryPath = joinPath(joinPath(cwdDirs[i].path, sessionId), "summary.json");
-      const summary = host.fs.readJson(summaryPath) as GrokSummary | null;
-      if (summary) return summary;
+      const metadata = sessionMetadata(joinPath(cwdDirs[i].path, sessionId), sessionId);
+      if (metadata) return metadata;
     }
     return null;
+  },
+
+  enumerateSessions(): unknown[] {
+    const root = sessionsRoot();
+    if (!root) return [];
+    const result: unknown[] = [];
+    for (const cwdDir of host.fs.readDir(root) || []) {
+      if (!cwdDir.isDir) continue;
+      for (const entry of host.fs.readDir(cwdDir.path) || []) {
+        if (!entry.isDir || !isUuid(entry.name)) continue;
+        const metadata = sessionMetadata(entry.path, entry.name);
+        if (metadata) result.push(metadata);
+      }
+    }
+    return result;
   },
 
   parseUsage(rawText: string, nowMs: number): unknown {

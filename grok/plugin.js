@@ -108,8 +108,7 @@ function sessionDir(cwd, sessionId) {
   return joinPath(joinPath(root, cwdKey(cwd)), sessionId);
 }
 function sessionExistsAt(cwd, sessionId) {
-  const dir = sessionDir(cwd, sessionId);
-  return !!dir && host.fs.fileExists(joinPath(dir, "summary.json"));
+  return isUuid(sessionId) && readSummary(cwd, sessionId)?.info?.id === sessionId;
 }
 function readSummary(cwd, sessionId) {
   const dir = sessionDir(cwd, sessionId);
@@ -236,6 +235,22 @@ function listSessionIds(cwd) {
     if (host.fs.fileExists(joinPath(joinPath(dir, name), "summary.json"))) ids.push(name);
   }
   return ids;
+}
+function sessionMetadata(dir, sessionId) {
+  const summary = host.fs.readJson(joinPath(dir, "summary.json"));
+  if (summary?.info?.id !== sessionId || !summary.info.cwd) return null;
+  const filePath = joinPath(dir, "updates.jsonl");
+  return {
+    sessionId,
+    provider: "grok",
+    projectPath: summary.info.cwd,
+    title: summary.generated_title ?? null,
+    summary: summary.session_summary ?? null,
+    filePath,
+    transcriptPath: filePath,
+    createdTs: parseTimeMs(summary.created_at) === null ? null : Math.floor(parseTimeMs(summary.created_at) / 1e3),
+    modifiedTs: parseTimeMs(summary.updated_at) === null ? null : Math.floor(parseTimeMs(summary.updated_at) / 1e3)
+  };
 }
 function discoverFromCache() {
   const home = grokHome();
@@ -366,6 +381,20 @@ var plugin = {
     const path = joinPath(dir, "chat_history.jsonl");
     return host.fs.fileExists(path) ? path : null;
   },
+  sessionFilePath(cwd, sessionId) {
+    const dir = sessionDir(cwd, sessionId);
+    if (!dir || !sessionExistsAt(cwd, sessionId)) return null;
+    const path = joinPath(dir, "updates.jsonl");
+    return host.fs.fileExists(path) ? path : null;
+  },
+  parseSessionMessages(text) {
+    return String(text).split("\n").flatMap((line, seq) => {
+      const row = safeJson(line);
+      const message = row && typeof row === "object" ? grokUpdateToChat(row, seq) : null;
+      if (!message || !["user", "assistant"].includes(String(message.type))) return [];
+      return [{ role: message.type, text: message.content, ts: Math.floor(Number(message.timestamp) / 1e3), isMeta: false }];
+    });
+  },
   usesStructuredChat() {
     return true;
   },
@@ -449,11 +478,24 @@ var plugin = {
     const cwdDirs = host.fs.readDir(root) || [];
     for (let i = 0; i < cwdDirs.length; i++) {
       if (!cwdDirs[i].isDir) continue;
-      const summaryPath = joinPath(joinPath(cwdDirs[i].path, sessionId), "summary.json");
-      const summary = host.fs.readJson(summaryPath);
-      if (summary) return summary;
+      const metadata = sessionMetadata(joinPath(cwdDirs[i].path, sessionId), sessionId);
+      if (metadata) return metadata;
     }
     return null;
+  },
+  enumerateSessions() {
+    const root = sessionsRoot();
+    if (!root) return [];
+    const result = [];
+    for (const cwdDir of host.fs.readDir(root) || []) {
+      if (!cwdDir.isDir) continue;
+      for (const entry of host.fs.readDir(cwdDir.path) || []) {
+        if (!entry.isDir || !isUuid(entry.name)) continue;
+        const metadata = sessionMetadata(entry.path, entry.name);
+        if (metadata) result.push(metadata);
+      }
+    }
+    return result;
   },
   parseUsage(rawText, nowMs) {
     const data = safeJson(String(rawText || ""));
