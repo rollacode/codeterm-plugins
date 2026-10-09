@@ -5,6 +5,7 @@ import type {
   ModelInfo,
   PluginModule,
   ResumeParams,
+  SessionModelTranscriptBoundary,
 } from "@codeterm/plugin-sdk";
 import { recordedTextDiff } from "@codeterm/plugin-sdk";
 
@@ -48,10 +49,21 @@ interface GrokUsageFile {
 interface ActiveSession {
   session_id?: string;
   pid?: number;
+  cwd?: string;
+  opened_at?: string;
+}
+
+interface GrokModelInfo {
+  id?: string;
+  name?: string;
+  description?: string | null;
+  hidden?: boolean;
+  context_window?: number;
+  reasoning_efforts?: { id: string; label: string; description?: string; default?: boolean }[];
 }
 
 interface ModelsCache {
-  models?: Record<string, { info?: { id?: string; name?: string; description?: string | null; hidden?: boolean } }>;
+  models?: Record<string, { info?: GrokModelInfo }>;
 }
 
 function quote(value: string): string {
@@ -194,7 +206,9 @@ function grokUpdateToChat(row: Record<string, unknown>, seq: number): Record<str
   else return null;
   const content = updateText(update);
   if (!content) return null;
-  const meta = row._meta && typeof row._meta === "object" ? row._meta as Record<string, unknown> : {};
+  const meta = params?._meta && typeof params._meta === "object"
+    ? params._meta as Record<string, unknown>
+    : row._meta && typeof row._meta === "object" ? row._meta as Record<string, unknown> : {};
   const id = typeof meta.eventId === "string" && meta.eventId ? String(meta.eventId) : `grok-${seq}`;
   let tsMs = typeof meta.agentTimestampMs === "number" ? meta.agentTimestampMs : 0;
   if (!tsMs && typeof row.timestamp === "number") tsMs = row.timestamp > 1e12 ? row.timestamp : row.timestamp * 1000;
@@ -258,6 +272,8 @@ function discoverFromCache(): ModelInfo[] | null {
       displayName: String(info.name || id),
       description: info.description ? String(info.description) : undefined,
       group: "xAI",
+      reasoningEfforts: info.reasoning_efforts?.map(effort => ({id: effort.id, displayName: effort.label, description: effort.description})),
+      defaultReasoningEffort: info.reasoning_efforts?.find(effort => effort.default)?.id,
     });
   }
   return models.length ? models : null;
@@ -285,6 +301,24 @@ function manifestModels(): ModelInfo[] {
   } catch (_) {
     return [];
   }
+}
+
+
+function sessionUpdates(cwd: string, sessionId: string): Record<string, unknown>[] {
+  const dir = sessionDir(cwd, sessionId);
+  const raw = dir && host.fs.readFile(joinPath(dir, "updates.jsonl"));
+  if (!raw) return [];
+  return String(raw).split("\n").flatMap(line => {
+    try {
+      const row = JSON.parse(line);
+      return row && typeof row === "object" ? [row] : [];
+    } catch (_) { return []; }
+  });
+}
+
+function eventId(row: Record<string, unknown>): string | null {
+  const params = row.params as { _meta?: {eventId?: string} } | undefined;
+  return params?._meta?.eventId ?? null;
 }
 
 const plugin: PluginModule = {
@@ -400,19 +434,23 @@ const plugin: PluginModule = {
     const home = grokHome();
     if (!home) return null;
     const rows = host.fs.readJson(joinPath(home, "active_sessions.json")) as ActiveSession[] | null;
-    if (!Array.isArray(rows) || !evidence || !evidence.processes) return null;
+    if (!evidence || !evidence.processes) return null;
     const pids: Record<number, true> = {};
     for (let i = 0; i < evidence.processes.length; i++) pids[evidence.processes[i].pid] = true;
     const matches: string[] = [];
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      if (typeof row.pid === "number" && pids[row.pid] && typeof row.session_id === "string") {
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const opened = parseTimeMs(row.opened_at);
+      if (typeof row.pid === "number" && pids[row.pid] && typeof row.session_id === "string"
+        && isUuid(row.session_id) && row.cwd && cwdKey(row.cwd) === cwdKey(evidence.cwd)
+        && opened !== null && opened >= evidence.launchedAtMs) {
         matches.push(row.session_id);
       }
     }
     if (matches.length === 1) return { sessionId: matches[0], source: "pid_registry" };
     const marker = String(evidence.launchMarker || "").trim();
-    if (isUuid(marker) && sessionExistsAt(evidence.cwd, marker)) {
+    const summary = isUuid(marker) ? readSummary(evidence.cwd, marker) : null;
+    const created = parseTimeMs(summary?.created_at);
+    if (summary?.info?.id === marker && created !== null && created >= evidence.launchedAtMs) {
       return { sessionId: marker, source: "launch_marker" };
     }
     return null;
@@ -421,6 +459,28 @@ const plugin: PluginModule = {
   detectSessionModel(cwd: string, sessionId: string): string | null {
     const model = readSummary(cwd, sessionId)?.current_model_id;
     return model ? String(model) : null;
+  },
+
+  sessionModelTranscriptBoundary(cwd: string, sessionId: string): SessionModelTranscriptBoundary {
+    const rows = sessionUpdates(cwd, sessionId);
+    const last = rows[rows.length - 1];
+    const id = last && eventId(last);
+    return {lastEntryUuid: id ?? null, lastEntryTimestamp: null, lastEntryType: null, boundaryFound: !!id};
+  },
+
+  detectSessionModelAfterBoundary(cwd: string, sessionId: string, boundary: SessionModelTranscriptBoundary): string | null {
+    if (!boundary.boundaryFound || !boundary.lastEntryUuid) return null;
+    const rows = sessionUpdates(cwd, sessionId);
+    const index = rows.findIndex(row => eventId(row) === boundary.lastEntryUuid);
+    if (index < 0) return null;
+    let model: string | null = null;
+    for (const row of rows.slice(index + 1)) {
+      const params = row.params as {update?: {sessionUpdate?: string; _meta?: {modelId?: string}}} | undefined;
+      const update = params?.update;
+      if (update?.sessionUpdate === "user_message_chunk") model = update._meta?.modelId ?? null;
+      if (update?.sessionUpdate === "agent_message_chunk" && model) return model;
+    }
+    return null;
   },
 
   detectSessionReasoningEffort(cwd: string, sessionId: string): string | null {

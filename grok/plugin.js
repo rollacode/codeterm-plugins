@@ -190,7 +190,7 @@ function grokUpdateToChat(row, seq) {
   else return null;
   const content = updateText(update);
   if (!content) return null;
-  const meta = row._meta && typeof row._meta === "object" ? row._meta : {};
+  const meta = params?._meta && typeof params._meta === "object" ? params._meta : row._meta && typeof row._meta === "object" ? row._meta : {};
   const id = typeof meta.eventId === "string" && meta.eventId ? String(meta.eventId) : `grok-${seq}`;
   let tsMs = typeof meta.agentTimestampMs === "number" ? meta.agentTimestampMs : 0;
   if (!tsMs && typeof row.timestamp === "number") tsMs = row.timestamp > 1e12 ? row.timestamp : row.timestamp * 1e3;
@@ -252,7 +252,9 @@ function discoverFromCache() {
       id,
       displayName: String(info.name || id),
       description: info.description ? String(info.description) : void 0,
-      group: "xAI"
+      group: "xAI",
+      reasoningEfforts: info.reasoning_efforts?.map((effort) => ({ id: effort.id, displayName: effort.label, description: effort.description })),
+      defaultReasoningEffort: info.reasoning_efforts?.find((effort) => effort.default)?.id
     });
   }
   return models.length ? models : null;
@@ -282,6 +284,23 @@ function manifestModels() {
   } catch (_) {
     return [];
   }
+}
+function sessionUpdates(cwd, sessionId) {
+  const dir = sessionDir(cwd, sessionId);
+  const raw = dir && host.fs.readFile(joinPath(dir, "updates.jsonl"));
+  if (!raw) return [];
+  return String(raw).split("\n").flatMap((line) => {
+    try {
+      const row = JSON.parse(line);
+      return row && typeof row === "object" ? [row] : [];
+    } catch (_) {
+      return [];
+    }
+  });
+}
+function eventId(row) {
+  const params = row.params;
+  return params?._meta?.eventId ?? null;
 }
 var plugin = {
   starterPromptText(prompt) {
@@ -377,19 +396,21 @@ var plugin = {
     const home = grokHome();
     if (!home) return null;
     const rows = host.fs.readJson(joinPath(home, "active_sessions.json"));
-    if (!Array.isArray(rows) || !evidence || !evidence.processes) return null;
+    if (!evidence || !evidence.processes) return null;
     const pids = {};
     for (let i = 0; i < evidence.processes.length; i++) pids[evidence.processes[i].pid] = true;
     const matches = [];
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      if (typeof row.pid === "number" && pids[row.pid] && typeof row.session_id === "string") {
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const opened = parseTimeMs(row.opened_at);
+      if (typeof row.pid === "number" && pids[row.pid] && typeof row.session_id === "string" && isUuid(row.session_id) && row.cwd && cwdKey(row.cwd) === cwdKey(evidence.cwd) && opened !== null && opened >= evidence.launchedAtMs) {
         matches.push(row.session_id);
       }
     }
     if (matches.length === 1) return { sessionId: matches[0], source: "pid_registry" };
     const marker = String(evidence.launchMarker || "").trim();
-    if (isUuid(marker) && sessionExistsAt(evidence.cwd, marker)) {
+    const summary = isUuid(marker) ? readSummary(evidence.cwd, marker) : null;
+    const created = parseTimeMs(summary?.created_at);
+    if (summary?.info?.id === marker && created !== null && created >= evidence.launchedAtMs) {
       return { sessionId: marker, source: "launch_marker" };
     }
     return null;
@@ -397,6 +418,26 @@ var plugin = {
   detectSessionModel(cwd, sessionId) {
     const model = readSummary(cwd, sessionId)?.current_model_id;
     return model ? String(model) : null;
+  },
+  sessionModelTranscriptBoundary(cwd, sessionId) {
+    const rows = sessionUpdates(cwd, sessionId);
+    const last = rows[rows.length - 1];
+    const id = last && eventId(last);
+    return { lastEntryUuid: id ?? null, lastEntryTimestamp: null, lastEntryType: null, boundaryFound: !!id };
+  },
+  detectSessionModelAfterBoundary(cwd, sessionId, boundary) {
+    if (!boundary.boundaryFound || !boundary.lastEntryUuid) return null;
+    const rows = sessionUpdates(cwd, sessionId);
+    const index = rows.findIndex((row) => eventId(row) === boundary.lastEntryUuid);
+    if (index < 0) return null;
+    let model = null;
+    for (const row of rows.slice(index + 1)) {
+      const params = row.params;
+      const update = params?.update;
+      if (update?.sessionUpdate === "user_message_chunk") model = update._meta?.modelId ?? null;
+      if (update?.sessionUpdate === "agent_message_chunk" && model) return model;
+    }
+    return null;
   },
   detectSessionReasoningEffort(cwd, sessionId) {
     const effort = readSummary(cwd, sessionId)?.reasoning_effort;

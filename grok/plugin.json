@@ -108,7 +108,8 @@
     "reasoningEffortLaunchArgsFormat": [
       "--reasoning-effort",
       "{effort}"
-    ]
+    ],
+    "modelSwitch": "restart_resume"
   },
   "permissions": {
     "network": {

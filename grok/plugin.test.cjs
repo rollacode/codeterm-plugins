@@ -228,7 +228,7 @@ const tests = [
     const plugin = load(hostFor({
       files: {
         "/tmp/home/.grok/active_sessions.json": [
-          { session_id: "01a0b594-144d-7670-8a36-03e39639311c", pid: 73812 },
+          { session_id: "01a0b594-144d-7670-8a36-03e39639311c", pid: 73812, cwd: "/work/app", opened_at: "2026-10-09T08:55:21Z" },
         ],
       },
     }));
@@ -485,6 +485,58 @@ tests.push(["structured cursor never consumes the next append or a partial recor
   assert.equal(partial.cursor,second.cursor);
   files[file] += third.slice(30) + "\n";
   assert.equal(plugin.readStructuredChat(cwd,id,partial.cursor).messages[0].content,"third");
+}]);
+
+
+tests.push(["live metadata preserves stable event identity and confirms only a new answered model turn", () => {
+  const cwd="/work/app", id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const file="/tmp/home/.grok/sessions/%2Fwork%2Fapp/"+id+"/updates.jsonl";
+  const row=(eventId,kind,text,modelId)=>JSON.stringify({timestamp:1791535504,params:{sessionId:id,update:{sessionUpdate:kind,content:{type:"text",text},_meta:{modelId}},_meta:{eventId,agentTimestampMs:1791535504758}}});
+  const files={[file]:row("old-user","user_message_chunk","first","grok-4.6")+"\n"+row("old-answer","agent_message_chunk","answer")+"\n"};
+  const plugin=load(hostFor({files}));
+  const boundary=plugin.sessionModelTranscriptBoundary(cwd,id);
+  assert.equal(boundary.lastEntryUuid,"old-answer");
+  assert.equal(plugin.readStructuredChat(cwd,id).messages[0].id,"old-user");
+  assert.equal(plugin.readStructuredChat(cwd,id).messages[0].timestamp,"1791535504758");
+  assert.equal(plugin.detectSessionModelAfterBoundary(cwd,id,boundary),null);
+  files[file]+=row("new-user","user_message_chunk","second","grok-4.7")+"\n";
+  assert.equal(plugin.detectSessionModelAfterBoundary(cwd,id,boundary),null);
+  files[file]+=row("new-answer","agent_message_chunk","second answer")+"\n";
+  assert.equal(plugin.detectSessionModelAfterBoundary(cwd,id,boundary),"grok-4.7");
+  assert.equal(plugin.detectSessionModelAfterBoundary(cwd,id,{...boundary,lastEntryUuid:"foreign"}),null);
+}]);
+
+tests.push(["model switching resumes the exact session with per-model effort catalogues", () => {
+  const manifest=JSON.parse(readFileSync(join(__dirname,"plugin.json"),"utf8"));
+  assert.equal(manifest.commands.modelSwitch,"restart_resume");
+  const plugin=load(hostFor({files:{"/tmp/home/.grok/models_cache.json":{models:{one:{info:{id:"one",name:"One",reasoning_efforts:[{id:"low",label:"Low",default:true}]}},two:{info:{id:"two",name:"Two",reasoning_efforts:[]}}}}}}));
+  const models=plugin.discoverModels();
+  assert.equal(models[0].reasoningEfforts.length,1);
+  assert.equal(models[0].defaultReasoningEffort,"low");
+  assert.equal(models[1].reasoningEfforts.length,0);
+  const command=plugin.buildResumeCommandWithContext({sessionId:"owned-id",args:["--model","two","--reasoning-effort","low"]});
+  assert.match(command,/--resume 'owned-id'/);
+  assert.match(command,/'--model' 'two' '--reasoning-effort' 'low'/);
+}]);
+
+tests.push(["resume binding rejects preexisting marker files and stale or foreign registry rows", () => {
+  const cwd = "/work/app", id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const summaryPath = `/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}/${id}/summary.json`;
+  const registryPath = "/tmp/home/.grok/active_sessions.json";
+  const launchedAtMs = Date.parse("2026-10-09T08:53:24Z");
+  const files = { [summaryPath]: { info: { id }, created_at: "2026-10-09T08:00:00Z" }, [registryPath]: [] };
+  const plugin = load(hostFor({ files }));
+  const evidence = { cwd, launchMarker: id, launchedAtMs, processes: [{ pid: 42, depth: 1, startToken: "current" }] };
+  assert.equal(plugin.detectLaunchSession(evidence), null);
+  files[registryPath] = [{ session_id: id, pid: 42, cwd, opened_at: "2026-10-09T08:00:00Z" }];
+  assert.equal(plugin.detectLaunchSession(evidence), null);
+  files[registryPath][0].opened_at = "2026-10-09T08:55:21Z";
+  assert.equal(plugin.detectLaunchSession(evidence).sessionId, id);
+  files[registryPath][0].cwd = "/foreign";
+  assert.equal(plugin.detectLaunchSession(evidence), null);
+  files[registryPath] = [];
+  files[summaryPath].created_at = "2026-10-09T08:53:25Z";
+  assert.equal(plugin.detectLaunchSession(evidence).source, "launch_marker");
 }]);
 
 let failed = 0;
