@@ -612,6 +612,7 @@ tests.push(["captured live list tool uses a supported renderer kind and preserve
 tests.push(["stop declares the cancellation key advertised by the native Grok composer", () => {
   const manifest = JSON.parse(readFileSync(join(__dirname,"plugin.json"),"utf8"));
   assert.equal(manifest.commands.stopKey,"\x03");
+  assert.equal(manifest.commands.usesWin32ControlKeys,true);
 }]);
 
 tests.push(["live identity reads only the exact session summary and rejects traversal or foreign identity", () => {

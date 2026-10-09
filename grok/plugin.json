@@ -98,6 +98,7 @@
   },
   "commands": {
     "stopKey": "\u0003",
+    "usesWin32ControlKeys": true,
     "autoApproveFlags": [
       "--always-approve"
     ],
