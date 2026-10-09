@@ -208,15 +208,15 @@ function readGrokChat(cwd, sessionId, cursor) {
   const messages = [];
   let next = start;
   for (let i = start; i < lines.length; i++) {
-    next = i + 1;
     const line = lines[i].trim();
-    if (!line) continue;
+    if (!line && i === lines.length - 1) break;
     let row = null;
     try {
       row = JSON.parse(line);
     } catch (_) {
-      continue;
+      if (i === lines.length - 1) break;
     }
+    next = i + 1;
     if (!row || typeof row !== "object") continue;
     const msg = grokUpdateToChat(row, i);
     if (msg) messages.push(msg);

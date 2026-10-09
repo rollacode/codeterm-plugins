@@ -213,11 +213,13 @@ function readGrokChat(cwd: string, sessionId: string, cursor?: string | null): {
   const messages: unknown[] = [];
   let next = start;
   for (let i = start; i < lines.length; i++) {
-    next = i + 1;
     const line = lines[i].trim();
-    if (!line) continue;
+    if (!line && i === lines.length - 1) break;
     let row: Record<string, unknown> | null = null;
-    try { row = JSON.parse(line); } catch (_) { continue; }
+    try { row = JSON.parse(line); } catch (_) {
+      if (i === lines.length - 1) break;
+    }
+    next = i + 1;
     if (!row || typeof row !== "object") continue;
     const msg = grokUpdateToChat(row, i);
     if (msg) messages.push(msg);

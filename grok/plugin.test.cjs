@@ -466,6 +466,27 @@ tests.push(["completed recorded edit diffs reach the built structured chat expor
   assert.deepEqual(JSON.parse(JSON.stringify(failedPlugin.readStructuredChat("/work/app", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").messages)), []);
 }]);
 
+
+tests.push(["structured cursor never consumes the next append or a partial record", () => {
+  const cwd = "/work/app", id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const file = "/tmp/home/.grok/sessions/%2Fwork%2Fapp/" + id + "/updates.jsonl";
+  const row = (text, eventId) => JSON.stringify({params:{update:{sessionUpdate:"user_message_chunk",content:{type:"text",text}}},_meta:{eventId}});
+  const files = {[file]: row("first", "u1") + "\n"};
+  const plugin = load(hostFor({files}));
+  const first = plugin.readStructuredChat(cwd,id);
+  assert.equal(first.cursor,"1");
+  files[file] += row("second", "u2") + "\n";
+  const second = plugin.readStructuredChat(cwd,id,first.cursor);
+  assert.equal(second.messages.length,1);
+  assert.equal(second.messages[0].content,"second");
+  const third = row("third","u3");
+  files[file] += third.slice(0,30);
+  const partial = plugin.readStructuredChat(cwd,id,second.cursor);
+  assert.equal(partial.cursor,second.cursor);
+  files[file] += third.slice(30) + "\n";
+  assert.equal(plugin.readStructuredChat(cwd,id,partial.cursor).messages[0].content,"third");
+}]);
+
 let failed = 0;
 for (const [name, run] of tests) {
   try {
