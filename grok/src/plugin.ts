@@ -116,9 +116,11 @@ function sessionExistsAt(cwd: string, sessionId: string): boolean {
 }
 
 function readSummary(cwd: string, sessionId: string): GrokSummary | null {
+  if (!isUuid(sessionId)) return null;
   const dir = sessionDir(cwd, sessionId);
   if (!dir) return null;
-  return host.fs.readJson(joinPath(dir, "summary.json"));
+  const summary = host.fs.readJson(joinPath(dir, "summary.json")) as GrokSummary | null;
+  return summary?.info?.id === sessionId ? summary : null;
 }
 
 function isUuid(value: string): boolean {
@@ -358,7 +360,7 @@ function eventId(row: Record<string, unknown>): string | null {
   return params?._meta?.eventId ?? null;
 }
 
-const plugin: PluginModule = {
+const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: string): string | null } = {
   starterPromptText(prompt) {
     if (prompt === "no_starter" || prompt === "team_bootstrap") return undefined;
     if (prompt === "idle_wakeup") {
@@ -514,6 +516,13 @@ const plugin: PluginModule = {
     return model ? String(model) : null;
   },
 
+  sessionModelIdentityPath(cwd: string, sessionId: string): string | null {
+    const dir = sessionDir(cwd, sessionId);
+    if (!dir || !readSummary(cwd, sessionId)) return null;
+    const path = joinPath(dir, "summary.json");
+    return host.fs.fileExists(path) ? path : null;
+  },
+
   sessionModelTranscriptBoundary(cwd: string, sessionId: string): SessionModelTranscriptBoundary {
     const rows = sessionUpdates(cwd, sessionId);
     const last = rows[rows.length - 1];
@@ -594,6 +603,8 @@ const plugin: PluginModule = {
       provider: "grok",
       account_id: null,
       captured_at_ms: nowMs,
+      billing_mode: data.billingMode === "subscription" || data.billingMode === "api" ? data.billingMode : "unknown",
+      limits_reported: hasWeekly,
       session_pct: null,
       session_resets_at_ms: null,
       weekly_pct: hasWeekly ? weeklyPct : null,

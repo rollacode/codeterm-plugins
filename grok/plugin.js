@@ -111,9 +111,11 @@ function sessionExistsAt(cwd, sessionId) {
   return isUuid(sessionId) && readSummary(cwd, sessionId)?.info?.id === sessionId;
 }
 function readSummary(cwd, sessionId) {
+  if (!isUuid(sessionId)) return null;
   const dir = sessionDir(cwd, sessionId);
   if (!dir) return null;
-  return host.fs.readJson(joinPath(dir, "summary.json"));
+  const summary = host.fs.readJson(joinPath(dir, "summary.json"));
+  return summary?.info?.id === sessionId ? summary : null;
 }
 function isUuid(value) {
   return UUID_RE.test(String(value || ""));
@@ -498,6 +500,12 @@ var plugin = {
     const model = readSummary(cwd, sessionId)?.current_model_id;
     return model ? String(model) : null;
   },
+  sessionModelIdentityPath(cwd, sessionId) {
+    const dir = sessionDir(cwd, sessionId);
+    if (!dir || !readSummary(cwd, sessionId)) return null;
+    const path = joinPath(dir, "summary.json");
+    return host.fs.fileExists(path) ? path : null;
+  },
   sessionModelTranscriptBoundary(cwd, sessionId) {
     const rows = sessionUpdates(cwd, sessionId);
     const last = rows[rows.length - 1];
@@ -559,6 +567,8 @@ var plugin = {
       provider: "grok",
       account_id: null,
       captured_at_ms: nowMs,
+      billing_mode: data.billingMode === "subscription" || data.billingMode === "api" ? data.billingMode : "unknown",
+      limits_reported: hasWeekly,
       session_pct: null,
       session_resets_at_ms: null,
       weekly_pct: hasWeekly ? weeklyPct : null,

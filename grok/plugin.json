@@ -109,7 +109,12 @@
       "--reasoning-effort",
       "{effort}"
     ],
-    "modelSwitch": "restart_resume"
+    "modelSwitch": "live_command",
+    "modelSwitchCommands": {
+      "confirmationSource": { "kind": "session_identity" },
+      "model": { "command": "/model {model}" },
+      "effort": { "command": "/effort {effort}" }
+    }
   },
   "permissions": {
     "network": {

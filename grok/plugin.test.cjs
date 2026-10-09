@@ -511,7 +511,12 @@ tests.push(["live metadata preserves stable event identity and confirms only a n
 
 tests.push(["model switching resumes the exact session with per-model effort catalogues", () => {
   const manifest=JSON.parse(readFileSync(join(__dirname,"plugin.json"),"utf8"));
-  assert.equal(manifest.commands.modelSwitch,"restart_resume");
+  assert.equal(manifest.commands.modelSwitch,"live_command");
+  assert.deepEqual(manifest.commands.modelSwitchCommands, {
+    confirmationSource:{kind:"session_identity"},
+    model:{command:"/model {model}"},
+    effort:{command:"/effort {effort}"},
+  });
   const plugin=load(hostFor({files:{"/tmp/home/.grok/models_cache.json":{models:{one:{info:{id:"one",name:"One",reasoning_efforts:[{id:"low",label:"Low",default:true}]}},two:{info:{id:"two",name:"Two",reasoning_efforts:[]}}}}}}));
   const models=plugin.discoverModels();
   assert.equal(models[0].reasoningEfforts.length,1);
@@ -607,6 +612,36 @@ tests.push(["captured live list tool uses a supported renderer kind and preserve
 tests.push(["stop declares the cancellation key advertised by the native Grok composer", () => {
   const manifest = JSON.parse(readFileSync(join(__dirname,"plugin.json"),"utf8"));
   assert.equal(manifest.commands.stopKey,"\x03");
+}]);
+
+tests.push(["live identity reads only the exact session summary and rejects traversal or foreign identity", () => {
+  const cwd="/work/app", id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const path=`/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}/${id}/summary.json`;
+  const files={[path]:{info:{id},current_model_id:"target-model",reasoning_effort:"target-effort"}};
+  const plugin=load(hostFor({files}));
+  assert.equal(plugin.sessionModelIdentityPath(cwd,id),path);
+  assert.equal(plugin.detectSessionModel(cwd,id),"target-model");
+  assert.equal(plugin.detectSessionReasoningEffort(cwd,id),"target-effort");
+  assert.equal(plugin.sessionModelIdentityPath(cwd,"../../foreign"),null);
+  assert.equal(plugin.sessionModelIdentityPath(cwd,"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),null);
+  files[path].info.id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  assert.equal(plugin.sessionModelIdentityPath(cwd,id),null);
+  assert.equal(plugin.detectSessionModel(cwd,id),null);
+  assert.equal(plugin.detectSessionReasoningEffort(cwd,id),null);
+}]);
+
+tests.push(["usage preserves subscription mode without limits and API spend without invented limits", () => {
+  const plugin=load(hostFor());
+  const unavailable=plugin.parseUsage(JSON.stringify({billingMode:"subscription",spendCents:22}),123);
+  assert.equal(unavailable.billing_mode,"subscription");
+  assert.equal(unavailable.limits_reported,false);
+  assert.equal(unavailable.spend_cents,null);
+  const weekly=plugin.parseUsage(JSON.stringify({billingMode:"subscription",weeklyPct:5,weeklyResetsAtMs:456}),123);
+  assert.equal(weekly.limits_reported,true);
+  const api=plugin.parseUsage(JSON.stringify({billingMode:"api",spendCents:22}),123);
+  assert.equal(api.billing_mode,"api");
+  assert.equal(api.limits_reported,false);
+  assert.equal(api.spend_cents,22);
 }]);
 
 let failed = 0;
