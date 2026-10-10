@@ -1,6 +1,6 @@
 {
   "id": "grok",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minCodeterm": "1.14.0",
   "hostApi": 2,
   "displayName": "Grok",
@@ -17,7 +17,7 @@
     "taskDelivery": "inline_flag",
     "providerReadiness": {
       "kind": "structural_composer",
-      "timeoutSecs": 30
+      "timeoutSecs": 180
     },
     "composerCursorPosition": "visible_anywhere",
     "systemPromptDelivery": {
@@ -97,7 +97,8 @@
     "windows": "grok update"
   },
   "commands": {
-    "stopKey": "\u001b",
+    "stopKey": "\u0003",
+    "usesWin32ControlKeys": true,
     "autoApproveFlags": [
       "--always-approve"
     ],
@@ -108,7 +109,23 @@
     "reasoningEffortLaunchArgsFormat": [
       "--reasoning-effort",
       "{effort}"
-    ]
+    ],
+    "modelSwitch": "live_command",
+    "modelSwitchCommands": {
+      "readyInputRegex": "^\\s*│\\s*[>❯]\\s*│\\s*$",
+      "turnCompletion": {
+        "source": "session_file",
+        "eventPointer": "/params/update/sessionUpdate",
+        "eventValue": "turn_completed",
+        "sessionPointer": "/params/sessionId",
+        "startEventValue": "user_message_chunk",
+        "turnPointer": "/params/update/prompt_id",
+        "activeTurnPointer": "/params/_meta/promptId"
+      },
+      "confirmationSource": { "kind": "session_identity" },
+      "model": { "command": "/model {model}" },
+      "effort": { "command": "/effort {effort}" }
+    }
   },
   "permissions": {
     "network": {

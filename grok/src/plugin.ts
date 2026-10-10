@@ -5,6 +5,7 @@ import type {
   ModelInfo,
   PluginModule,
   ResumeParams,
+  SessionModelTranscriptBoundary,
 } from "@codeterm/plugin-sdk";
 import { recordedTextDiff } from "@codeterm/plugin-sdk";
 
@@ -15,7 +16,7 @@ const OUTPUT_FINGERPRINTS = [
   "Compactions remaining",
 ];
 const TUI_FRAGMENTS = ["grok build tui", "compactions remaining"];
-const COMPOSER_FRAME_RE = /^╭─+╮\r?\n│[ \t]*>[ \t]*│\r?\n╰─[^\r\n]*─╯[ \t]*$/m;
+const COMPOSER_FRAME_RE = /^╭─+╮\r?\n│[ \t]*[>❯][ \t]*│\r?\n╰─[^\r\n]*─╯[ \t]*$/m;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ALWAYS_APPROVE = "--always-approve";
 const BYPASS_PERMISSIONS = ["--permission-mode", "bypassPermissions"];
@@ -30,28 +31,31 @@ interface GrokManifest {
 interface GrokSummary {
   info?: { id?: string; cwd?: string };
   created_at?: string;
+  updated_at?: string;
   current_model_id?: string;
   reasoning_effort?: string;
   generated_title?: string;
   session_summary?: string;
 }
 
-interface GrokUsageFile {
-  session?: {
-    inputTokens?: number;
-    outputTokens?: number;
-    totalTokens?: number;
-    costUsdTicks?: number;
-  };
-}
-
 interface ActiveSession {
   session_id?: string;
   pid?: number;
+  cwd?: string;
+  opened_at?: string;
+}
+
+interface GrokModelInfo {
+  id?: string;
+  name?: string;
+  description?: string | null;
+  hidden?: boolean;
+  context_window?: number;
+  reasoning_efforts?: { id: string; label: string; description?: string; default?: boolean }[];
 }
 
 interface ModelsCache {
-  models?: Record<string, { info?: { id?: string; name?: string; description?: string | null; hidden?: boolean } }>;
+  models?: Record<string, { info?: GrokModelInfo }>;
 }
 
 function quote(value: string): string {
@@ -108,14 +112,15 @@ function sessionDir(cwd: string, sessionId: string): string | null {
 }
 
 function sessionExistsAt(cwd: string, sessionId: string): boolean {
-  const dir = sessionDir(cwd, sessionId);
-  return !!dir && host.fs.fileExists(joinPath(dir, "summary.json"));
+  return isUuid(sessionId) && readSummary(cwd, sessionId)?.info?.id === sessionId;
 }
 
 function readSummary(cwd: string, sessionId: string): GrokSummary | null {
+  if (!isUuid(sessionId)) return null;
   const dir = sessionDir(cwd, sessionId);
   if (!dir) return null;
-  return host.fs.readJson(joinPath(dir, "summary.json"));
+  const summary = host.fs.readJson(joinPath(dir, "summary.json")) as GrokSummary | null;
+  return summary?.info?.id === sessionId ? summary : null;
 }
 
 function isUuid(value: string): boolean {
@@ -169,12 +174,30 @@ function updateText(update: Record<string, unknown> | null): string {
   return "";
 }
 
+function canonicalToolKind(kind: unknown): string {
+  if (kind === "write") return "edit";
+  if (kind === "execute") return "command";
+  return typeof kind === "string" && ["command", "edit", "read", "search", "task", "fetch", "web", "image"].includes(kind)
+    ? kind : "generic";
+}
+
 function grokUpdateToChat(row: Record<string, unknown>, seq: number): Record<string, unknown> | null {
   const params = row.params && typeof row.params === "object" ? row.params as Record<string, unknown> : null;
   const update = params && params.update && typeof params.update === "object"
     ? params.update as Record<string, unknown>
     : null;
   const kind = update ? String(update.sessionUpdate || "") : "";
+  const sourceMeta = params?._meta as {agentTimestampMs?: number} | undefined;
+  const timestamp = typeof sourceMeta?.agentTimestampMs === "number" ? String(sourceMeta.agentTimestampMs) : undefined;
+  if (kind === "tool_call" && typeof update?.toolCallId === "string") {
+    const meta = update._meta as {"x.ai/tool"?: {name?: string; kind?: string}} | undefined;
+    return {id: `grok-call-${update.toolCallId}`, type: "tool_call", content: "", seq, timestamp,
+      toolId: update.toolCallId, toolName: meta?.["x.ai/tool"]?.name ?? String(update.title || "tool"),
+      toolKind: canonicalToolKind(meta?.["x.ai/tool"]?.kind ?? update.kind),
+      toolSummary: String(update.title || meta?.["x.ai/tool"]?.name || "tool"),
+      toolArgs: JSON.stringify(update.rawInput ?? {}), toolInput: update.rawInput ?? {},
+      toolCallSourceId: `grok-call-${update.toolCallId}`, toolPairing: "exact"};
+  }
   if (kind === "tool_call_update" && update?.status === "completed" && Array.isArray(update.content)) {
     const diffs = update.content.flatMap((block: unknown) => {
       if (!block || typeof block !== "object") return [];
@@ -182,10 +205,25 @@ function grokUpdateToChat(row: Record<string, unknown>, seq: number): Record<str
       return diff.type === "diff" ? recordedTextDiff(diff.path, diff.oldText, diff.newText) : [];
     });
     if (diffs.length && typeof update.toolCallId === "string") {
-      return { id: `grok-edit-${update.toolCallId}`, type: "tool_result", content: "", seq,
+      return { id: `grok-edit-${update.toolCallId}`, type: "tool_result", content: "", seq, timestamp,
         toolId: update.toolCallId, toolName: "file_change", toolKind: "edit", toolError: false,
-        fileDiffs: diffs };
+        fileDiffs: diffs, toolCallSourceId: `grok-call-${update.toolCallId}`, toolPairing: "exact" };
     }
+  }
+  if (kind === "tool_call_update" && typeof update?.toolCallId === "string"
+    && (update.status === "completed" || update.status === "failed")) {
+    const text = Array.isArray(update.content) ? update.content.flatMap(block => {
+      if (!block || typeof block !== "object") return [];
+      const item = block as {type?: string; text?: string; content?: {text?: string}};
+      const value = item.type === "text" ? item.text : item.content?.text;
+      return typeof value === "string" ? [value] : [];
+    }).join("\n") : "";
+    const output = update.rawOutput as {Content?: {content?: unknown}} | undefined;
+    const result = text || (typeof update.rawOutput === "string" ? update.rawOutput
+      : typeof output?.Content?.content === "string" ? output.Content.content : "");
+    return {id: `grok-result-${update.toolCallId}`, type: "tool_result", content: result, seq, timestamp,
+      toolResult: result, toolId: update.toolCallId, toolError: update.status === "failed",
+      toolCallSourceId: `grok-call-${update.toolCallId}`, toolPairing: "exact"};
   }
   let type = "";
   if (kind === "user_message_chunk") type = "user";
@@ -194,7 +232,9 @@ function grokUpdateToChat(row: Record<string, unknown>, seq: number): Record<str
   else return null;
   const content = updateText(update);
   if (!content) return null;
-  const meta = row._meta && typeof row._meta === "object" ? row._meta as Record<string, unknown> : {};
+  const meta = params?._meta && typeof params._meta === "object"
+    ? params._meta as Record<string, unknown>
+    : row._meta && typeof row._meta === "object" ? row._meta as Record<string, unknown> : {};
   const id = typeof meta.eventId === "string" && meta.eventId ? String(meta.eventId) : `grok-${seq}`;
   let tsMs = typeof meta.agentTimestampMs === "number" ? meta.agentTimestampMs : 0;
   if (!tsMs && typeof row.timestamp === "number") tsMs = row.timestamp > 1e12 ? row.timestamp : row.timestamp * 1000;
@@ -213,11 +253,13 @@ function readGrokChat(cwd: string, sessionId: string, cursor?: string | null): {
   const messages: unknown[] = [];
   let next = start;
   for (let i = start; i < lines.length; i++) {
-    next = i + 1;
     const line = lines[i].trim();
-    if (!line) continue;
+    if (!line && i === lines.length - 1) break;
     let row: Record<string, unknown> | null = null;
-    try { row = JSON.parse(line); } catch (_) { continue; }
+    try { row = JSON.parse(line); } catch (_) {
+      if (i === lines.length - 1) break;
+    }
+    next = i + 1;
     if (!row || typeof row !== "object") continue;
     const msg = grokUpdateToChat(row, i);
     if (msg) messages.push(msg);
@@ -240,6 +282,19 @@ function listSessionIds(cwd: string): string[] {
   return ids;
 }
 
+function sessionMetadata(dir: string, sessionId: string): Record<string, unknown> | null {
+  const summary = host.fs.readJson(joinPath(dir, "summary.json")) as GrokSummary | null;
+  if (summary?.info?.id !== sessionId || !summary.info.cwd) return null;
+  const filePath = joinPath(dir, "updates.jsonl");
+  return {
+    sessionId, provider: "grok", projectPath: summary.info.cwd,
+    title: summary.generated_title ?? null, summary: summary.session_summary ?? null,
+    filePath, transcriptPath: filePath,
+    createdTs: parseTimeMs(summary.created_at) === null ? null : Math.floor(parseTimeMs(summary.created_at)! / 1000),
+    modifiedTs: parseTimeMs(summary.updated_at) === null ? null : Math.floor(parseTimeMs(summary.updated_at)! / 1000),
+  };
+}
+
 function discoverFromCache(): ModelInfo[] | null {
   const home = grokHome();
   if (!home) return null;
@@ -256,6 +311,8 @@ function discoverFromCache(): ModelInfo[] | null {
       displayName: String(info.name || id),
       description: info.description ? String(info.description) : undefined,
       group: "xAI",
+      reasoningEfforts: info.reasoning_efforts?.map(effort => ({id: effort.id, displayName: effort.label, description: effort.description})),
+      defaultReasoningEffort: info.reasoning_efforts?.find(effort => effort.default)?.id,
     });
   }
   return models.length ? models : null;
@@ -285,7 +342,25 @@ function manifestModels(): ModelInfo[] {
   }
 }
 
-const plugin: PluginModule = {
+
+function sessionUpdates(cwd: string, sessionId: string): Record<string, unknown>[] {
+  const dir = sessionDir(cwd, sessionId);
+  const raw = dir && host.fs.readFile(joinPath(dir, "updates.jsonl"));
+  if (!raw) return [];
+  return String(raw).split("\n").flatMap(line => {
+    try {
+      const row = JSON.parse(line);
+      return row && typeof row === "object" ? [row] : [];
+    } catch (_) { return []; }
+  });
+}
+
+function eventId(row: Record<string, unknown>): string | null {
+  const params = row.params as { _meta?: {eventId?: string} } | undefined;
+  return params?._meta?.eventId ?? null;
+}
+
+const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: string): string | null } = {
   starterPromptText(prompt) {
     if (prompt === "no_starter" || prompt === "team_bootstrap") return undefined;
     if (prompt === "idle_wakeup") {
@@ -308,7 +383,7 @@ const plugin: PluginModule = {
   },
 
   screenHasTui(screen: string): boolean {
-    if (COMPOSER_FRAME_RE.test(String(screen || ""))) return true;
+    if (COMPOSER_FRAME_RE.test(String(screen || "").split(/\r?\n/).map(line => line.trim()).join("\n"))) return true;
     const lower = String(screen || "").toLowerCase();
     for (let i = 0; i < TUI_FRAGMENTS.length; i++) {
       if (lower.indexOf(TUI_FRAGMENTS[i]) !== -1) return true;
@@ -364,6 +439,22 @@ const plugin: PluginModule = {
     return host.fs.fileExists(path) ? path : null;
   },
 
+  sessionFilePath(cwd: string, sessionId: string): string | null {
+    const dir = sessionDir(cwd, sessionId);
+    if (!dir || !sessionExistsAt(cwd, sessionId)) return null;
+    const path = joinPath(dir, "updates.jsonl");
+    return host.fs.fileExists(path) ? path : null;
+  },
+
+  parseSessionMessages(text: string): unknown[] {
+    return String(text).split("\n").flatMap((line, seq) => {
+      const row = safeJson(line);
+      const message = row && typeof row === "object" ? grokUpdateToChat(row as Record<string, unknown>, seq) : null;
+      if (!message || !["user", "assistant"].includes(String(message.type))) return [];
+      return [{role: message.type, text: message.content, ts: Math.floor(Number(message.timestamp) / 1000), isMeta: false}];
+    });
+  },
+
   usesStructuredChat(): boolean {
     return true;
   },
@@ -398,19 +489,23 @@ const plugin: PluginModule = {
     const home = grokHome();
     if (!home) return null;
     const rows = host.fs.readJson(joinPath(home, "active_sessions.json")) as ActiveSession[] | null;
-    if (!Array.isArray(rows) || !evidence || !evidence.processes) return null;
+    if (!evidence || !evidence.processes) return null;
     const pids: Record<number, true> = {};
     for (let i = 0; i < evidence.processes.length; i++) pids[evidence.processes[i].pid] = true;
     const matches: string[] = [];
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      if (typeof row.pid === "number" && pids[row.pid] && typeof row.session_id === "string") {
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const opened = parseTimeMs(row.opened_at);
+      if (typeof row.pid === "number" && pids[row.pid] && typeof row.session_id === "string"
+        && isUuid(row.session_id) && row.cwd && cwdKey(row.cwd) === cwdKey(evidence.cwd)
+        && opened !== null && opened >= evidence.launchedAtMs) {
         matches.push(row.session_id);
       }
     }
     if (matches.length === 1) return { sessionId: matches[0], source: "pid_registry" };
     const marker = String(evidence.launchMarker || "").trim();
-    if (isUuid(marker) && sessionExistsAt(evidence.cwd, marker)) {
+    const summary = isUuid(marker) ? readSummary(evidence.cwd, marker) : null;
+    const created = parseTimeMs(summary?.created_at);
+    if (summary?.info?.id === marker && created !== null && created >= evidence.launchedAtMs) {
       return { sessionId: marker, source: "launch_marker" };
     }
     return null;
@@ -419,6 +514,36 @@ const plugin: PluginModule = {
   detectSessionModel(cwd: string, sessionId: string): string | null {
     const model = readSummary(cwd, sessionId)?.current_model_id;
     return model ? String(model) : null;
+  },
+
+  sessionModelIdentityPath(cwd: string, sessionId: string): string | null {
+    if (!isUuid(sessionId)) return null;
+    const dir = sessionDir(cwd, sessionId);
+    if (!dir) return null;
+    const path = joinPath(dir, "summary.json");
+    return host.fs.fileExists(path) ? path : null;
+  },
+
+  sessionModelTranscriptBoundary(cwd: string, sessionId: string): SessionModelTranscriptBoundary {
+    const rows = sessionUpdates(cwd, sessionId);
+    const last = rows[rows.length - 1];
+    const id = last && eventId(last);
+    return {lastEntryUuid: id ?? null, lastEntryTimestamp: null, lastEntryType: null, boundaryFound: !!id};
+  },
+
+  detectSessionModelAfterBoundary(cwd: string, sessionId: string, boundary: SessionModelTranscriptBoundary): string | null {
+    if (!boundary.boundaryFound || !boundary.lastEntryUuid) return null;
+    const rows = sessionUpdates(cwd, sessionId);
+    const index = rows.findIndex(row => eventId(row) === boundary.lastEntryUuid);
+    if (index < 0) return null;
+    let model: string | null = null;
+    for (const row of rows.slice(index + 1)) {
+      const params = row.params as {update?: {sessionUpdate?: string; _meta?: {modelId?: string}}} | undefined;
+      const update = params?.update;
+      if (update?.sessionUpdate === "user_message_chunk") model = update._meta?.modelId ?? null;
+      if (update?.sessionUpdate === "agent_message_chunk" && model) return model;
+    }
+    return null;
   },
 
   detectSessionReasoningEffort(cwd: string, sessionId: string): string | null {
@@ -432,21 +557,37 @@ const plugin: PluginModule = {
     const cwdDirs = host.fs.readDir(root) || [];
     for (let i = 0; i < cwdDirs.length; i++) {
       if (!cwdDirs[i].isDir) continue;
-      const summaryPath = joinPath(joinPath(cwdDirs[i].path, sessionId), "summary.json");
-      const summary = host.fs.readJson(summaryPath) as GrokSummary | null;
-      if (summary) return summary;
+      const metadata = sessionMetadata(joinPath(cwdDirs[i].path, sessionId), sessionId);
+      if (metadata) return metadata;
     }
     return null;
   },
 
+  enumerateSessions(): unknown[] {
+    const root = sessionsRoot();
+    if (!root) return [];
+    const result: unknown[] = [];
+    for (const cwdDir of host.fs.readDir(root) || []) {
+      if (!cwdDir.isDir) continue;
+      for (const entry of host.fs.readDir(cwdDir.path) || []) {
+        if (!entry.isDir || !isUuid(entry.name)) continue;
+        const metadata = sessionMetadata(entry.path, entry.name);
+        if (metadata) result.push(metadata);
+      }
+    }
+    return result;
+  },
+
   parseUsage(rawText: string, nowMs: number): unknown {
     const data = safeJson(String(rawText || "")) as {
+      billingMode?: unknown;
       spendCents?: unknown;
       weeklyPct?: unknown;
       weeklyResetsAtMs?: unknown;
     } | null;
     if (!data) return null;
-    const spendCents = typeof data.spendCents === "number" ? data.spendCents : null;
+    const spendCents = data.billingMode === "api" && typeof data.spendCents === "number"
+      && Number.isFinite(data.spendCents) && data.spendCents >= 0 ? data.spendCents : null;
     const weeklyPct = typeof data.weeklyPct === "number"
       && Number.isFinite(data.weeklyPct)
       && data.weeklyPct >= 0
@@ -458,11 +599,13 @@ const plugin: PluginModule = {
       ? data.weeklyResetsAtMs
       : null;
     const hasWeekly = weeklyPct !== null && weeklyResetsAtMs !== null;
-    if (spendCents === null && !hasWeekly) return null;
+    if (spendCents === null && !hasWeekly && data.billingMode !== "subscription") return null;
     return {
       provider: "grok",
       account_id: null,
       captured_at_ms: nowMs,
+      billing_mode: data.billingMode === "subscription" || data.billingMode === "api" ? data.billingMode : "unknown",
+      limits_reported: hasWeekly,
       session_pct: null,
       session_resets_at_ms: null,
       weekly_pct: hasWeekly ? weeklyPct : null,
@@ -476,12 +619,11 @@ const plugin: PluginModule = {
   },
 
   fetchUsage(nowMs: number): unknown {
-    const ticks = latestSessionCostTicks();
+    const credential = safeJson(String(host.credentialPublic(GROK_AUTH_CREDENTIAL) || "")) as { userId?: unknown } | null;
+    if (typeof credential?.userId !== "string" || !credential.userId) return null;
     const weekly = fetchWeeklyUsage();
-    const spendCents = ticks == null ? null : Math.round(ticks / 10_000_000);
-    if (spendCents === null && weekly.weeklyPct === null) return null;
     return JSON.stringify({
-      spendCents,
+      billingMode: "subscription",
       weeklyPct: weekly.weeklyPct,
       weeklyResetsAtMs: weekly.weeklyResetsAtMs,
       fetchedAtMs: nowMs,
@@ -561,31 +703,6 @@ function grokClientVersion(): string | null {
     cachedGrokClientVersion = null;
   }
   return cachedGrokClientVersion;
-}
-
-function latestSessionCostTicks(): number | null {
-  const root = sessionsRoot();
-  if (!root || !host.fs.fileExists(root)) return null;
-  const cwdDirs = host.fs.readDir(root) || [];
-  let bestTicks: number | null = null;
-  let bestUpdated = "";
-  for (let i = 0; i < cwdDirs.length; i++) {
-    if (!cwdDirs[i].isDir) continue;
-    const sessions = host.fs.readDir(cwdDirs[i].path) || [];
-    for (let j = 0; j < sessions.length; j++) {
-      if (!sessions[j].isDir || !isUuid(sessions[j].name)) continue;
-      const usage = host.fs.readJson(joinPath(sessions[j].path, "usage.json")) as GrokUsageFile | null;
-      if (!usage || !usage.session || typeof usage.session.costUsdTicks !== "number") continue;
-      const updated = typeof (usage as { updatedAt?: string }).updatedAt === "string"
-        ? String((usage as { updatedAt: string }).updatedAt)
-        : "";
-      if (bestTicks == null || updated > bestUpdated) {
-        bestTicks = usage.session.costUsdTicks;
-        bestUpdated = updated;
-      }
-    }
-  }
-  return bestTicks;
 }
 
 export default plugin;

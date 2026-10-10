@@ -48,6 +48,25 @@ function hostFor(over = {}) {
 }
 
 const tests = [
+  ["staged switching declares only own-session turn completion records", () => {
+    const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+    const declaration = manifest.commands.modelSwitchCommands.turnCompletion;
+    const id = "01a122fc-abe9-7281-9837-24a92a378d30";
+    const cwd = "/work";
+    const dir = `/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}/${id}`;
+    const plugin = load(hostFor({files:{[`${dir}/chat_history.jsonl`]:"{}",[`${dir}/updates.jsonl`]:"{}",[`${dir}/summary.json`]:{info:{id}}}}));
+    assert.equal(declaration.source, "session_file");
+    assert.equal(plugin.sessionJsonlPath(cwd, id), `${dir}/chat_history.jsonl`);
+    assert.equal(plugin.sessionFilePath(cwd, id), `${dir}/updates.jsonl`);
+    const pointer = (record, path) => path.slice(1).split("/").reduce((value, key) => value?.[key], record);
+    const complete = (record, session) => pointer(record, declaration.eventPointer) === declaration.eventValue
+      && pointer(record, declaration.sessionPointer) === session;
+    const event = (sessionId, sessionUpdate) => ({ params: { sessionId, update: { sessionUpdate } } });
+    assert.equal(complete(event("own", "turn_completed"), "own"), true);
+    assert.equal(complete(event("foreign", "turn_completed"), "own"), false);
+    assert.equal(complete(event("own", "agent_message_chunk"), "own"), false);
+    assert.equal(complete(event("own", "idle"), "own"), false);
+  }],
   ["multiline launch and resume keep exact native arguments in one shell line", () => {
     const dir = mkdtempSync(join(tmpdir(), "grok-argv-"));
     const fixture = join(dir, "argv.cjs");
@@ -112,8 +131,10 @@ const tests = [
     const screen = readFileSync(join(__dirname, "fixtures", "idle-composer.txt"), "utf8");
     const plugin = load(hostFor());
     assert.equal(manifest.spawn.providerReadiness.kind, "structural_composer");
+    assert.equal(manifest.spawn.providerReadiness.timeoutSecs, 180);
     assert.equal(manifest.spawn.composerCursorPosition, "visible_anywhere");
     assert.equal(plugin.screenHasTui(screen), true);
+    assert.equal(plugin.screenHasTui(screen.split("\n").map(line => "  " + line + "  ").join("\n")), true);
     assert.equal(plugin.screenHasTui(screen.replace(/\r?\n/g, "\r\n")), true);
     assert.equal(plugin.screenHasTui(screen.replace(/Grok 4\.6 \(high\)/, "Opaque model")), true);
     assert.equal(plugin.screenHasTui("│ > │"), false);
@@ -227,7 +248,7 @@ const tests = [
     const plugin = load(hostFor({
       files: {
         "/tmp/home/.grok/active_sessions.json": [
-          { session_id: "01a0b594-144d-7670-8a36-03e39639311c", pid: 73812 },
+          { session_id: "01a0b594-144d-7670-8a36-03e39639311c", pid: 73812, cwd: "/work/app", opened_at: "2026-10-09T08:55:21Z" },
         ],
       },
     }));
@@ -300,7 +321,7 @@ const tests = [
     assert.equal(plugin.readStructuredChat(cwd, id, first.cursor).messages.length, 0);
   }],
 
-  ["usage snapshot maps session costUsdTicks into spend cents", () => {
+  ["session compute cost is never advertised as account-cycle spending", () => {
     const cwd = "/work/app";
     const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
     const root = `/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}`;
@@ -317,10 +338,8 @@ const tests = [
       },
     }));
     const raw = plugin.fetchUsage(1);
-    assert.equal(JSON.parse(raw).spendCents, 49);
-    const snap = plugin.parseUsage(raw, 1);
-    assert.equal(snap.spend_cents, 49);
-    assert.equal(snap.session_pct, null);
+    assert.equal(raw, null);
+    assert.equal(plugin.parseUsage(raw, 1), null);
   }],
 
   ["manifest declares the Grok OAuth credential and billing proxy permission", () => {
@@ -338,7 +357,7 @@ const tests = [
     assert.ok(manifest.permissions.network.allow.includes("cli-chat-proxy.grok.com"));
   }],
 
-  ["weekly OAuth billing maps the percentage and reset while preserving session spend", () => {
+  ["weekly OAuth billing reports subscription percentage and reset without compute cost", () => {
     const cwd = "/work/app";
     const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
     const root = `/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}`;
@@ -379,7 +398,7 @@ const tests = [
     const snap = plugin.parseUsage(raw, 1);
     assert.equal(snap.weekly_pct, 42.5);
     assert.equal(snap.weekly_resets_at_ms, Date.parse("2026-09-25T19:45:46Z"));
-    assert.equal(snap.spend_cents, 49);
+    assert.equal(snap.spend_cents, null);
     assert.equal(request.url, "https://cli-chat-proxy.grok.com/v1/billing?format=credits");
     assert.equal(request.method, "GET");
     assert.equal(request.headers["X-XAI-Token-Auth"], "xai-grok-cli");
@@ -395,7 +414,7 @@ const tests = [
     assert.equal(JSON.stringify(request).includes("test-oauth-bearer"), false);
   }],
 
-  ["failed, malformed, absent, and non-weekly billing keep limits null and spend intact", () => {
+  ["unreported subscription limits never fall back to compute cost", () => {
     const cwd = "/work/app";
     const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
     const root = `/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}`;
@@ -433,7 +452,7 @@ const tests = [
       const snap = plugin.parseUsage(plugin.fetchUsage(1), 1);
       assert.equal(snap.weekly_pct, null);
       assert.equal(snap.weekly_resets_at_ms, null);
-      assert.equal(snap.spend_cents, 49);
+      assert.equal(snap.spend_cents, null);
     }
   }],
 
@@ -453,16 +472,230 @@ tests.push(["completed recorded edit diffs reach the built structured chat expor
   const plugin = load(hostFor({ files: { [file]: fixture } }));
   const read = (cursor) => JSON.parse(JSON.stringify(plugin.readStructuredChat("/work/app", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", cursor)));
   const result = read(null);
-  assert.equal(result.messages.length, 1);
-  assert.equal(result.messages[0].type, "tool_result");
-  assert.equal(result.messages[0].toolError, false);
-  assert.deepEqual(result.messages[0].fileDiffs, expected);
+  assert.equal(result.messages.length, 2);
+  assert.equal(result.messages[0].type, "tool_call");
+  assert.equal(result.messages[1].type, "tool_result");
+  assert.equal(result.messages[1].toolError, false);
+  assert.equal(result.messages[0].toolId, result.messages[1].toolId);
+  assert.deepEqual(result.messages[1].fileDiffs, expected);
   assert.deepEqual(read(result.cursor).messages, [], "a completed edit is not replayed");
   const completionIndex = fixture.trimEnd().split("\n").findIndex(line => JSON.parse(line).params.update.status === "completed");
   assert.deepEqual(read(String(completionIndex)).messages[0].fileDiffs, expected, "completion in a later read keeps the recorded diff");
   const failedFixture = fixture.replace('"status": "completed"', '"status": "failed"');
   const failedPlugin = load(hostFor({ files: { [file]: failedFixture } }));
-  assert.deepEqual(JSON.parse(JSON.stringify(failedPlugin.readStructuredChat("/work/app", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").messages)), []);
+  const failed = failedPlugin.readStructuredChat("/work/app", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").messages;
+  assert.equal(failed[1].toolError, true);
+  assert.equal(failed[1].fileDiffs, undefined);
+}]);
+
+
+tests.push(["structured cursor never consumes the next append or a partial record", () => {
+  const cwd = "/work/app", id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const file = "/tmp/home/.grok/sessions/%2Fwork%2Fapp/" + id + "/updates.jsonl";
+  const row = (text, eventId) => JSON.stringify({params:{update:{sessionUpdate:"user_message_chunk",content:{type:"text",text}}},_meta:{eventId}});
+  const files = {[file]: row("first", "u1") + "\n"};
+  const plugin = load(hostFor({files}));
+  const first = plugin.readStructuredChat(cwd,id);
+  assert.equal(first.cursor,"1");
+  files[file] += row("second", "u2") + "\n";
+  const second = plugin.readStructuredChat(cwd,id,first.cursor);
+  assert.equal(second.messages.length,1);
+  assert.equal(second.messages[0].content,"second");
+  const third = row("third","u3");
+  files[file] += third.slice(0,30);
+  const partial = plugin.readStructuredChat(cwd,id,second.cursor);
+  assert.equal(partial.cursor,second.cursor);
+  files[file] += third.slice(30) + "\n";
+  assert.equal(plugin.readStructuredChat(cwd,id,partial.cursor).messages[0].content,"third");
+}]);
+
+
+tests.push(["live metadata preserves stable event identity and confirms only a new answered model turn", () => {
+  const cwd="/work/app", id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const file="/tmp/home/.grok/sessions/%2Fwork%2Fapp/"+id+"/updates.jsonl";
+  const row=(eventId,kind,text,modelId)=>JSON.stringify({timestamp:1791535504,params:{sessionId:id,update:{sessionUpdate:kind,content:{type:"text",text},_meta:{modelId}},_meta:{eventId,agentTimestampMs:1791535504758}}});
+  const files={[file]:row("old-user","user_message_chunk","first","grok-4.6")+"\n"+row("old-answer","agent_message_chunk","answer")+"\n"};
+  const plugin=load(hostFor({files}));
+  const boundary=plugin.sessionModelTranscriptBoundary(cwd,id);
+  assert.equal(boundary.lastEntryUuid,"old-answer");
+  assert.equal(plugin.readStructuredChat(cwd,id).messages[0].id,"old-user");
+  assert.equal(plugin.readStructuredChat(cwd,id).messages[0].timestamp,"1791535504758");
+  assert.equal(plugin.detectSessionModelAfterBoundary(cwd,id,boundary),null);
+  files[file]+=row("new-user","user_message_chunk","second","grok-4.7")+"\n";
+  assert.equal(plugin.detectSessionModelAfterBoundary(cwd,id,boundary),null);
+  files[file]+=row("new-answer","agent_message_chunk","second answer")+"\n";
+  assert.equal(plugin.detectSessionModelAfterBoundary(cwd,id,boundary),"grok-4.7");
+  assert.equal(plugin.detectSessionModelAfterBoundary(cwd,id,{...boundary,lastEntryUuid:"foreign"}),null);
+}]);
+
+tests.push(["model switching resumes the exact session with per-model effort catalogues", () => {
+  const manifest=JSON.parse(readFileSync(join(__dirname,"plugin.json"),"utf8"));
+  assert.equal(manifest.commands.modelSwitch,"live_command");
+  assert.deepEqual(manifest.commands.modelSwitchCommands, {
+    turnCompletion:{source:"session_file",eventPointer:"/params/update/sessionUpdate",eventValue:"turn_completed",sessionPointer:"/params/sessionId",
+      startEventValue:"user_message_chunk",turnPointer:"/params/update/prompt_id",activeTurnPointer:"/params/_meta/promptId"},
+    readyInputRegex: manifest.commands.modelSwitchCommands.readyInputRegex,
+    confirmationSource:{kind:"session_identity"},
+    model:{command:"/model {model}"},
+    effort:{command:"/effort {effort}"},
+  });
+  const plugin=load(hostFor({files:{"/tmp/home/.grok/models_cache.json":{models:{one:{info:{id:"one",name:"One",reasoning_efforts:[{id:"low",label:"Low",default:true}]}},two:{info:{id:"two",name:"Two",reasoning_efforts:[]}}}}}}));
+  const models=plugin.discoverModels();
+  assert.equal(models[0].reasoningEfforts.length,1);
+  assert.equal(models[0].defaultReasoningEffort,"low");
+  assert.equal(models[1].reasoningEfforts.length,0);
+  const command=plugin.buildResumeCommandWithContext({sessionId:"owned-id",args:["--model","two","--reasoning-effort","low"]});
+  assert.match(command,/--resume 'owned-id'/);
+  assert.match(command,/'--model' 'two' '--reasoning-effort' 'low'/);
+}]);
+
+tests.push(["resume binding rejects preexisting marker files and stale or foreign registry rows", () => {
+  const cwd = "/work/app", id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const summaryPath = `/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}/${id}/summary.json`;
+  const registryPath = "/tmp/home/.grok/active_sessions.json";
+  const launchedAtMs = Date.parse("2026-10-09T08:53:24Z");
+  const files = { [summaryPath]: { info: { id }, created_at: "2026-10-09T08:00:00Z" }, [registryPath]: [] };
+  const plugin = load(hostFor({ files }));
+  const evidence = { cwd, launchMarker: id, launchedAtMs, processes: [{ pid: 42, depth: 1, startToken: "current" }] };
+  assert.equal(plugin.detectLaunchSession(evidence), null);
+  files[registryPath] = [{ session_id: id, pid: 42, cwd, opened_at: "2026-10-09T08:00:00Z" }];
+  assert.equal(plugin.detectLaunchSession(evidence), null);
+  files[registryPath][0].opened_at = "2026-10-09T08:55:21Z";
+  assert.equal(plugin.detectLaunchSession(evidence).sessionId, id);
+  files[registryPath][0].cwd = "/foreign";
+  assert.equal(plugin.detectLaunchSession(evidence), null);
+  files[registryPath] = [];
+  files[summaryPath].created_at = "2026-10-09T08:53:25Z";
+  assert.equal(plugin.detectLaunchSession(evidence).source, "launch_marker");
+}]);
+
+tests.push(["restore metadata resolves exact ids and inventories directory-shaped sessions", () => {
+  const cwd = "/work/app", id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const root = "/tmp/home/.grok/sessions", cwdDir = root + "/" + encodeURIComponent(cwd), dir = cwdDir + "/" + id;
+  const files = {
+    [dir + "/summary.json"]: { info: { id, cwd }, created_at: "2026-10-09T08:00:00Z", generated_title: "Opaque title" },
+    [dir + "/updates.jsonl"]: JSON.stringify({params:{update:{sessionUpdate:"user_message_chunk",content:{text:"opaque user"}},_meta:{eventId:"own-turn",agentTimestampMs:1791532800000}}}) + "\n",
+  };
+  const dirs = { [root]: [{isDir:true,path:cwdDir}], [cwdDir]: [{name:id,isDir:true,path:dir}] };
+  const plugin = load(hostFor({files,dirs}));
+  const metadata = plugin.findSession(id);
+  assert.equal(metadata.sessionId, id);
+  assert.equal(metadata.projectPath, cwd);
+  assert.equal(metadata.filePath, dir + "/updates.jsonl");
+  assert.equal(metadata.createdTs, Date.parse("2026-10-09T08:00:00Z") / 1000);
+  assert.equal(plugin.enumerateSessions().length, 1);
+  assert.equal(plugin.sessionFilePath(cwd,id), metadata.filePath);
+  const parsed = plugin.parseSessionMessages(files[metadata.filePath]);
+  assert.equal(parsed[0].role,"user");
+  assert.equal(parsed[0].text,"opaque user");
+  assert.equal(parsed[0].ts,1791532800);
+  files[dir + "/summary.json"].info.id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  assert.equal(plugin.findSession(id), null);
+  assert.equal(plugin.sessionExists(cwd,id), false);
+  assert.equal(plugin.enumerateSessions().length, 0);
+}]);
+
+tests.push(["read-only tool calls and failed results retain exact call identity and recorded output", () => {
+  const cwd = "/work/app", id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const file = `/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}/${id}/updates.jsonl`;
+  const updates = [
+    {sessionUpdate:"tool_call",toolCallId:"own-call",title:"read",rawInput:{path:"opaque.txt"}},
+    {sessionUpdate:"tool_call_update",toolCallId:"own-call",status:"in_progress"},
+    {sessionUpdate:"tool_call_update",toolCallId:"own-call",status:"failed",content:[{type:"content",content:{type:"text",text:"opaque failure"}}]},
+  ];
+  const plugin = load(hostFor({files:{[file]:updates.map(update=>JSON.stringify({params:{update}})).join("\n")}}));
+  const messages = plugin.readStructuredChat(cwd,id).messages;
+  assert.equal(messages.length,2);
+  assert.equal(messages[0].type,"tool_call");
+  assert.equal(messages[0].toolName,"read");
+  assert.equal(messages[0].toolInput.path,"opaque.txt");
+  assert.equal(messages[0].toolKind,"generic");
+  assert.equal(messages[1].toolId,messages[0].toolId);
+  assert.equal(messages[1].content,"opaque failure");
+  assert.equal(messages[1].toolError,true);
+}]);
+
+tests.push(["captured live list tool uses a supported renderer kind and preserves its result", () => {
+  const fixture = readFileSync(join(__dirname,"tests/fixtures/read-only-list.jsonl"),"utf8");
+  const records = fixture.trim().split("\n").map(JSON.parse);
+  const cwd = "/work/app", id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const file = `/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}/${id}/updates.jsonl`;
+  const plugin = load(hostFor({files:{[file]:fixture}}));
+  const messages = plugin.readStructuredChat(cwd,id).messages;
+  assert.equal(messages.length,2);
+  assert.equal(messages[0].toolKind,"generic");
+  assert.equal(messages[0].toolInput.target_directory,records[0].params.update.rawInput.target_directory);
+  assert.equal(messages[0].timestamp,String(records[0].params._meta.agentTimestampMs));
+  assert.equal(messages[1].toolResult,records[2].params.update.rawOutput.Content.content);
+  assert.equal(messages[1].toolCallSourceId,messages[0].id);
+  assert.equal(messages[1].toolPairing,"exact");
+}]);
+
+tests.push(["stop declares the cancellation key advertised by the native Grok composer", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname,"plugin.json"),"utf8"));
+  assert.equal(manifest.commands.stopKey,"\x03");
+  assert.equal(manifest.commands.usesWin32ControlKeys,true);
+}]);
+
+tests.push(["live identity reads only the exact session summary and rejects traversal or foreign identity", () => {
+  const cwd="/work/app", id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const path=`/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}/${id}/summary.json`;
+  const files={[path]:{info:{id},current_model_id:"target-model",reasoning_effort:"target-effort"}};
+  const plugin=load(hostFor({files}));
+  assert.equal(plugin.sessionModelIdentityPath(cwd,id),path);
+  assert.equal(plugin.detectSessionModel(cwd,id),"target-model");
+  assert.equal(plugin.detectSessionReasoningEffort(cwd,id),"target-effort");
+  assert.equal(plugin.sessionModelIdentityPath(cwd,"../../foreign"),null);
+  assert.equal(plugin.sessionModelIdentityPath(cwd,"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),null);
+  files[path].info.id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  assert.equal(plugin.sessionModelIdentityPath(cwd,id),path);
+  assert.equal(plugin.detectSessionModel(cwd,id),null);
+  assert.equal(plugin.detectSessionReasoningEffort(cwd,id),null);
+  files[path]="{";
+  assert.equal(plugin.sessionModelIdentityPath(cwd,id),path);
+  assert.equal(plugin.detectSessionModel(cwd,id),null);
+  assert.equal(plugin.detectSessionReasoningEffort(cwd,id),null);
+}]);
+
+tests.push(["usage preserves subscription mode without limits and API spend without invented limits", () => {
+  const plugin=load(hostFor());
+  const unavailable=plugin.parseUsage(JSON.stringify({billingMode:"subscription",spendCents:22}),123);
+  assert.equal(unavailable.billing_mode,"subscription");
+  assert.equal(unavailable.limits_reported,false);
+  assert.equal(unavailable.spend_cents,null);
+  const weekly=plugin.parseUsage(JSON.stringify({billingMode:"subscription",weeklyPct:5,weeklyResetsAtMs:456}),123);
+  assert.equal(weekly.limits_reported,true);
+  const api=plugin.parseUsage(JSON.stringify({billingMode:"api",spendCents:22}),123);
+  assert.equal(api.billing_mode,"api");
+  assert.equal(api.limits_reported,false);
+  assert.equal(api.spend_cents,22);
+}]);
+
+tests.push(["declared ready input accepts the captured empty composer and excludes typed commands", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  const pattern = new RegExp(manifest.commands.modelSwitchCommands.readyInputRegex);
+  const frame = readFileSync(join(__dirname, "tests/fixtures/confirmed-ready-frame.txt"), "utf8");
+  const row = frame.split(/\r?\n/).find(row => pattern.test(row));
+  assert.ok(row);
+  assert.equal(pattern.test(row.replace(">", "> opaque-user-input")), false);
+  assert.equal(pattern.test("opaque-output"), false);
+}]);
+
+tests.push(["ASCII and macOS composers are TUI-ready only while empty", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  const pattern = new RegExp(manifest.commands.modelSwitchCommands.readyInputRegex);
+  const plugin = load(hostFor({ platform: "macos" }));
+  for (const [fixture, marker] of [["confirmed-ready-frame.txt", ">"], ["macos-ready-frame.txt", "❯"]]) {
+    const frame = readFileSync(join(__dirname, "tests/fixtures", fixture), "utf8");
+    assert.equal(plugin.screenHasTui(frame), true, fixture);
+    const row = frame.split(/\r?\n/).find(row => pattern.test(row));
+    assert.ok(row, fixture);
+    const typedRow = row.replace(marker, marker + " opaque-user-input");
+    assert.equal(pattern.test(typedRow), false, fixture);
+    assert.equal(plugin.screenHasTui(frame.replace(row, typedRow)), false, fixture);
+    assert.equal(plugin.screenHasTui(row), false, "a composer requires its frame");
+    assert.equal(plugin.screenHasTui(frame.replace(/\n/g, "\r\n")), true, fixture);
+  }
 }]);
 
 let failed = 0;
