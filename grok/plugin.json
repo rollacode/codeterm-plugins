@@ -112,6 +112,7 @@
     ],
     "modelSwitch": "live_command",
     "modelSwitchCommands": {
+      "readyInputRegex": "^\\s*│\\s*>\\s*│\\s*$",
       "turnCompletion": {
         "source": "session_file",
         "eventPointer": "/params/update/sessionUpdate",

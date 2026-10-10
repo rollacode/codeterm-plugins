@@ -534,6 +534,7 @@ tests.push(["model switching resumes the exact session with per-model effort cat
   assert.deepEqual(manifest.commands.modelSwitchCommands, {
     turnCompletion:{source:"session_file",eventPointer:"/params/update/sessionUpdate",eventValue:"turn_completed",sessionPointer:"/params/sessionId",
       startEventValue:"user_message_chunk",turnPointer:"/params/update/prompt_id",activeTurnPointer:"/params/_meta/promptId"},
+    readyInputRegex: manifest.commands.modelSwitchCommands.readyInputRegex,
     confirmationSource:{kind:"session_identity"},
     model:{command:"/model {model}"},
     effort:{command:"/effort {effort}"},
@@ -668,6 +669,16 @@ tests.push(["usage preserves subscription mode without limits and API spend with
   assert.equal(api.billing_mode,"api");
   assert.equal(api.limits_reported,false);
   assert.equal(api.spend_cents,22);
+}]);
+
+tests.push(["declared ready input accepts the captured empty composer and excludes typed commands", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  const pattern = new RegExp(manifest.commands.modelSwitchCommands.readyInputRegex);
+  const frame = readFileSync(join(__dirname, "tests/fixtures/confirmed-ready-frame.txt"), "utf8");
+  const row = frame.split(/\r?\n/).find(row => pattern.test(row));
+  assert.ok(row);
+  assert.equal(pattern.test(row.replace(">", "> opaque-user-input")), false);
+  assert.equal(pattern.test("opaque-output"), false);
 }]);
 
 let failed = 0;
