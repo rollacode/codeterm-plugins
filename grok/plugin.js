@@ -24,7 +24,7 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
-// ../grok-chat/packages/plugin-sdk/src/fileDiffs.ts
+// ../../codeterm-worktrees/rc-mac/packages/plugin-sdk/src/fileDiffs.ts
 function textLines(text) {
   return text ? text.replace(/\n$/, "").split("\n") : [];
 }
@@ -55,7 +55,7 @@ var OUTPUT_FINGERPRINTS = [
   "Compactions remaining"
 ];
 var TUI_FRAGMENTS = ["grok build tui", "compactions remaining"];
-var COMPOSER_FRAME_RE = /^╭─+╮\r?\n│[ \t]*>[ \t]*│\r?\n╰─[^\r\n]*─╯[ \t]*$/m;
+var COMPOSER_FRAME_RE = /^╭─+╮\r?\n│[ \t]*[>❯][ \t]*│\r?\n╰─[^\r\n]*─╯[ \t]*$/m;
 var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var ALWAYS_APPROVE = "--always-approve";
 var BYPASS_PERMISSIONS = ["--permission-mode", "bypassPermissions"];

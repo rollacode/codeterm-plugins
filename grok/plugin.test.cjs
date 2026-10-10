@@ -681,6 +681,23 @@ tests.push(["declared ready input accepts the captured empty composer and exclud
   assert.equal(pattern.test("opaque-output"), false);
 }]);
 
+tests.push(["ASCII and macOS composers are TUI-ready only while empty", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
+  const pattern = new RegExp(manifest.commands.modelSwitchCommands.readyInputRegex);
+  const plugin = load(hostFor({ platform: "macos" }));
+  for (const [fixture, marker] of [["confirmed-ready-frame.txt", ">"], ["macos-ready-frame.txt", "❯"]]) {
+    const frame = readFileSync(join(__dirname, "tests/fixtures", fixture), "utf8");
+    assert.equal(plugin.screenHasTui(frame), true, fixture);
+    const row = frame.split(/\r?\n/).find(row => pattern.test(row));
+    assert.ok(row, fixture);
+    const typedRow = row.replace(marker, marker + " opaque-user-input");
+    assert.equal(pattern.test(typedRow), false, fixture);
+    assert.equal(plugin.screenHasTui(frame.replace(row, typedRow)), false, fixture);
+    assert.equal(plugin.screenHasTui(row), false, "a composer requires its frame");
+    assert.equal(plugin.screenHasTui(frame.replace(/\n/g, "\r\n")), true, fixture);
+  }
+}]);
+
 let failed = 0;
 for (const [name, run] of tests) {
   try {
