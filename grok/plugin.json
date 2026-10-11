@@ -1,7 +1,7 @@
 {
   "id": "grok",
-  "version": "0.1.2",
-  "minCodeterm": "1.14.0",
+  "version": "0.1.3",
+  "minCodeterm": "1.14.2",
   "hostApi": 2,
   "displayName": "Grok",
   "description": "xAI Grok CLI — optional PTY agent. Install the grok binary separately; not a core provider.",
@@ -30,7 +30,8 @@
     "statusBarRows": 1,
     "supportsLazySkills": false,
     "hasHooks": false,
-    "sessionStartsOnFirstUserTurn": true
+    "sessionStartsOnFirstUserTurn": true,
+    "supportsDirectoryTrustPromptParsing": true
   },
   "models": [
     {
@@ -122,9 +123,15 @@
         "turnPointer": "/params/update/prompt_id",
         "activeTurnPointer": "/params/_meta/promptId"
       },
-      "confirmationSource": { "kind": "session_identity" },
-      "model": { "command": "/model {model}" },
-      "effort": { "command": "/effort {effort}" }
+      "confirmationSource": {
+        "kind": "session_identity"
+      },
+      "model": {
+        "command": "/model {model}"
+      },
+      "effort": {
+        "command": "/effort {effort}"
+      }
     }
   },
   "permissions": {
@@ -143,5 +150,13 @@
       ]
     }
   },
-  "icon": "icon.svg"
+  "icon": "icon.svg",
+  "modelCatalogue": {
+    "authority": "authoritative",
+    "liveDiscoveryRequired": true
+  },
+  "directoryTrustRecord": {
+    "format": "toml_folders",
+    "path": "~/.grok/trusted_folders.toml"
+  }
 }
