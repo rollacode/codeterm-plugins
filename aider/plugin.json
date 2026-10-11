@@ -1,7 +1,7 @@
 {
   "id": "aider",
-  "version": "0.1.0",
-  "minCodeterm": "1.14.0",
+  "version": "0.1.1",
+  "minCodeterm": "1.14.2",
   "hostApi": 2,
   "displayName": "Aider",
   "binaryName": "aider",
@@ -12,12 +12,10 @@
     "agentProvider": true,
     "toolLess": true,
     "replyRelay": true,
-    "contextAttach": { "editable": true, "readOnly": true },
-    "chatPreprocessor": {
-      "match": "text"
-    }
+    "contextAttach": { "editable": true, "readOnly": true }
   },
   "spawn": {
+    "paste": { "supportsBracketedPaste": false, "multiline": "tagged_block" },
     "readinessStrategy": {
       "kind": "poll_shell_prompt",
       "timeoutSecs": 60
