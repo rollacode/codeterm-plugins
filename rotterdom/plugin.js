@@ -82,7 +82,19 @@ var TOOL_SPECS = [
   { name: "write_file", description: "Create or replace a file. expected must equal its entire current content (empty for a new file).", required: ["path", "content", "expected"] },
   { name: "edit_file", description: "Replace one unique occurrence after checking the entire current content against expected.", required: ["path", "old", "new", "expected"] },
   { name: "glob", description: "List files matching a root-relative glob (*, **, ?).", required: ["pattern"] },
-  { name: "search", description: "Find literal text in root-confined files.", required: ["text"], optional: ["pattern"] }
+  { name: "search", description: "Find literal text in root-confined files.", required: ["text"], optional: ["pattern"] },
+  { name: "identify", description: "Identify this Domios instance.", required: [] },
+  { name: "tab_list", description: "List Domios tabs.", required: [] },
+  { name: "plan_list", description: "List Domios plans in this workspace.", required: [] },
+  { name: "mem_search", description: "Search Domios memory.", required: ["query"] },
+  { name: "blueprint_list", description: "List this caller's Blueprints.", required: [] },
+  { name: "tab_read", description: "Read a profile-approved tab.", required: ["tab"] },
+  { name: "tab_describe", description: "Describe a profile-approved tab.", required: ["tab", "description"] },
+  { name: "send", description: "Send a message to a profile-approved agent tab.", required: ["tab", "text"] },
+  { name: "plan_report", description: "Report to a profile-approved plan.", required: ["plan", "text"] },
+  { name: "report", description: "Report to this agent's assigned parent and task.", required: ["text"] },
+  { name: "blueprint_input", description: "Submit text to a profile-approved Blueprint.", required: ["blueprint", "text"] },
+  { name: "blueprint_stop", description: "Stop a profile-approved Blueprint.", required: ["blueprint"] }
 ];
 function checkToolArgs(name, raw) {
   const spec = TOOL_SPECS.find((t) => t.name === name);
@@ -111,7 +123,7 @@ function openAiTools(names) {
 }
 
 // rotterdom/src/policy.ts
-var WRITERS = /* @__PURE__ */ new Set(["shell", "write_file", "edit_file"]);
+var WRITERS = /* @__PURE__ */ new Set(["shell", "write_file", "edit_file", "tab_describe", "send", "plan_report", "report", "blueprint_input", "blueprint_stop"]);
 function permitted(profile, name) {
   return TOOL_SPECS.some((t) => t.name === name) && profile.allow.includes(name) && !profile.deny.includes(name) && !profile.deny.includes("*") && !(profile.readOnly && WRITERS.has(name));
 }
@@ -235,6 +247,63 @@ function load(id) {
   return h;
 }
 
+// rotterdom/src/instanceCli.ts
+function instanceBinDir() {
+  try {
+    const dir = host.fs && typeof host.fs.expandHome === "function" ? host.fs.expandHome("~/.codeterm/bin") : null;
+    if (!dir) return null;
+    return dir;
+  } catch {
+    return null;
+  }
+}
+
+// rotterdom/src/domios.ts
+function domiosCommand(profile, tool, a) {
+  const scoped = (kind, value) => {
+    if (!value || value.startsWith("-") || !profile.targets?.[kind]?.includes(value)) throw new Error(`target outside profile ${kind} scope`);
+    return value;
+  };
+  switch (tool) {
+    case "identify":
+      return { args: ["identify", "--json"] };
+    case "tab_list":
+      return { args: ["tab", "list", "--json"] };
+    case "plan_list":
+      return { args: ["plan", "list", "--workspace", "--json"] };
+    case "mem_search":
+      return { args: ["mem", "search", "--json", "--", a.query] };
+    case "blueprint_list":
+      return { args: ["blueprint", "list", "--json"] };
+    case "tab_read":
+      return { args: ["tab", "get-text", "--tab", scoped("tabs", a.tab)] };
+    case "tab_describe":
+      return { args: ["tab", "describe", "--tab", scoped("tabs", a.tab), "--", a.description] };
+    case "send":
+      return { args: ["send", "--tab", scoped("tabs", a.tab), "--require-agent", "--from-pad", "-"], stdin: a.text };
+    case "report":
+      return { args: ["agent", "report", "--from-pad", "-"], stdin: a.text };
+    case "plan_report":
+      return { args: ["agent", "report", "--plan", scoped("plans", a.plan), "--from-pad", "-"], stdin: a.text };
+    case "blueprint_input":
+      return { args: ["blueprint", "input", scoped("blueprints", a.blueprint), "--from-pad", "-"], stdin: a.text };
+    case "blueprint_stop":
+      return { args: ["blueprint", "stop", scoped("blueprints", a.blueprint)] };
+    default:
+      return null;
+  }
+}
+function startDomios(profile, name, args, deadline) {
+  const command = domiosCommand(profile, name, args);
+  if (!command) return null;
+  const dir = instanceBinDir();
+  if (!dir) throw new Error("instance CLI directory unavailable");
+  const bin = `${dir.replace(/[\\/]+$/, "")}/${host.platform() === "windows" ? "codeterm.exe" : "codeterm"}`;
+  const result2 = host.exec.start({ bin, ...command, timeoutMs: Math.max(1, Math.min(3e4, deadline - host.unixNowMs())) });
+  if (!result2.jobId) throw new Error(result2.error || "Domios command start failed");
+  return { jobId: result2.jobId };
+}
+
 // rotterdom/src/runtime.ts
 var MAX_FILE = 128 * 1024;
 function confinedPath(profile, name, writing = false) {
@@ -264,6 +333,8 @@ function read(path2) {
 function execute(profile, name, raw, deadline) {
   if (!permitted(profile, name)) throw new Error(`tool refused: ${name}`);
   const a = checkToolArgs(name, raw);
+  const domios = startDomios(profile, name, a, deadline);
+  if (domios) return domios;
   if (name === "shell") {
     if (!a.command || a.command.length > 32768) throw new Error("invalid shell command");
     const root = host.canonicalPath(profile.root);
@@ -539,10 +610,28 @@ function historyTurns(id) {
   return transcriptTurns(session(id).rows, () => false);
 }
 
+// rotterdom/src/profiles.ts
+var READ = ["read_file", "glob", "search"];
+var INSPECT = ["identify", "tab_list", "plan_list", "mem_search", "blueprint_list", "tab_read"];
+function predefinedProfiles(endpoint, model, root) {
+  const base = { endpoint, model, root, deny: [], budgets: { tokens: 64e3, turns: 24, deadlineMs: 3e5 } };
+  return [
+    { ...base, id: "coding", name: "Coding", systemPrompt: "Complete the coding task using the available file and search tools. Read current content before edits. Verify your changes and report the result.", allow: [...READ, "write_file", "edit_file", "shell", "report"] },
+    { ...base, id: "reader", name: "Reader", systemPrompt: "Read and explain the material requested by the user. Use only the supplied read and search tools.", allow: READ, readOnly: true },
+    { ...base, id: "domios-inspector", name: "Domios Inspector", systemPrompt: "Inspect Domios using the supplied read tools. Distinguish observations from assumptions and report your findings in your answer.", allow: INSPECT, readOnly: true },
+    { ...base, id: "domios-operator", name: "Domios Operator", systemPrompt: "Operate Domios through the supplied scoped tools. Act only on the approved targets. Report each action's observable result.", allow: [...INSPECT, "tab_describe", "send", "plan_report", "report", "blueprint_input", "blueprint_stop"], targets: { tabs: [], plans: [], blueprints: [] } }
+  ];
+}
+
 // rotterdom/src/config.ts
 function settings() {
   const value = JSON.parse(host.settingsJson() || "{}");
-  if (!Array.isArray(value.endpoints) || !Array.isArray(value.profiles)) throw new Error("configure endpoints and profiles first");
+  if (!Array.isArray(value.endpoints)) throw new Error("configure endpoints first");
+  if (value.profiles === void 0) {
+    value.profiles = predefinedProfiles(value.endpoints[0]?.id || "", value.model || value.endpoints[0]?.models?.[0] || "", value.root || "");
+    value.defaultProfile || (value.defaultProfile = "coding");
+  }
+  if (!Array.isArray(value.profiles)) throw new Error("invalid profiles");
   for (const group of [value.endpoints, value.profiles]) {
     const ids = /* @__PURE__ */ new Set();
     for (const item of group) {
@@ -596,7 +685,7 @@ var plugin_default = {
   listPresets() {
     return settings().profiles.map((p) => ({ id: p.id, name: p.name }));
   },
-  __test: { permitted, offeredTools, relativePath, inside, edited, globPattern, request, response, claim, complete, recover, finishToolCalls, mergeToolParts, historyTurns },
+  __test: { permitted, offeredTools, relativePath, inside, edited, globPattern, request, response, claim, complete, recover, finishToolCalls, mergeToolParts, predefinedProfiles, domiosCommand, historyTurns },
   profileOpen(id, profile, resume = false) {
     const selected = resolve(profile);
     return { sessionId: open(id, selected.profile, selected.endpoint, resume) };

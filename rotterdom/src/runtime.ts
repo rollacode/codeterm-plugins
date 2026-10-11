@@ -1,6 +1,7 @@
 import type { Profile } from "./types";
 import { checkToolArgs } from "./toolspec";
 import { edited, globPattern, inside, permitted, relativePath } from "./policy";
+import { startDomios } from "./domios";
 export type Pending = { jobId: string };
 const MAX_FILE = 128 * 1024;
 export function confinedPath(profile: Profile, name: string, writing = false): string {
@@ -30,6 +31,8 @@ function read(path: string): string {
 export function execute(profile: Profile, name: string, raw: unknown, deadline: number): unknown | Pending {
   if (!permitted(profile, name)) throw new Error(`tool refused: ${name}`);
   const a = checkToolArgs(name, raw);
+  const domios = startDomios(profile, name, a, deadline);
+  if (domios) return domios;
   if (name === "shell") {
     if (!a.command || a.command.length > 32768) throw new Error("invalid shell command");
     const root = host.canonicalPath(profile.root);

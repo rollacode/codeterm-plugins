@@ -1,6 +1,6 @@
 import type { Profile } from "./types";
 import { TOOL_SPECS } from "./toolspec";
-const WRITERS = new Set(["shell", "write_file", "edit_file"]);
+const WRITERS = new Set(["shell", "write_file", "edit_file", "tab_describe", "send", "plan_report", "report", "blueprint_input", "blueprint_stop"]);
 export function permitted(profile: Profile, name: string): boolean {
   return TOOL_SPECS.some(t => t.name === name) && profile.allow.includes(name)
     && !profile.deny.includes(name) && !profile.deny.includes("*")

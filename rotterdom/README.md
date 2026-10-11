@@ -19,3 +19,9 @@ The native wire, tool specification, transcript and instance CLI helpers derive 
 ## Domios chat
 
 Open with `codeterm tab new --chat-backend rotterdom --config '{"profile":"coding"}'`. The provider picker exposes configured models and profiles as presets. Routed sends use the native loop and poll the resulting Chat UI transcript. Busy sessions refuse overlapping turns and model switches. Session ids equal tab ids; reopening the same tab recovers the saved history, without replaying pending calls. `systemPrompt` in session config overrides the profile verbatim, including an empty string. Model changes retain the profile policy and require a model configured for its endpoint.
+
+## Predefined profiles
+
+Omit `profiles`, configure `root`, `model`, and `endpoints`, and choose Coding, Reader, Domios Inspector or Domios Operator. Custom profiles replace these definitions and preserve their system prompts exactly. Coding has shell, files, search and a native report tool. Reader has file read and search only. Inspector exposes structured identify, tab, plan, memory and Blueprint reads, without arbitrary CLI or shell. Operator adds scoped describe, send, report, Blueprint input and stop actions. Its `targets: {tabs: [], plans: [], blueprints: []}` starts empty; configure exact ids before these actions can run.
+
+Domios commands use argv and stdin, never model-authored shell strings. They resolve the running instance's CLI and inherit the session's host-owned tab/API identity. A target must pass both the profile's target list and the CLI's own authorization. Messages and reports go through `--from-pad -` with stdin. Read-only profiles exclude all mutating Domios commands.

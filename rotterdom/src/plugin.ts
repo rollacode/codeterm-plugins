@@ -5,6 +5,8 @@ import { permitted, offeredTools, relativePath, inside, edited, globPattern } fr
 import { request, response } from "./adapters";
 import { claim, complete, recover } from "./history";
 import { finishToolCalls, mergeToolParts } from "./toolwire";
+import { predefinedProfiles } from "./profiles";
+import { domiosCommand } from "./domios";
 export default {
   openSession(ctx: ChatBackendOpenSessionCtx) {
     const config = (ctx.config || {}) as { profile?: string; preset?: string; model?: string; systemPrompt?: string };
@@ -24,7 +26,7 @@ export default {
     return [...new Set(s.endpoints.flatMap(e => e.models))].map(id => ({ id, displayName: id }));
   },
   listPresets() { return settings().profiles.map(p => ({ id: p.id, name: p.name })); },
-  __test: { permitted, offeredTools, relativePath, inside, edited, globPattern, request, response, claim, complete, recover, finishToolCalls, mergeToolParts, historyTurns: harness.historyTurns },
+  __test: { permitted, offeredTools, relativePath, inside, edited, globPattern, request, response, claim, complete, recover, finishToolCalls, mergeToolParts, predefinedProfiles, domiosCommand, historyTurns: harness.historyTurns },
   profileOpen(id: string, profile: string, resume = false) {
     const selected = resolve(profile);
     return { sessionId: harness.open(id, selected.profile, selected.endpoint, resume) };

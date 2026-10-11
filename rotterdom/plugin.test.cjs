@@ -91,3 +91,21 @@ test('chat_backend preserves session config, cursor, model and recovered history
  assert.equal(p.poll('chat').messages.at(-1).content,'answer');
  assert.equal(p.listPresets()[0].id,'coding');assert.equal(p.listModels().length,2);
 });
+test('predefined profiles separate read and operator capabilities',()=>{
+ const t=fixture().plugin.__test, profiles=t.predefinedProfiles('local','fixture','/project');
+ assert.equal(profiles.length,4);
+ for(const p of profiles.filter(p=>p.readOnly)) for(const name of ['shell','write_file','send','report']) assert.equal(t.permitted(p,name),false);
+ const operator=profiles[3];assert.throws(()=>t.domiosCommand(operator,'send',{tab:'outside',text:'hello'}),/scope/);
+ const scoped={...operator,targets:{tabs:['inside']}};
+ assert.equal(t.domiosCommand(scoped,'send',{tab:'inside',text:'$(unsafe)'}).stdin,'$(unsafe)');
+ assert.equal(t.domiosCommand(scoped,'send',{tab:'inside',text:'hello'}).args.includes('sh'),false);
+ assert.equal(t.domiosCommand(profiles[2],'tab_list',{}).args.join(' '),'tab list --json');
+});
+test('Inspector native tool runs the instance CLI without a shell',()=>{
+ const f=fixture([reply('',[call('tabs','tab_list',{})]),reply('listed')]);
+ delete f.config.profiles;f.config.model='fixture';f.config.root='/project';
+ const p=f.plugin;p.openSession({tabId:'inspector',config:{profile:'domios-inspector'}});p.sendMessage('inspector','list tabs');
+ for(let i=0;i<4;i++)p.pump('inspector');
+ assert.equal(p.poll('inspector').done,true);
+ assert.match(JSON.stringify(p.poll('inspector').messages),/stdout/);
+});

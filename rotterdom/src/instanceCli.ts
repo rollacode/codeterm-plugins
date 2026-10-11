@@ -22,9 +22,7 @@ export function instanceBinDir(): string | null {
   try {
     const dir = host.fs && typeof host.fs.expandHome === "function" ? host.fs.expandHome("~/.codeterm/bin") : null;
     if (!dir) return null;
-    const exe = String(host.platform ? host.platform() : "").toLowerCase().indexOf("win") === 0 ? "codeterm.exe" : "codeterm";
-    const sep = dir.indexOf("\\") >= 0 ? "\\" : "/";
-    return host.fileExists(`${dir.replace(/[\\/]+$/, "")}${sep}${exe}`) ? dir : null;
+    return dir;
   } catch {
     return null;
   }

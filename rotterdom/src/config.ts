@@ -1,8 +1,14 @@
 import type { Endpoint, Profile } from "./types";
-export interface Settings { endpoints: Endpoint[]; profiles: Profile[]; defaultProfile?: string }
+import { predefinedProfiles } from "./profiles";
+export interface Settings { endpoints: Endpoint[]; profiles: Profile[]; defaultProfile?: string; root?: string; model?: string }
 export function settings(): Settings {
   const value = JSON.parse(host.settingsJson() || "{}");
-  if (!Array.isArray(value.endpoints) || !Array.isArray(value.profiles)) throw new Error("configure endpoints and profiles first");
+  if (!Array.isArray(value.endpoints)) throw new Error("configure endpoints first");
+  if (value.profiles === undefined) {
+    value.profiles = predefinedProfiles(value.endpoints[0]?.id || "", value.model || value.endpoints[0]?.models?.[0] || "", value.root || "");
+    value.defaultProfile ||= "coding";
+  }
+  if (!Array.isArray(value.profiles)) throw new Error("invalid profiles");
   for (const group of [value.endpoints, value.profiles]) {
     const ids = new Set();
     for (const item of group) {
