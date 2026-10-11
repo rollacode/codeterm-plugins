@@ -5,6 +5,12 @@
   "description": "Andrey's CodeTerm capability plugins — Git, Transcriber, Bitwarden, LM Studio, Chat Preprocessor, Pebble, Grok, Aider, Telegram Client, Teams Client.",
   "plugins": [
     {
+      "id": "lark",
+      "path": "lark",
+      "version": "0.1.0",
+      "minCodeterm": "1.14.2"
+    },
+    {
       "id": "lmstudio",
       "path": "lmstudio",
       "version": "0.2.3",

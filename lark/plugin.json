@@ -1,0 +1,12 @@
+{
+  "id": "lark", "version": "0.1.0", "minCodeterm": "1.14.2", "hostApi": 2,
+  "displayName": "LARK M2", "description": "Use the selected LARK M2 transmitter button to start and stop the existing Domios voice recorder.",
+  "entry": "plugin.js", "readme": "README.md", "icon": "icon.svg",
+  "capabilities": {
+    "localRecordingTrigger": { "vendorId": 13639, "productId": 8, "usagePage": 12, "usage": 1 },
+    "tabMenu": [{ "id": "receiver-target", "label": "Use LARK recording here", "action": "receiverTarget" }],
+    "view": true
+  },
+  "permissions": { "local_recording": true },
+  "configHelp": "Grant local recording, then enable LARK and explicitly select the connected receiver and LARK microphone in the host picker. Choose a recipient using its tab menu. Double-press to start the existing voice recorder; double-press again to stop and send through the configured Transcriber. No receiver means no capture. Windows support requires the matching host wiring. macOS mapping and hardware verification remain pending."
+}
