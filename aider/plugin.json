@@ -12,13 +12,10 @@
     "agentProvider": true,
     "toolLess": true,
     "replyRelay": true,
-    "contextAttach": { "editable": true, "readOnly": true },
-    "chatPreprocessor": {
-      "match": "text"
-    }
+    "contextAttach": { "editable": true, "readOnly": true }
   },
   "spawn": {
-    "paste": { "supportsBracketedPaste": false },
+    "paste": { "supportsBracketedPaste": false, "multiline": "tagged_block" },
     "readinessStrategy": {
       "kind": "poll_shell_prompt",
       "timeoutSecs": 60

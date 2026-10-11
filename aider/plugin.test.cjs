@@ -533,19 +533,14 @@ test("independent sessions and rereads do not share state", () => {
 test("unreadable prior context returns no misleading rows", () => {
   assert.deepEqual(plain(load().parseSessionDelta("#### code\n", {session_key: "missing", from_offset: 200})), {messages: []});
 });
-test("plain input refuses bracketed paste and retains tagged multiline delivery", () => {
+test("plain input declares tagged multiline delivery at the shared PTY seam", () => {
   const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json")));
-  assert.deepEqual(manifest.spawn.paste, {supportsBracketedPaste: false});
+  assert.deepEqual(manifest.spawn.paste, {supportsBracketedPaste: false, multiline: "tagged_block"});
+  assert.equal(manifest.capabilities.chatPreprocessor, undefined);
   const plugin = configured([mimoEndpoint]);
   const command = plugin.buildLaunchCommand({cwd: "/fixture", model: "openai/mimo-v2.6-pro", tabId: "fixture"});
   assert.ok(command.includes("--no-fancy-input"));
-  assert.equal(plugin.chatPreprocess({provider: "aider", text: "opaque"}), null);
-  assert.equal(plugin.chatPreprocess({provider: "aider", text: "one\ntwo"}).text, "{domios\none\ntwo\ndomios}");
-});
-
-test("multiline delivery uses a collision-free tagged block", () => {
-  assert.equal(load().chatPreprocess({provider: "aider", text: "first\nsecond"}).text, "{domios\nfirst\nsecond\ndomios}");
-  assert.equal(load().chatPreprocess({provider: "aider", text: "{domios}\nsecond"}).text, "{domios1\n{domios}\nsecond\ndomios1}");
+  assert.equal(plugin.chatPreprocess, undefined);
 });
 
 test("every complete-line split converges to the same clean transcript", () => {

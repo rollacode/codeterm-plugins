@@ -22,13 +22,10 @@ var plugin_exports = {};
 __export(plugin_exports, {
   MODE_PROMPT_RE: () => MODE_PROMPT_RE,
   default: () => plugin_default,
-  deliverText: () => deliverText,
   extractBannerModel: () => extractBannerModel,
   lastNonEmptyLine: () => lastNonEmptyLine,
   parsePromptWithContext: () => parsePromptWithContext,
-  pickTaggedBlockTag: () => pickTaggedBlockTag,
-  promptSafeChoice: () => promptSafeChoice,
-  wrapMultiline: () => wrapMultiline
+  promptSafeChoice: () => promptSafeChoice
 });
 module.exports = __toCommonJS(plugin_exports);
 
@@ -553,29 +550,6 @@ var GITIGNORE_QUESTION_RE = /^Add \.aider\* to \.gitignore \(recommended\)\?\s*\
 var DOCS_URL_QUESTION_RE = /^Open documentation url for more info\?\s*\(Y\)es\/\(N\)o\/\(D\)on't ask again\s*(\[[^\]]*\])?\s*:?\s*$/;
 var COMMAND_LINE_RE = /^[ \t]*[$>][ \t]+(\S[^\n]*)$/;
 var MODE_PROMPT_RE = /^(?:[a-z]+)?>\s*$/;
-var TAGGED_BLOCK_BASE = "domios";
-function isMultiline(text) {
-  return /\r?\n/.test(String(text || ""));
-}
-function pickTaggedBlockTag(text) {
-  let tag = TAGGED_BLOCK_BASE;
-  let suffix = 1;
-  while (text.includes(`{${tag}`) || text.includes(`{/${tag}}`)) {
-    tag = `${TAGGED_BLOCK_BASE}${suffix}`;
-    suffix += 1;
-  }
-  return tag;
-}
-function wrapMultiline(text) {
-  const body = String(text || "");
-  const tag = pickTaggedBlockTag(body);
-  return `{${tag}
-${body}
-${tag}}`;
-}
-function deliverText(text) {
-  return isMultiline(text) ? wrapMultiline(text) : String(text || "");
-}
 function pluginSettings() {
   const raw = typeof host.settingsJson === "function" ? host.settingsJson() : null;
   if (!raw) return {};
@@ -871,12 +845,6 @@ var plugin = {
   launchOnboardingSafeChoice(screen) {
     const prompt = parsePromptWithContext(String(screen || ""));
     return prompt ? promptSafeChoice(prompt, String(screen || "")) : null;
-  },
-  chatPreprocess(ctx) {
-    if (ctx?.provider !== "aider") return null;
-    const text = String(ctx?.text || "");
-    const delivered = deliverText(text);
-    return delivered === text ? null : { text: delivered };
   },
   detectSessionId(cwd, exclude, maxAgeMs) {
     const excluded = Array.isArray(exclude) ? exclude : exclude ? [exclude] : [];
