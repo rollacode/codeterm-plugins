@@ -4,7 +4,7 @@
   "minCodeterm": "1.14.2",
   "hostApi": 2,
   "displayName": "Grok",
-  "description": "xAI Grok CLI — optional PTY agent. Install the grok binary separately; not a core provider.",
+  "description": "xAI Grok CLI — optional PTY agent. Install the grok binary separately; not a core provider. The provider is verified against the Grok 1.0 CLI contract.",
   "readme": "README.md",
   "binaryName": "grok",
   "cliBinary": "grok",
@@ -168,7 +168,7 @@
       {
         "range": ">=1.1.0",
         "reasons": [
-          "The provider is verified against the Grok 1.0 CLI contract."
+          "version_not_declared"
         ]
       }
     ]

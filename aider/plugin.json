@@ -4,6 +4,7 @@
   "minCodeterm": "1.14.2",
   "hostApi": 2,
   "displayName": "Aider",
+  "description": "The bundled adapter requires aider-chat 0.86.2.",
   "binaryName": "aider",
   "cliBinary": "aider",
   "entry": "plugin.js",
@@ -110,13 +111,13 @@
       {
         "range": "<0.86.2",
         "reasons": [
-          "The bundled adapter requires aider-chat 0.86.2."
+          "version_not_declared"
         ]
       },
       {
         "range": ">0.86.2",
         "reasons": [
-          "The bundled adapter requires aider-chat 0.86.2."
+          "version_not_declared"
         ]
       }
     ]

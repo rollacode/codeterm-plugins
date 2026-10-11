@@ -25,6 +25,22 @@ module.exports = (tests, load, directory) => {
     return { plugin, calls };
   };
   const plain = value => JSON.parse(JSON.stringify(value));
+  tests.push(["CLI compatibility emits only host-declared reason variants", () => {
+    // CodeTerm release/1.14.2 provider_compat::CompatibilityReason (snake_case).
+    const reasons = new Set([
+      "sqlite_schema_conversion", "event_route_changed", "server_password_required",
+      "version_unknown", "version_not_declared", "invalid_manifest", "undeclared_capability",
+    ]);
+    assert.ok(manifest.cliCompatibility.breaking.length > 0);
+    for (const rule of manifest.cliCompatibility.breaking) {
+      assert.deepEqual(Object.keys(rule).sort(), ["range", "reasons"]);
+      assert.ok(rule.reasons.length > 0);
+      for (const reason of rule.reasons) assert.ok(reasons.has(reason), `Unknown host reason: ${reason}`);
+      assert.deepEqual(rule.reasons, ["version_not_declared"]);
+    }
+    assert.equal(typeof manifest.description, "string");
+    assert.ok(manifest.description.length > 0);
+  }]);
   tests.push(["update check reports installed and supported target through bounded host probes", () => {
     const {plugin, calls} = probe();
     assert.deepEqual(plain(plugin.checkForUpdate()), {currentVersion: older, latestVersion: target});
