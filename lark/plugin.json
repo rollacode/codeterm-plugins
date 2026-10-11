@@ -1,5 +1,5 @@
 {
-  "id": "lark", "version": "0.1.0", "minCodeterm": "1.14.2", "hostApi": 2,
+  "id": "lark", "version": "0.1.0", "minCodeterm": "1.14.3", "hostApi": 2,
   "displayName": "LARK M2", "description": "Use the selected LARK M2 transmitter button to start and stop the existing Domios voice recorder.",
   "entry": "plugin.js", "readme": "README.md", "icon": "icon.svg",
   "capabilities": {
