@@ -32,5 +32,12 @@ export function resolve(id?: string, model?: string, systemPrompt?: string): { p
     const budget = profile.budgets?.[key];
     if (!Number.isInteger(budget) || budget <= 0 || budget > ceiling) throw new Error(`invalid ${key} budget`);
   }
+  if (profile.params) {
+    for (const [key, value] of Object.entries(profile.params)) {
+      if (!["temperature", "top_p", "seed"].includes(key) || typeof value !== "number" || !Number.isFinite(value)
+        || (key === "temperature" && (value < 0 || value > 2)) || (key === "top_p" && (value < 0 || value > 1))
+        || (key === "seed" && !Number.isInteger(value))) throw new Error("invalid sampling parameter");
+    }
+  }
   return { profile, endpoint };
 }

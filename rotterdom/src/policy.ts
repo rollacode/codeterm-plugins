@@ -1,13 +1,14 @@
 import type { Profile } from "./types";
 import { TOOL_SPECS } from "./toolspec";
 const WRITERS = new Set(["shell", "write_file", "edit_file", "tab_describe", "send", "plan_report", "report", "blueprint_input", "blueprint_stop"]);
-export function permitted(profile: Profile, name: string): boolean {
+export function permitted(profile: Profile, name: string, rootWritable = true): boolean {
   return TOOL_SPECS.some(t => t.name === name) && profile.allow.includes(name)
     && !profile.deny.includes(name) && !profile.deny.includes("*")
-    && !(profile.readOnly && WRITERS.has(name));
+    && !(profile.readOnly && WRITERS.has(name))
+    && (rootWritable || !["shell", "write_file", "edit_file"].includes(name));
 }
-export function offeredTools(profile: Profile): string[] {
-  return TOOL_SPECS.map(t => t.name).filter(name => permitted(profile, name));
+export function offeredTools(profile: Profile, rootWritable = true): string[] {
+  return TOOL_SPECS.map(t => t.name).filter(name => permitted(profile, name, rootWritable));
 }
 export function inside(root: string, path: string, windows = false): boolean {
   const norm = (s: string) => {

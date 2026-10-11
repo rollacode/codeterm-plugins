@@ -29,7 +29,7 @@ function read(path: string): string {
   return content;
 }
 export function execute(profile: Profile, name: string, raw: unknown, deadline: number): unknown | Pending {
-  if (!permitted(profile, name)) throw new Error(`tool refused: ${name}`);
+  if (!permitted(profile, name, host.projectWriteAllowed(profile.root))) throw new Error(`tool refused: ${name}`);
   const a = checkToolArgs(name, raw);
   const domios = startDomios(profile, name, a, deadline);
   if (domios) return domios;
@@ -49,13 +49,15 @@ export function execute(profile: Profile, name: string, raw: unknown, deadline: 
   if (name === "read_file") return { content: read(confinedPath(profile, a.path)) };
   if (name === "write_file" || name === "edit_file") {
     const path = confinedPath(profile, a.path, name === "write_file");
+    const before = host.fileExists(path) ? read(path) : "";
+    if (before !== a.expected) throw new Error("stale content");
+    const next = name === "edit_file" ? edited(before, a.expected, a.old, a.new) : a.content;
+    if (unescape(encodeURIComponent(next)).length > MAX_FILE) throw new Error("write exceeds limit");
     const lock = host.lockFile(path);
     if (!lock) throw new Error("file lock unavailable or denied by host");
     try {
       const content = host.fileExists(path) ? read(path) : "";
       if (content !== a.expected) throw new Error("stale content");
-      const next = name === "edit_file" ? edited(content, a.expected, a.old, a.new) : a.content;
-      if (unescape(encodeURIComponent(next)).length > MAX_FILE) throw new Error("write exceeds limit");
       if (!host.writeFileAtomic(path, next)) throw new Error("write failed or denied by host");
       return { path: a.path, written: true };
     } finally { host.unlockFile(lock); }

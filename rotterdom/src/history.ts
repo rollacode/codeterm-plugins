@@ -7,6 +7,7 @@ export interface History {
   turns: ChatTurn[];
   ledger: Record<string, CallRecord>;
   run: number;
+  taskResult?: { status: "done" | "failed" | "cancelled" | "deadline_exceeded"; output: unknown; error?: string };
 }
 export function claim(history: History, id: string, signature: string): string | null {
   const old = history.ledger[id];
@@ -31,7 +32,7 @@ export function recover(history: History): void {
   }
 }
 function path(id: string): string {
-  if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error("invalid session id");
+  if (!/^[A-Za-z0-9_-]{1,120}$/.test(id)) throw new Error("invalid session id");
   const dir = host.fs.expandHome("~/.codeterm/rotterdom");
   if (!dir || !host.makeDirs(dir)) throw new Error("history directory unavailable");
   return `${dir}/session-${id}.json`;

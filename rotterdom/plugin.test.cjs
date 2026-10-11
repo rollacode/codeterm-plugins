@@ -7,7 +7,7 @@ function fixture(replies = []) {
  const files = new Map(); const requests=[]; const writes=[]; let clock=100; let job=0;
  const config={endpoints:[{id:'local',baseUrl:'http://localhost:1234/v1',models:['fixture']}],profiles:[profile],defaultProfile:'coding'};
  const host={settingsJson:()=>JSON.stringify(config),unixNowMs:()=>clock,platform:()=> 'linux',secretGet:()=>null,
-  canonicalPath:p => p==='/project'||files.has(p) ? p : null,isSymlink:()=>false,fileExists:p=>files.has(p),
+  projectWriteAllowed:()=>true,canonicalPath:p => p==='/project'||files.has(p) ? p : null,isSymlink:()=>false,fileExists:p=>files.has(p),
   readFile:p=>files.get(p)??null,readFileHead:(p,n)=>(files.get(p)??null)?.slice(0,n),
   writeFileAtomic:(p,s)=>{files.set(p,s);writes.push(p);return true},makeDirs:()=>true,lockFile:()=> 'lock',unlockFile:()=>true,
   fs:{expandHome:()=>'/state',readDir:()=>[]},shell:{quoteFor:s=>`'${s}'`},
@@ -15,7 +15,7 @@ function fixture(replies = []) {
   exec:{start:()=>({jobId:'exec'}),poll:()=>({done:true,code:0,stdout:'ok'}),close:()=>{}} };
  const context={host,module:{exports:{}},exports:{}};
  vm.runInNewContext(fs.readFileSync(__dirname+'/plugin.js','utf8'),context);
- return {plugin:context.module.exports.default,files,requests,writes,config,advance:()=>clock+=20000};
+ return {host,plugin:context.module.exports.default,files,requests,writes,config,advance:()=>clock+=20000};
 }
 function reply(content, calls) {return {choices:[{message:{content,tool_calls:calls}}],usage:{total_tokens:10}}}
 function call(id,name,args) {return {id,type:'function',function:{name,arguments:JSON.stringify(args)}}}
@@ -108,4 +108,58 @@ test('Inspector native tool runs the instance CLI without a shell',()=>{
  for(let i=0;i<4;i++)p.pump('inspector');
  assert.equal(p.poll('inspector').done,true);
  assert.match(JSON.stringify(p.poll('inspector').messages),/stdout/);
+});
+test('Blueprint Agent entry returns structured output, executes native tools and never reruns a completed task',()=>{
+ const f=fixture();const p=f.plugin;
+ const replies=[reply('',[call('write','write_file',{path:'stage.txt',expected:'',content:'stage'})]),reply('{"created":true}')];
+ const hostInput={runId:'stage',tabId:'owner',workspaceId:'workspace',profile:'coding',task:'create file',input:'',timeoutMs:10000,maxTokens:1000,maxTurns:4};
+ // The fixture drives the same continuation bridge that QuickJS resumes on job completion.
+ const context={host:{},module:{exports:{}},exports:{}};
+ const files=f.files;
+ Object.assign(context.host,{settingsJson:()=>JSON.stringify(f.config),unixNowMs:()=>100,platform:()=> 'linux',secretGet:()=>null,
+  projectWriteAllowed:()=>true,canonicalPath:path=>path==='/project'||files.has(path)?path:null,isSymlink:()=>false,fileExists:path=>files.has(path),
+  readFile:path=>files.get(path)??null,readFileHead:(path,n)=>(files.get(path)??null)?.slice(0,n),
+  writeFileAtomic:(path,text)=>{files.set(path,text);return true},makeDirs:()=>true,lockFile:()=> 'lock',unlockFile:()=>true,
+  fs:{expandHome:()=>'/state'},fetchStart:()=>JSON.stringify({jobId:'fetch'}),
+  awaitJob:(job,then)=>then({status:200,body:JSON.stringify(replies.shift())}),exec:{close:()=>{}}});
+ vm.runInNewContext(fs.readFileSync(__dirname+'/plugin.js','utf8'),context);
+ const agent=context.module.exports.default;
+ const result=agent.runAgentTask(hostInput);
+ assert.equal(result.status,'done');assert.equal(result.output.created,true);assert.equal(files.get('/project/stage.txt'),'stage');
+ assert.equal(agent.runAgentTask(hostInput).output.created,true);assert.equal(replies.length,0);
+});
+
+test('ungranted project omits and refuses writers and shell even for Coding',()=>{
+ const f=fixture([reply('',[call('bad','write_file',{path:'a.txt',expected:'',content:'bad'})]),reply('refused')]);
+ f.host.projectWriteAllowed=()=>false;
+ const p=f.plugin;p.profileOpen('ungranted','coding');p.profileSend('ungranted','write');
+ for(let i=0;i<3;i++)p.profilePump('ungranted');
+ assert.equal(f.files.has('/project/a.txt'),false);
+ for(const name of ['shell','write_file','edit_file']) assert.equal(f.requests[0].tools.some(t=>t.function.name===name),false);
+ assert.match(JSON.stringify(p.profilePoll('ungranted').messages),/tool refused/);
+});
+test('failed history persistence prevents endpoint and tool effects',()=>{
+ const f=fixture();f.host.writeFileAtomic=()=>false;
+ assert.throws(()=>f.plugin.profileOpen('unpersisted','coding'),/persistence/);
+ assert.equal(f.requests.length,0);assert.equal(f.files.size,0);
+});
+test('symlink paths and stale create are refused before lock mutation',()=>{
+ const f=fixture([reply('',[call('bad','write_file',{path:'link/a.txt',expected:'',content:'bad'})]),reply('refused')]);
+ f.host.isSymlink=p=>p==='/project/link';f.host.canonicalPath=p=>p==='/project'?p:null;
+ const p=f.plugin;p.profileOpen('symlink','coding');p.profileSend('symlink','write');
+ for(let i=0;i<3;i++)p.profilePump('symlink');
+ assert.equal(f.files.has('/project/link/a.txt'),false);
+});
+test('aborting an awaiting Agent task persists cancellation and refuses late tool effects',()=>{
+ const f=fixture();let continuation;const closed=[];
+ f.host.fetchStart=()=>JSON.stringify({jobId:'pending'});
+ f.host.awaitJob=(job,then)=>{continuation=then;return {pending:job}};
+ f.host.exec.close=job=>closed.push(job);
+ const input={runId:'cancelled',tabId:'owner',workspaceId:'workspace',profile:'coding',task:'write',input:'',timeoutMs:10000,maxTokens:1000,maxTurns:4};
+ assert.equal(f.plugin.runAgentTask(input).pending,'pending');
+ f.plugin.abortAgentTask('cancelled');
+ assert.deepEqual(closed,['pending']);
+ assert.equal(continuation({status:200,body:JSON.stringify(reply('',[call('late','write_file',{path:'late.txt',expected:'',content:'late'})]))}).status,'cancelled');
+ assert.equal(f.files.has('/project/late.txt'),false);
+ assert.equal(f.plugin.runAgentTask(input).status,'cancelled');
 });

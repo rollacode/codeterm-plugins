@@ -124,11 +124,11 @@ function openAiTools(names) {
 
 // rotterdom/src/policy.ts
 var WRITERS = /* @__PURE__ */ new Set(["shell", "write_file", "edit_file", "tab_describe", "send", "plan_report", "report", "blueprint_input", "blueprint_stop"]);
-function permitted(profile, name) {
-  return TOOL_SPECS.some((t) => t.name === name) && profile.allow.includes(name) && !profile.deny.includes(name) && !profile.deny.includes("*") && !(profile.readOnly && WRITERS.has(name));
+function permitted(profile, name, rootWritable = true) {
+  return TOOL_SPECS.some((t) => t.name === name) && profile.allow.includes(name) && !profile.deny.includes(name) && !profile.deny.includes("*") && !(profile.readOnly && WRITERS.has(name)) && (rootWritable || !["shell", "write_file", "edit_file"].includes(name));
 }
-function offeredTools(profile) {
-  return TOOL_SPECS.map((t) => t.name).filter((name) => permitted(profile, name));
+function offeredTools(profile, rootWritable = true) {
+  return TOOL_SPECS.map((t) => t.name).filter((name) => permitted(profile, name, rootWritable));
 }
 function inside(root, path2, windows = false) {
   const norm = (s) => {
@@ -169,13 +169,15 @@ function globPattern(pattern) {
 // rotterdom/src/adapters.ts
 function request(endpoint, profile, turns, key, remainingTokens) {
   if (!/^https?:\/\/[^\s?#]+$/.test(endpoint.baseUrl) || /\/\/[^/]*@/.test(endpoint.baseUrl)) throw new Error("invalid endpoint URL");
-  const tools = openAiTools(offeredTools(profile));
+  const tools = openAiTools(offeredTools(profile, host.projectWriteAllowed(profile.root)));
   return {
     url: `${endpoint.baseUrl.replace(/\/+$/, "")}/chat/completions`,
     method: "POST",
     headers: { "content-type": "application/json", ...key ? { authorization: `Bearer ${key}` } : {} },
     body: JSON.stringify({
-      ...profile.params,
+      temperature: profile.params?.temperature,
+      top_p: profile.params?.top_p,
+      seed: profile.params?.seed,
       model: profile.model,
       stream: false,
       max_tokens: Math.min(4096, remainingTokens),
@@ -193,13 +195,15 @@ function response(raw) {
   const calls = message.tool_calls;
   if (calls !== void 0 && (!Array.isArray(calls) || calls.length > 16)) throw new Error("invalid tool calls");
   const ids = /* @__PURE__ */ new Set();
-  const toolCalls = (calls || []).map((c) => {
+  const toolCalls = (calls || []).map((raw2) => {
+    if (!raw2 || typeof raw2 !== "object") throw new Error("invalid tool call");
+    const c = raw2;
     if (typeof c.id !== "string" || !c.id || ids.has(c.id) || c.type !== "function" || typeof c.function?.name !== "string" || typeof c.function?.arguments !== "string") throw new Error("invalid tool call");
     ids.add(c.id);
     return { id: c.id, name: c.function.name, arguments: c.function.arguments };
   });
   const tokens = data.usage?.total_tokens;
-  if (!Number.isInteger(tokens) || tokens < 0) throw new Error("endpoint must report token usage for the token budget");
+  if (typeof tokens !== "number" || !Number.isInteger(tokens) || tokens < 0) throw new Error("endpoint must report token usage for the token budget");
   return { turn: { role: "assistant", content: message.content || "", ...toolCalls.length ? { toolCalls } : {} }, tokens };
 }
 
@@ -230,7 +234,7 @@ function recover(history) {
   }
 }
 function path(id) {
-  if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new Error("invalid session id");
+  if (!/^[A-Za-z0-9_-]{1,120}$/.test(id)) throw new Error("invalid session id");
   const dir = host.fs.expandHome("~/.codeterm/rotterdom");
   if (!dir || !host.makeDirs(dir)) throw new Error("history directory unavailable");
   return `${dir}/session-${id}.json`;
@@ -331,7 +335,7 @@ function read(path2) {
   return content;
 }
 function execute(profile, name, raw, deadline) {
-  if (!permitted(profile, name)) throw new Error(`tool refused: ${name}`);
+  if (!permitted(profile, name, host.projectWriteAllowed(profile.root))) throw new Error(`tool refused: ${name}`);
   const a = checkToolArgs(name, raw);
   const domios = startDomios(profile, name, a, deadline);
   if (domios) return domios;
@@ -352,13 +356,15 @@ function execute(profile, name, raw, deadline) {
   if (name === "read_file") return { content: read(confinedPath(profile, a.path)) };
   if (name === "write_file" || name === "edit_file") {
     const path2 = confinedPath(profile, a.path, name === "write_file");
+    const before = host.fileExists(path2) ? read(path2) : "";
+    if (before !== a.expected) throw new Error("stale content");
+    const next = name === "edit_file" ? edited(before, a.expected, a.old, a.new) : a.content;
+    if (unescape(encodeURIComponent(next)).length > MAX_FILE) throw new Error("write exceeds limit");
     const lock = host.lockFile(path2);
     if (!lock) throw new Error("file lock unavailable or denied by host");
     try {
       const content = host.fileExists(path2) ? read(path2) : "";
       if (content !== a.expected) throw new Error("stale content");
-      const next = name === "edit_file" ? edited(content, a.expected, a.old, a.new) : a.content;
-      if (unescape(encodeURIComponent(next)).length > MAX_FILE) throw new Error("write exceeds limit");
       if (!host.writeFileAtomic(path2, next)) throw new Error("write failed or denied by host");
       return { path: a.path, written: true };
     } finally {
@@ -657,11 +663,145 @@ function resolve(id, model, systemPrompt) {
     const budget = profile.budgets?.[key];
     if (!Number.isInteger(budget) || budget <= 0 || budget > ceiling) throw new Error(`invalid ${key} budget`);
   }
+  if (profile.params) {
+    for (const [key, value] of Object.entries(profile.params)) {
+      if (!["temperature", "top_p", "seed"].includes(key) || typeof value !== "number" || !Number.isFinite(value) || key === "temperature" && (value < 0 || value > 2) || key === "top_p" && (value < 0 || value > 1) || key === "seed" && !Number.isInteger(value)) throw new Error("invalid sampling parameter");
+    }
+  }
   return { profile, endpoint };
+}
+
+// rotterdom/src/agent.ts
+var runs = /* @__PURE__ */ new Map();
+function finish(runId, result2) {
+  const run = runs.get(runId);
+  run.history.taskResult = result2;
+  try {
+    save(run.history);
+  } finally {
+    runs.delete(runId);
+  }
+  return result2;
+}
+function abortAgentTask(runId) {
+  const run = runs.get(runId);
+  if (!run) return;
+  run.cancelled = true;
+  for (const job of run.jobs) host.exec.close(job);
+  recover(run.history);
+  finish(runId, { status: "cancelled", output: null, error: "unfinished tool effects are unconfirmed" });
+}
+function runAgentTask(input) {
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(input.runId) || !input.task || input.task.length > 32768 || input.input.length > 32768) throw new Error("invalid agent task");
+  const selected = resolve(input.profile);
+  const profile = { ...selected.profile, deny: [...selected.profile.deny, "report"], budgets: {
+    tokens: Math.min(selected.profile.budgets.tokens, input.maxTokens),
+    turns: Math.min(selected.profile.budgets.turns, input.maxTurns),
+    deadlineMs: Math.min(selected.profile.budgets.deadlineMs, input.timeoutMs)
+  } };
+  for (const budget of Object.values(profile.budgets)) if (!Number.isInteger(budget) || budget <= 0) throw new Error("invalid task budget");
+  const id = `task_${input.runId}`;
+  const previous = load(id);
+  if (previous) return previous.taskResult || { status: "failed", output: null, error: "existing task outcome unconfirmed; never replayed" };
+  const history = { version: 1, id, profile, turns: [
+    { role: "user", content: input.task },
+    ...input.input ? [{ role: "user", content: input.input }] : []
+  ], ledger: {}, run: 1 };
+  const run = { history, deadline: host.unixNowMs() + profile.budgets.deadlineMs, jobs: /* @__PURE__ */ new Set(), tokens: 0, turns: 0, cancelled: false };
+  save(history);
+  runs.set(input.runId, run);
+  const fail = (e) => finish(input.runId, { status: "failed", output: null, error: String(e) });
+  function result2(call, raw) {
+    complete(history, call.id, raw);
+    history.turns.push({ role: "tool", toolCallId: call.id, content: raw });
+    save(history);
+  }
+  function calls(queue) {
+    if (run.cancelled) return { status: "cancelled", output: null };
+    if (host.unixNowMs() >= run.deadline) return finish(input.runId, { status: "deadline_exceeded", output: null, error: "task deadline exceeded" });
+    const call = queue.shift();
+    if (!call) return next();
+    try {
+      const old = claim(history, call.id, `${call.name}:${call.arguments}`);
+      if (old !== null) {
+        history.turns.push({ role: "tool", toolCallId: call.id, content: old });
+        save(history);
+        return calls(queue);
+      }
+      save(history);
+      let value;
+      try {
+        value = execute(profile, call.name, JSON.parse(call.arguments), run.deadline);
+      } catch (e) {
+        value = { error: String(e) };
+      }
+      if (value && typeof value === "object" && "jobId" in value) {
+        const job = String(value.jobId);
+        run.jobs.add(job);
+        return host.awaitJob(job, (value2) => {
+          run.jobs.delete(job);
+          if (run.cancelled) return { status: "cancelled", output: null };
+          try {
+            result2(call, JSON.stringify(value2).slice(0, 32768));
+            return calls(queue);
+          } catch (e) {
+            return fail(e);
+          }
+        });
+      }
+      result2(call, JSON.stringify(value).slice(0, 32768));
+      return calls(queue);
+    } catch (e) {
+      return fail(e);
+    }
+  }
+  function next() {
+    if (run.cancelled) return { status: "cancelled", output: null };
+    if (host.unixNowMs() >= run.deadline) return finish(input.runId, { status: "deadline_exceeded", output: null, error: "task deadline exceeded" });
+    if (++run.turns > profile.budgets.turns || run.tokens >= profile.budgets.tokens) return fail("task budget exhausted");
+    try {
+      const key = selected.endpoint.secret ? host.secretGet(selected.endpoint.secret) : null;
+      if (selected.endpoint.secret && !key) throw new Error("endpoint secret unavailable");
+      const opts = request(selected.endpoint, profile, history.turns, key, profile.budgets.tokens - run.tokens);
+      opts.timeoutMs = Math.max(1, Math.min(opts.timeoutMs, run.deadline - host.unixNowMs()));
+      const started = JSON.parse(host.fetchStart(JSON.stringify(opts)));
+      if (!started.jobId) throw new Error(started.error || "request start failed");
+      const job = started.jobId;
+      run.jobs.add(job);
+      return host.awaitJob(job, (value) => {
+        run.jobs.delete(job);
+        if (run.cancelled) return { status: "cancelled", output: null };
+        try {
+          if (host.unixNowMs() >= run.deadline) return finish(input.runId, { status: "deadline_exceeded", output: null, error: "task deadline exceeded" });
+          if (value.error || !value.status || value.status < 200 || value.status >= 300) throw new Error(value.error || `endpoint HTTP ${value.status}`);
+          const { turn, tokens } = response(value.body || "");
+          run.tokens += tokens;
+          if (run.tokens > profile.budgets.tokens) throw new Error("task token budget exhausted");
+          history.turns.push(turn);
+          save(history);
+          if (turn.toolCalls?.length) return calls([...turn.toolCalls]);
+          let output = turn.content;
+          try {
+            output = JSON.parse(turn.content);
+          } catch {
+          }
+          if (JSON.stringify(output).length > 6e4) throw new Error("task output exceeds limit");
+          return finish(input.runId, { status: "done", output });
+        } catch (e) {
+          return fail(e);
+        }
+      });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+  return next();
 }
 
 // rotterdom/src/plugin.ts
 var plugin_default = {
+  runAgentTask,
+  abortAgentTask,
   openSession(ctx) {
     const config = ctx.config || {};
     if (ctx.mode === "watcher") throw new Error("watcher mode is unsupported");

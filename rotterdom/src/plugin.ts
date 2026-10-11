@@ -7,7 +7,10 @@ import { claim, complete, recover } from "./history";
 import { finishToolCalls, mergeToolParts } from "./toolwire";
 import { predefinedProfiles } from "./profiles";
 import { domiosCommand } from "./domios";
+import { runAgentTask, abortAgentTask } from "./agent";
 export default {
+  runAgentTask,
+  abortAgentTask,
   openSession(ctx: ChatBackendOpenSessionCtx) {
     const config = (ctx.config || {}) as { profile?: string; preset?: string; model?: string; systemPrompt?: string };
     if (ctx.mode === "watcher") throw new Error("watcher mode is unsupported");
