@@ -36,7 +36,7 @@ test("marketplace metadata, icon and model catalogue", () => {
   assert.equal(manifest.version, channel.version);
   assert.equal(channel.path, "aider");
   assert.equal(channel.minCodeterm, manifest.minCodeterm);
-  assert.equal(manifest.minCodeterm, "1.14.0");
+  assert.equal(manifest.minCodeterm, "1.14.2");
   assert.equal(manifest.icon, "icon.svg");
   assert.ok(readFileSync(join(__dirname, manifest.icon), "utf8").includes("<svg"));
   assert.deepEqual(manifest.models, []);
@@ -533,6 +533,16 @@ test("independent sessions and rereads do not share state", () => {
 test("unreadable prior context returns no misleading rows", () => {
   assert.deepEqual(plain(load().parseSessionDelta("#### code\n", {session_key: "missing", from_offset: 200})), {messages: []});
 });
+test("plain input refuses bracketed paste and retains tagged multiline delivery", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json")));
+  assert.deepEqual(manifest.spawn.paste, {supportsBracketedPaste: false});
+  const plugin = configured([mimoEndpoint]);
+  const command = plugin.buildLaunchCommand({cwd: "/fixture", model: "openai/mimo-v2.6-pro", tabId: "fixture"});
+  assert.ok(command.includes("--no-fancy-input"));
+  assert.equal(plugin.chatPreprocess({provider: "aider", text: "opaque"}), null);
+  assert.equal(plugin.chatPreprocess({provider: "aider", text: "one\ntwo"}).text, "{domios\none\ntwo\ndomios}");
+});
+
 test("multiline delivery uses a collision-free tagged block", () => {
   assert.equal(load().chatPreprocess({provider: "aider", text: "first\nsecond"}).text, "{domios\nfirst\nsecond\ndomios}");
   assert.equal(load().chatPreprocess({provider: "aider", text: "{domios}\nsecond"}).text, "{domios1\n{domios}\nsecond\ndomios1}");

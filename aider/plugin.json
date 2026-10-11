@@ -1,7 +1,7 @@
 {
   "id": "aider",
-  "version": "0.1.0",
-  "minCodeterm": "1.14.0",
+  "version": "0.1.1",
+  "minCodeterm": "1.14.2",
   "hostApi": 2,
   "displayName": "Aider",
   "binaryName": "aider",
@@ -18,6 +18,7 @@
     }
   },
   "spawn": {
+    "paste": { "supportsBracketedPaste": false },
     "readinessStrategy": {
       "kind": "poll_shell_prompt",
       "timeoutSecs": 60
