@@ -390,7 +390,7 @@ function session(id) {
 function open(id, profile, endpoint, resume = false) {
   if (sessions.has(id)) throw new Error("session already open");
   const old = resume ? load(id) : null;
-  if (resume && !old) throw new Error("persisted session not found");
+  if (resume === true && !old) throw new Error("persisted session not found");
   const history = old || { version: 1, id, profile, turns: [], ledger: {}, run: 0 };
   if (old && (old.profile.id !== profile.id || old.profile.root !== profile.root)) throw new Error("resume profile or root changed");
   history.profile = profile;
@@ -525,6 +525,16 @@ function close(id) {
   if (!s.done) stop(s, "Turn cancelled; uncertain calls will not replay.");
   sessions.delete(id);
 }
+function info(id) {
+  return { model: session(id).history.profile.model };
+}
+function setModel(id, model) {
+  const s = session(id);
+  if (!s.done) throw new Error("session is busy");
+  if (!s.endpoint.models.includes(model)) throw new Error("model is not configured on this endpoint");
+  s.history.profile = { ...s.history.profile, model };
+  save(s.history);
+}
 function historyTurns(id) {
   return transcriptTurns(session(id).rows, () => false);
 }
@@ -563,6 +573,29 @@ function resolve(id, model, systemPrompt) {
 
 // rotterdom/src/plugin.ts
 var plugin_default = {
+  openSession(ctx) {
+    const config = ctx.config || {};
+    if (ctx.mode === "watcher") throw new Error("watcher mode is unsupported");
+    const selected = resolve(
+      config.profile || ctx.preset || config.preset,
+      ctx.model || config.model,
+      ctx.systemPrompt === void 0 ? config.systemPrompt : ctx.systemPrompt
+    );
+    return { sessionId: open(ctx.tabId, selected.profile, selected.endpoint, "auto") };
+  },
+  sendMessage: send,
+  pump,
+  poll,
+  closeSession: close,
+  sessionInfo: info,
+  setModel,
+  listModels() {
+    const s = settings();
+    return [...new Set(s.endpoints.flatMap((e) => e.models))].map((id) => ({ id, displayName: id }));
+  },
+  listPresets() {
+    return settings().profiles.map((p) => ({ id: p.id, name: p.name }));
+  },
   __test: { permitted, offeredTools, relativePath, inside, edited, globPattern, request, response, claim, complete, recover, finishToolCalls, mergeToolParts, historyTurns },
   profileOpen(id, profile, resume = false) {
     const selected = resolve(profile);

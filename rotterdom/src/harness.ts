@@ -32,10 +32,10 @@ function session(id: string): Session {
   if (!s) throw new Error("session is not open");
   return s;
 }
-export function open(id: string, profile: Profile, endpoint: Endpoint, resume = false): string {
+export function open(id: string, profile: Profile, endpoint: Endpoint, resume: boolean | "auto" = false): string {
   if (sessions.has(id)) throw new Error("session already open");
   const old = resume ? load(id) : null;
-  if (resume && !old) throw new Error("persisted session not found");
+  if (resume === true && !old) throw new Error("persisted session not found");
   const history: History = old || { version: 1, id, profile, turns: [], ledger: {}, run: 0 };
   if (old && (old.profile.id !== profile.id || old.profile.root !== profile.root)) throw new Error("resume profile or root changed");
   history.profile = profile;
@@ -159,4 +159,11 @@ export function close(id: string): void {
   sessions.delete(id);
 }
 export function info(id: string) { return { model: session(id).history.profile.model }; }
+export function setModel(id: string, model: string): void {
+  const s = session(id);
+  if (!s.done) throw new Error("session is busy");
+  if (!s.endpoint.models.includes(model)) throw new Error("model is not configured on this endpoint");
+  s.history.profile = { ...s.history.profile, model };
+  save(s.history);
+}
 export function historyTurns(id: string) { return transcriptTurns(session(id).rows, () => false); }

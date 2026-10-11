@@ -15,3 +15,7 @@ History is saved atomically under the running instance's `rotterdom/session-<id>
 Host filesystem and subprocess grants remain the outer ceiling. Production confined installations currently have no project write grant; a denied file operation reports failure. DEV allows these host operations. Search caps entries, depth, file size and returned matches; file read/write limits are 128 KiB. Shell timeout is at most 120 seconds and also bounded by the remaining deadline.
 
 The native wire, tool specification, transcript and instance CLI helpers derive from the retired LM Studio router at cc011d8. Endpoint request construction retains its OpenAI wire approach, with profile policy and budgets replacing the original unrestricted tool set.
+
+## Domios chat
+
+Open with `codeterm tab new --chat-backend rotterdom --config '{"profile":"coding"}'`. The provider picker exposes configured models and profiles as presets. Routed sends use the native loop and poll the resulting Chat UI transcript. Busy sessions refuse overlapping turns and model switches. Session ids equal tab ids; reopening the same tab recovers the saved history, without replaying pending calls. `systemPrompt` in session config overrides the profile verbatim, including an empty string. Model changes retain the profile policy and require a model configured for its endpoint.

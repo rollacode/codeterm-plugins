@@ -8,7 +8,13 @@
   "readme": "README.md",
   "icon": "icon.svg",
   "entry": "plugin.js",
-  "capabilities": {},
+  "capabilities": {
+    "chatBackend": {
+      "spawnable": true,
+      "sessionConfig": true,
+      "contextOwner": "plugin"
+    }
+  },
   "permissions": {
     "network": {
       "allow": [
@@ -27,5 +33,8 @@
     },
     "secrets": true
   },
-  "configHelp": "Configure endpoints and profiles. Each profile selects an endpoint, model, exact systemPrompt, absolute root, sampling params, budgets, allow and deny tools. Host grants remain the ceiling. Arbitrary shell is disabled for readOnly profiles; shell permission also permits filesystem writes. Remote endpoints require exact-host grants."
+  "configHelp": "Configure endpoints and profiles. Each profile selects an endpoint, model, exact systemPrompt, absolute root, sampling params, budgets, allow and deny tools. Host grants remain the ceiling. Arbitrary shell is disabled for readOnly profiles; shell permission also permits filesystem writes. Remote endpoints require exact-host grants.",
+  "modelCatalogue": {
+    "authority": "free_form"
+  }
 }

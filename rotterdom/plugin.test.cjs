@@ -80,3 +80,14 @@ test('deadline cancels before tool execution',()=>{
  const p=f.plugin;p.profileOpen('deadline','coding');p.profileSend('deadline','write');f.advance();p.profilePump('deadline');
  assert.equal(f.files.has('/project/a.txt'),false);assert.equal(p.profilePoll('deadline').done,true);
 });
+test('chat_backend preserves session config, cursor, model and recovered history',()=>{
+ const f=fixture([reply('answer')]);f.config.endpoints[0].models.push('other');
+ const p=f.plugin;p.openSession({tabId:'chat',config:{profile:'coding',systemPrompt:''}});p.sendMessage('chat','hello');
+ assert.throws(()=>p.sendMessage('chat','second'),/busy/);p.pump('chat');
+ assert.equal(f.requests[0].messages[0].content,'');
+ const first=p.poll('chat');assert.equal(first.done,true);assert.equal(p.poll('chat',first.cursor).messages.length,0);
+ p.setModel('chat','other');assert.equal(p.sessionInfo('chat').model,'other');assert.throws(()=>p.setModel('chat','unknown'),/configured/);
+ p.closeSession('chat');p.openSession({tabId:'chat',config:{profile:'coding'}});
+ assert.equal(p.poll('chat').messages.at(-1).content,'answer');
+ assert.equal(p.listPresets()[0].id,'coding');assert.equal(p.listModels().length,2);
+});
