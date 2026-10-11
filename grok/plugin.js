@@ -24,7 +24,42 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
-// ../codeterm/packages/plugin-sdk/src/fileDiffs.ts
+// grok/src/modelCatalogue.ts
+function parseGrokModels(stdout) {
+  const lines = stdout.replace(/\x1b\[[0-9;]*m/g, "").split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim() === "Available models:");
+  if (start < 0) return null;
+  const ids = /* @__PURE__ */ new Set();
+  const models = [];
+  for (const line of lines.slice(start + 1)) {
+    if (!line.trim()) continue;
+    const match = /^\s*[-*]\s+([a-z0-9][a-z0-9._-]*)(?:\s+\(default\))?\s*$/i.exec(line);
+    if (!match) return null;
+    if (!ids.has(match[1])) {
+      ids.add(match[1]);
+      models.push({ id: match[1], displayName: match[1], group: "xAI" });
+    }
+  }
+  return models.length ? models : null;
+}
+
+// grok/src/directoryTrust.ts
+function grokDirectoryTrustPrompt(screen) {
+  const lines = screen.split(/\r?\n/).map((line) => line.trim().replace(/^[│┃]\s*|\s*[│┃]$/g, ""));
+  const index = lines.findIndex((line) => line === "Do you trust the contents of this directory?");
+  if (index < 0) return null;
+  const tail = lines.slice(index + 1);
+  const yes = tail.filter((line) => /^(?:[>❯]\s*)?Yes, proceed\s+y$/.test(line));
+  const no = tail.filter((line) => /^(?:[>❯]\s*)?No, quit\s+n$/.test(line));
+  if (yes.length !== 1 || no.length !== 1) return null;
+  return { question: lines[index], options: [["Yes, proceed", "y"], ["No, quit", "n"]] };
+}
+function grokTrustPromptResponse(index, screen) {
+  if (!grokDirectoryTrustPrompt(screen)) return [];
+  return index === 0 ? ["eQ=="] : index === 1 ? ["bg=="] : [];
+}
+
+// ../../codeterm-worktrees/pl-fni7jw-task-ahav3k-791f5499/packages/plugin-sdk/src/fileDiffs.ts
 function textLines(text) {
   return text ? text.replace(/\n$/, "").split("\n") : [];
 }
@@ -335,22 +370,7 @@ function discoverFromCli() {
     return null;
   }
   if (!result || result.code !== 0 || typeof result.stdout !== "string") return null;
-  const lines = result.stdout.split("\n");
-  const models = [];
-  for (let i = 0; i < lines.length; i++) {
-    const m = /^\s*[* -]\s+([a-z0-9][a-z0-9._-]*)\b/i.exec(lines[i]);
-    if (!m) continue;
-    models.push({ id: m[1], displayName: m[1], group: "xAI" });
-  }
-  return models.length ? models : null;
-}
-function manifestModels() {
-  try {
-    const m = JSON.parse(host.manifestJson() || "null");
-    return Array.isArray(m && m.models) ? m.models : [];
-  } catch (_) {
-    return [];
-  }
+  return parseGrokModels(result.stdout);
 }
 function sessionUpdates(cwd, sessionId) {
   const dir = sessionDir(cwd, sessionId);
@@ -422,7 +442,24 @@ var plugin = {
     return resumeCommand(params);
   },
   discoverModels() {
-    return discoverFromCache() || discoverFromCli() || manifestModels();
+    try {
+      const live = discoverFromCli();
+      if (live) {
+        const cached = discoverFromCache() ?? [];
+        return live.map((model) => cached.find((entry) => entry.id === model.id) ?? model);
+      }
+    } catch {
+    }
+    return null;
+  },
+  parseDirectoryTrustPrompt: grokDirectoryTrustPrompt,
+  parsePrompt: grokDirectoryTrustPrompt,
+  buildPromptResponse: grokTrustPromptResponse,
+  directoryTrustPromptResponse(screen) {
+    return grokDirectoryTrustPrompt(screen) ? grokTrustPromptResponse(0, screen) : null;
+  },
+  classifyTabState(snapshot) {
+    return grokDirectoryTrustPrompt(snapshot.screenText) ? { state: "clarifying_question", confidence: 1 } : null;
   },
   sessionExists(cwd, sessionId) {
     return sessionExistsAt(cwd, sessionId);

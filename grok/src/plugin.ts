@@ -1,3 +1,5 @@
+import { parseGrokModels } from "./modelCatalogue";
+import { grokDirectoryTrustPrompt, grokTrustPromptResponse } from "./directoryTrust";
 import type {
   LaunchParams,
   LaunchSessionDetection,
@@ -23,10 +25,6 @@ const BYPASS_PERMISSIONS = ["--permission-mode", "bypassPermissions"];
 const GROK_AUTH_CREDENTIAL = "grokAuth";
 const GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 let cachedGrokClientVersion: string | null | undefined;
-
-interface GrokManifest {
-  models?: ModelInfo[];
-}
 
 interface GrokSummary {
   info?: { id?: string; cwd?: string };
@@ -323,23 +321,7 @@ function discoverFromCli(): ModelInfo[] | null {
   let result: { code?: number; stdout?: string } | null = null;
   try { result = JSON.parse(String(raw || "null")); } catch (_) { return null; }
   if (!result || result.code !== 0 || typeof result.stdout !== "string") return null;
-  const lines = result.stdout.split("\n");
-  const models: ModelInfo[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const m = /^\s*[* -]\s+([a-z0-9][a-z0-9._-]*)\b/i.exec(lines[i]);
-    if (!m) continue;
-    models.push({ id: m[1], displayName: m[1], group: "xAI" });
-  }
-  return models.length ? models : null;
-}
-
-function manifestModels(): ModelInfo[] {
-  try {
-    const m = JSON.parse(host.manifestJson() || "null") as GrokManifest | null;
-    return Array.isArray(m && m.models) ? m!.models! : [];
-  } catch (_) {
-    return [];
-  }
+  return parseGrokModels(result.stdout);
 }
 
 
@@ -424,8 +406,28 @@ const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: 
     return resumeCommand(params);
   },
 
-  discoverModels(): ModelInfo[] {
-    return discoverFromCache() || discoverFromCli() || manifestModels();
+  discoverModels(): ModelInfo[] | null {
+    try {
+      const live = discoverFromCli();
+      if (live) {
+        const cached = discoverFromCache() ?? [];
+        return live.map(model => cached.find(entry => entry.id === model.id) ?? model);
+      }
+    } catch { }
+    return null;
+  },
+
+  parseDirectoryTrustPrompt: grokDirectoryTrustPrompt,
+  parsePrompt: grokDirectoryTrustPrompt,
+  buildPromptResponse: grokTrustPromptResponse,
+
+  directoryTrustPromptResponse(screen: string): string[] | null {
+    return grokDirectoryTrustPrompt(screen) ? grokTrustPromptResponse(0, screen) : null;
+  },
+
+  classifyTabState(snapshot) {
+    return grokDirectoryTrustPrompt(snapshot.screenText)
+      ? { state: "clarifying_question", confidence: 1 } : null;
   },
 
   sessionExists(cwd: string, sessionId: string): boolean {
