@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "name": "codeterm-plugins",
   "displayName": "CodeTerm Plugins",
-  "description": "Andrey's CodeTerm capability plugins — Git, Transcriber, Bitwarden, LM Studio, Chat Preprocessor, Pebble, Grok, Aider, Telegram Client, Teams Client.",
+  "description": "Andrey's CodeTerm capability plugins \u2014 Git, Transcriber, Bitwarden, LM Studio, Chat Preprocessor, Pebble, Grok, Aider, Telegram Client, Teams Client.",
   "plugins": [
     {
       "id": "lmstudio",
@@ -62,6 +62,12 @@
       "id": "aider",
       "path": "aider",
       "version": "0.1.1",
+      "minCodeterm": "1.14.2"
+    },
+    {
+      "id": "rotterdom",
+      "path": "rotterdom",
+      "version": "0.1.0",
       "minCodeterm": "1.14.2"
     }
   ]
