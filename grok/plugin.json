@@ -93,9 +93,9 @@
     "windows": "irm https://x.ai/cli/install.ps1 | iex"
   },
   "updater": {
-    "macos": "grok update",
-    "linux": "grok update",
-    "windows": "grok update"
+    "macos": "grok update --version {version}",
+    "linux": "grok update --version {version}",
+    "windows": "grok update --version {version}"
   },
   "commands": {
     "stopKey": "\u0003",
@@ -140,7 +140,8 @@
         "x.ai",
         "cli-chat-proxy.grok.com",
         "auth.x.ai",
-        "accounts.x.ai"
+        "accounts.x.ai",
+        "registry.npmjs.org"
       ]
     },
     "subprocess": {
@@ -158,5 +159,18 @@
   "directoryTrustRecord": {
     "format": "toml_folders",
     "path": "~/.grok/trusted_folders.toml"
+  },
+  "cliCompatibility": {
+    "supported": [
+      ">=1.0.50, <1.1.0"
+    ],
+    "breaking": [
+      {
+        "range": ">=1.1.0",
+        "reasons": [
+          "The provider is verified against the Grok 1.0 CLI contract."
+        ]
+      }
+    ]
   }
 }

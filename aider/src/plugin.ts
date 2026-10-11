@@ -1,3 +1,4 @@
+import { checkAiderUpdate } from "./update";
 import type {
   LaunchParams,
   ModelInfo,
@@ -194,6 +195,7 @@ function promptSafeChoice(prompt: ParsedPrompt | null | undefined, screen: strin
 }
 
 const plugin: PluginModule = {
+  checkForUpdate: checkAiderUpdate,
   starterPromptText(_prompt: "no_starter" | "assigned_task" | "idle_wakeup" | "team_bootstrap" | "startup_handshake"): string | undefined {
     // No native initial turn: core delivers the exact prepared payload to the
     // interactive composer after readiness, including any required starter.

@@ -24,6 +24,88 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
+// provider-shared/updateCheck.ts
+function record(raw) {
+  if (typeof raw !== "string") return null;
+  try {
+    const value = JSON.parse(raw);
+    return value !== null && typeof value === "object" ? value : null;
+  } catch {
+    return null;
+  }
+}
+function versionParts(version) {
+  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) return null;
+  const parts = version.split(".").map(Number);
+  return parts.every(Number.isSafeInteger) ? parts : null;
+}
+function compare(left, right) {
+  const a = versionParts(left), b = versionParts(right);
+  if (!a || !b) return null;
+  for (let index = 0; index < 3; index++) {
+    if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
+  }
+  return 0;
+}
+function matchesRange(version, range) {
+  return range.split(",").every((clause) => {
+    const match = clause.trim().match(/^(>=|<=|>|<|=)?\s*(\d+\.\d+\.\d+)$/);
+    if (!match) return false;
+    const order = compare(version, match[2]);
+    if (order === null) return false;
+    switch (match[1] ?? "=") {
+      case ">=":
+        return order >= 0;
+      case "<=":
+        return order <= 0;
+      case ">":
+        return order > 0;
+      case "<":
+        return order < 0;
+      default:
+        return order === 0;
+    }
+  });
+}
+function newestSupportedVersion(versions, compatibility) {
+  return versions.reduce((best, version) => {
+    if (!versionParts(version) || !compatibility.supported.some((range) => matchesRange(version, range)) || compatibility.breaking?.some((rule) => matchesRange(version, rule.range))) return best;
+    return best === null || compare(version, best) === 1 ? version : best;
+  }, null);
+}
+function checkProviderUpdate(host2, binary, metadataUrl, compatibility) {
+  const installed = record(host2.exec(JSON.stringify({ bin: binary, args: ["--version"], timeoutMs: 5e3 })));
+  if (installed?.code !== 0 || typeof installed.stdout !== "string") return null;
+  const currentVersion = installed.stdout.match(/(?:^|\s)(\d+\.\d+\.\d+)(?=\s|$)/)?.[1];
+  if (!currentVersion || !versionParts(currentVersion)) return null;
+  const response = record(host2.fetch(JSON.stringify({
+    url: metadataUrl,
+    method: "GET",
+    timeoutMs: 6e3,
+    headers: { Accept: "application/vnd.npm.install-v1+json" }
+  })));
+  if (response?.status !== 200) return null;
+  const metadata = record(response.body);
+  let latestVersion = typeof metadata?.version === "string" ? metadata.version : null;
+  if (compatibility) {
+    if (!metadata?.versions || typeof metadata.versions !== "object") return null;
+    latestVersion = newestSupportedVersion(Object.keys(metadata.versions), compatibility);
+  }
+  return latestVersion && compare(latestVersion, currentVersion) === 1 ? { currentVersion, latestVersion } : null;
+}
+
+// grok/src/update.ts
+function checkGrokUpdate() {
+  let manifest;
+  try {
+    manifest = JSON.parse(host.manifestJson() ?? "null");
+  } catch {
+    return null;
+  }
+  if (!manifest?.cliCompatibility?.supported?.length) return null;
+  return checkProviderUpdate(host, "grok", "https://registry.npmjs.org/@xai-official/grok", manifest.cliCompatibility);
+}
+
 // grok/src/modelCatalogue.ts
 function parseGrokModels(stdout) {
   const lines = stdout.replace(/\x1b\[[0-9;]*m/g, "").split(/\r?\n/);
@@ -59,7 +141,7 @@ function grokTrustPromptResponse(index, screen) {
   return index === 0 ? ["eQ=="] : index === 1 ? ["bg=="] : [];
 }
 
-// ../../codeterm-worktrees/pl-fni7jw-task-ahav3k-791f5499/packages/plugin-sdk/src/fileDiffs.ts
+// ../../codeterm/packages/plugin-sdk/src/fileDiffs.ts
 function textLines(text) {
   return text ? text.replace(/\n$/, "").split("\n") : [];
 }
@@ -390,6 +472,7 @@ function eventId(row) {
   return params?._meta?.eventId ?? null;
 }
 var plugin = {
+  checkForUpdate: checkGrokUpdate,
   starterPromptText(prompt) {
     if (prompt === "no_starter" || prompt === "team_bootstrap") return void 0;
     if (prompt === "idle_wakeup") {

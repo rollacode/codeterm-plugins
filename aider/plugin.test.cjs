@@ -46,7 +46,7 @@ test("marketplace metadata, icon and model catalogue", () => {
   assert.equal(manifest.spawn.inputFallbackMs, 5000);
   assert.equal(manifest.spawn.onboardingAutoAnswer, "always");
   assert.equal(manifest.spawn.hasHooks, false);
-  assert.deepEqual(manifest.permissions.subprocess.allow, ["git"]);
+  assert.deepEqual(manifest.permissions.subprocess.allow, ["git", "aider"]);
 });
 test("settings schema exposes config and endpoint list", () => {
   const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json")));
@@ -925,7 +925,7 @@ test("manifest declares tool-less relay and installer/updater preserve adapter p
   assert.equal(manifest.capabilities.toolLess, true);
   assert.equal(manifest.capabilities.replyRelay, true);
   for (const platform of ["macos", "linux", "windows"]) {
-    assert.equal(manifest.installer[platform], manifest.updater[platform]);
+    assert.equal(manifest.installer[platform], manifest.updater[platform].replaceAll("{version}", "0.86.2"));
     assert.match(manifest.installer[platform], /uv tool install --force aider-chat==0\.86\.2/);
     assert.match(manifest.installer[platform], /pipx install --force aider-chat==0\.86\.2/);
     assert.doesNotMatch(manifest.updater[platform], /pipx upgrade|uv tool upgrade/);
@@ -1156,6 +1156,8 @@ test("recorded applied edits resolve their own commit into Changes diffs", () =>
   assert.deepEqual(diffs(unavailable.parseSessionDelta(history, context)), [], "unavailable commit never falls back to proposed SEARCH text");
   assert.deepEqual(diffs(p.parseSessionDelta(history.replace("680496f", "invalid"), context)), []);
 });
+
+require("../provider-shared/updateTests.cjs")(tests, load, __dirname);
 
 let failed = 0;
 for (const [name, run] of tests) {

@@ -1,3 +1,4 @@
+import { checkGrokUpdate } from "./update";
 import { parseGrokModels } from "./modelCatalogue";
 import { grokDirectoryTrustPrompt, grokTrustPromptResponse } from "./directoryTrust";
 import type {
@@ -343,6 +344,7 @@ function eventId(row: Record<string, unknown>): string | null {
 }
 
 const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: string): string | null } = {
+  checkForUpdate: checkGrokUpdate,
   starterPromptText(prompt) {
     if (prompt === "no_starter" || prompt === "team_bootstrap") return undefined;
     if (prompt === "idle_wakeup") {

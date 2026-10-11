@@ -731,6 +731,8 @@ tests.push(["directory trust prompt declares exact safe choice and live response
   }
 }]);
 
+require("../provider-shared/updateTests.cjs")(tests, over => load(hostFor({host: over})), __dirname);
+
 let failed = 0;
 for (const [name, run] of tests) {
   try {

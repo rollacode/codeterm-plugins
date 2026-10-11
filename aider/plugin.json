@@ -12,10 +12,16 @@
     "agentProvider": true,
     "toolLess": true,
     "replyRelay": true,
-    "contextAttach": { "editable": true, "readOnly": true }
+    "contextAttach": {
+      "editable": true,
+      "readOnly": true
+    }
   },
   "spawn": {
-    "paste": { "supportsBracketedPaste": false, "multiline": "tagged_block" },
+    "paste": {
+      "supportsBracketedPaste": false,
+      "multiline": "tagged_block"
+    },
     "readinessStrategy": {
       "kind": "poll_shell_prompt",
       "timeoutSecs": 60
@@ -25,7 +31,9 @@
       "timeoutSecs": 60
     },
     "composerCursorPosition": "prompt_line",
-    "turnEvidenceNormalization": { "dropLineBreaks": true },
+    "turnEvidenceNormalization": {
+      "dropLineBreaks": true
+    },
     "taskDelivery": "pty_input",
     "systemPromptDelivery": {
       "kind": "external"
@@ -56,9 +64,9 @@
     "windows": "if (Get-Command uv -ErrorAction SilentlyContinue) { uv tool install --force aider-chat==0.86.2 } else { pipx install --force aider-chat==0.86.2 }"
   },
   "updater": {
-    "macos": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat==0.86.2; else pipx install --force aider-chat==0.86.2; fi",
-    "linux": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat==0.86.2; else pipx install --force aider-chat==0.86.2; fi",
-    "windows": "if (Get-Command uv -ErrorAction SilentlyContinue) { uv tool install --force aider-chat==0.86.2 } else { pipx install --force aider-chat==0.86.2 }"
+    "macos": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat=={version}; else pipx install --force aider-chat=={version}; fi",
+    "linux": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat=={version}; else pipx install --force aider-chat=={version}; fi",
+    "windows": "if (Get-Command uv -ErrorAction SilentlyContinue) { uv tool install --force aider-chat=={version} } else { pipx install --force aider-chat=={version} }"
   },
   "commands": {
     "compact": "/clear",
@@ -82,11 +90,35 @@
   },
   "permissions": {
     "subprocess": {
-      "allow": ["git"]
+      "allow": [
+        "git",
+        "aider"
+      ]
     },
     "network": {
-      "allow": []
+      "allow": [
+        "pypi.org"
+      ]
     }
   },
-  "icon": "icon.svg"
+  "icon": "icon.svg",
+  "cliCompatibility": {
+    "supported": [
+      "=0.86.2"
+    ],
+    "breaking": [
+      {
+        "range": "<0.86.2",
+        "reasons": [
+          "The bundled adapter requires aider-chat 0.86.2."
+        ]
+      },
+      {
+        "range": ">0.86.2",
+        "reasons": [
+          "The bundled adapter requires aider-chat 0.86.2."
+        ]
+      }
+    ]
+  }
 }
