@@ -46,7 +46,7 @@ const { button, ...trigger } = manifest.capabilities.localRecordingTrigger;
 assert.equal(button.pressUsage, 0xe9);
 assert.deepEqual(trigger,
   { vendorId: 0x3547, productId: 8, usagePage: 12, usage: 1 });
-assert.deepEqual(Object.keys(plugin), ["statusBubble", "viewCall"]);
+assert.deepEqual(Object.keys(plugin), ["renderGlance", "statusBubble", "viewCall"]);
 status.granted = true; status.enabled = true; status.available = true;
 assert.equal(plugin.statusBubble({tabId:"selected-tab"}).label, "LARK 97%");
 assert.equal(plugin.statusBubble({tabId:"foreign-tab"}), null);
@@ -60,3 +60,9 @@ for (const [index, value] of [[0, 0], [3, 0x11], [4, 0x40], [5, 1], [6, 3], [7, 
 batteryReport[10] = 0;
 assert.equal(plugin.statusBubble({tabId:"selected-tab"}).tone, "warn");
 console.log("lark plugin: capability, confinement, observed battery and invalid-frame fixtures passed");
+
+status.granted = true; status.enabled = true; status.available = true;
+batteryReport[10] = 97;
+assert.equal(plugin.renderGlance().nodes.find(node => node.key === "Microphone 2").value, "97%");
+batteryReport[10] = 10;
+assert.equal(plugin.statusBubble({tabId:"selected-tab"}).tone, "warn");

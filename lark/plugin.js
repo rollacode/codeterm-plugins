@@ -35,6 +35,15 @@ function batteryFromStatus(report) {
 
 // lark/src/plugin.ts
 var plugin = {
+  renderGlance() {
+    const status = host.localRecording.status();
+    const ready = status && !("error" in status) && status.granted && status.enabled && status.available;
+    const nodes = [{ kind: "keyVal", key: "Recording button", value: ready ? "Ready" : "Unavailable", style: { tone: ready ? "ok" : "muted" } }];
+    const batteries = ready ? batteryFromStatus(host.localRecording.statusReport()) : [];
+    if (!batteries.length) nodes.push({ kind: "keyVal", key: "Battery", value: "Not reported", style: { tone: "muted" } });
+    for (const battery of batteries) nodes.push({ kind: "keyVal", key: `Microphone ${battery.slot}`, value: battery.connected ? `${battery.percent}%` : "Disconnected", style: { tone: !battery.connected ? "muted" : battery.percent <= 15 ? "warn" : "ok" } });
+    return { title: "LARK M2", nodes };
+  },
   statusBubble(ctx) {
     const target = host.receiverTarget.get();
     const status = host.localRecording.status();
