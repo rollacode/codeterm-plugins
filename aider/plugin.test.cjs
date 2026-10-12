@@ -36,7 +36,7 @@ test("marketplace metadata, icon and model catalogue", () => {
   assert.equal(manifest.version, channel.version);
   assert.equal(channel.path, "aider");
   assert.equal(channel.minCodeterm, manifest.minCodeterm);
-  assert.equal(manifest.minCodeterm, "1.14.0");
+  assert.equal(manifest.minCodeterm, "1.14.2");
   assert.equal(manifest.icon, "icon.svg");
   assert.ok(readFileSync(join(__dirname, manifest.icon), "utf8").includes("<svg"));
   assert.deepEqual(manifest.models, []);
@@ -46,7 +46,7 @@ test("marketplace metadata, icon and model catalogue", () => {
   assert.equal(manifest.spawn.inputFallbackMs, 5000);
   assert.equal(manifest.spawn.onboardingAutoAnswer, "always");
   assert.equal(manifest.spawn.hasHooks, false);
-  assert.deepEqual(manifest.permissions.subprocess.allow, ["git"]);
+  assert.deepEqual(manifest.permissions.subprocess.allow, ["git", "aider"]);
 });
 test("settings schema exposes config and endpoint list", () => {
   const schema = JSON.parse(readFileSync(join(__dirname, "settings.schema.json")));
@@ -533,9 +533,14 @@ test("independent sessions and rereads do not share state", () => {
 test("unreadable prior context returns no misleading rows", () => {
   assert.deepEqual(plain(load().parseSessionDelta("#### code\n", {session_key: "missing", from_offset: 200})), {messages: []});
 });
-test("multiline delivery uses a collision-free tagged block", () => {
-  assert.equal(load().chatPreprocess({provider: "aider", text: "first\nsecond"}).text, "{domios\nfirst\nsecond\ndomios}");
-  assert.equal(load().chatPreprocess({provider: "aider", text: "{domios}\nsecond"}).text, "{domios1\n{domios}\nsecond\ndomios1}");
+test("plain input declares tagged multiline delivery at the shared PTY seam", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json")));
+  assert.deepEqual(manifest.spawn.paste, {supportsBracketedPaste: false, multiline: "tagged_block"});
+  assert.equal(manifest.capabilities.chatPreprocessor, undefined);
+  const plugin = configured([mimoEndpoint]);
+  const command = plugin.buildLaunchCommand({cwd: "/fixture", model: "openai/mimo-v2.6-pro", tabId: "fixture"});
+  assert.ok(command.includes("--no-fancy-input"));
+  assert.equal(plugin.chatPreprocess, undefined);
 });
 
 test("every complete-line split converges to the same clean transcript", () => {
@@ -920,7 +925,7 @@ test("manifest declares tool-less relay and installer/updater preserve adapter p
   assert.equal(manifest.capabilities.toolLess, true);
   assert.equal(manifest.capabilities.replyRelay, true);
   for (const platform of ["macos", "linux", "windows"]) {
-    assert.equal(manifest.installer[platform], manifest.updater[platform]);
+    assert.equal(manifest.installer[platform], manifest.updater[platform].replaceAll("{version}", "0.86.2"));
     assert.match(manifest.installer[platform], /uv tool install --force aider-chat==0\.86\.2/);
     assert.match(manifest.installer[platform], /pipx install --force aider-chat==0\.86\.2/);
     assert.doesNotMatch(manifest.updater[platform], /pipx upgrade|uv tool upgrade/);
@@ -1151,6 +1156,8 @@ test("recorded applied edits resolve their own commit into Changes diffs", () =>
   assert.deepEqual(diffs(unavailable.parseSessionDelta(history, context)), [], "unavailable commit never falls back to proposed SEARCH text");
   assert.deepEqual(diffs(p.parseSessionDelta(history.replace("680496f", "invalid"), context)), []);
 });
+
+require("../provider-shared/updateTests.cjs")(tests, load, __dirname);
 
 let failed = 0;
 for (const [name, run] of tests) {

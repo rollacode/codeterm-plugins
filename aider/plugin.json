@@ -1,9 +1,10 @@
 {
   "id": "aider",
-  "version": "0.1.0",
-  "minCodeterm": "1.14.0",
+  "version": "0.1.1",
+  "minCodeterm": "1.14.2",
   "hostApi": 2,
   "displayName": "Aider",
+  "description": "The bundled adapter requires aider-chat 0.86.2.",
   "binaryName": "aider",
   "cliBinary": "aider",
   "entry": "plugin.js",
@@ -12,12 +13,16 @@
     "agentProvider": true,
     "toolLess": true,
     "replyRelay": true,
-    "contextAttach": { "editable": true, "readOnly": true },
-    "chatPreprocessor": {
-      "match": "text"
+    "contextAttach": {
+      "editable": true,
+      "readOnly": true
     }
   },
   "spawn": {
+    "paste": {
+      "supportsBracketedPaste": false,
+      "multiline": "tagged_block"
+    },
     "readinessStrategy": {
       "kind": "poll_shell_prompt",
       "timeoutSecs": 60
@@ -27,7 +32,9 @@
       "timeoutSecs": 60
     },
     "composerCursorPosition": "prompt_line",
-    "turnEvidenceNormalization": { "dropLineBreaks": true },
+    "turnEvidenceNormalization": {
+      "dropLineBreaks": true
+    },
     "taskDelivery": "pty_input",
     "systemPromptDelivery": {
       "kind": "external"
@@ -58,9 +65,9 @@
     "windows": "if (Get-Command uv -ErrorAction SilentlyContinue) { uv tool install --force aider-chat==0.86.2 } else { pipx install --force aider-chat==0.86.2 }"
   },
   "updater": {
-    "macos": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat==0.86.2; else pipx install --force aider-chat==0.86.2; fi",
-    "linux": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat==0.86.2; else pipx install --force aider-chat==0.86.2; fi",
-    "windows": "if (Get-Command uv -ErrorAction SilentlyContinue) { uv tool install --force aider-chat==0.86.2 } else { pipx install --force aider-chat==0.86.2 }"
+    "macos": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat=={version}; else pipx install --force aider-chat=={version}; fi",
+    "linux": "if command -v uv >/dev/null 2>&1; then uv tool install --force aider-chat=={version}; else pipx install --force aider-chat=={version}; fi",
+    "windows": "if (Get-Command uv -ErrorAction SilentlyContinue) { uv tool install --force aider-chat=={version} } else { pipx install --force aider-chat=={version} }"
   },
   "commands": {
     "compact": "/clear",
@@ -84,11 +91,35 @@
   },
   "permissions": {
     "subprocess": {
-      "allow": ["git"]
+      "allow": [
+        "git",
+        "aider"
+      ]
     },
     "network": {
-      "allow": []
+      "allow": [
+        "pypi.org"
+      ]
     }
   },
-  "icon": "icon.svg"
+  "icon": "icon.svg",
+  "cliCompatibility": {
+    "supported": [
+      "=0.86.2"
+    ],
+    "breaking": [
+      {
+        "range": "<0.86.2",
+        "reasons": [
+          "version_not_declared"
+        ]
+      },
+      {
+        "range": ">0.86.2",
+        "reasons": [
+          "version_not_declared"
+        ]
+      }
+    ]
+  }
 }

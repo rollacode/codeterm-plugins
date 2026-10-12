@@ -1,0 +1,10 @@
+# Set root to the absolute project directory and model to an endpoint-owned id.
+root: ''
+model: ''
+defaultProfile: coding
+endpoints:
+  - id: local
+    baseUrl: http://127.0.0.1:1234/v1
+    models: []
+# Omit profiles to use Coding, Reader, Domios Inspector and Domios Operator.
+# Custom profiles replace the presets, including their exact systemPrompt.
