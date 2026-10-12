@@ -13,3 +13,7 @@ Windows button-to-recording/transcription proof is pending. macOS native source 
 Build: `node scripts/build-plugin.mjs lark`. Focused logic/privacy fixture: `node lark/plugin.test.cjs`. Do not edit generated `plugin.js` or split UI bundles. No release/installation is performed by the build.
 
 The monochrome icon uses the Hollyland emblem shown on the [official LARK M2 product page](https://www.hollyland.com/product/lark-m2), with currentColor for the host theme.
+
+The LARK plugin owns the fixed heartbeat query, response decoding, transmitter connection/battery interpretation and status bubble. The host provides only a bounded exchange for the immutable manifest-declared query on the exact selected receiver, gated by the persisted local-recording grant. It exposes no arbitrary device path or runtime output command. Unknown or unavailable status hides the percentage. Protocol references: https://github.com/soradev64/omarchy-lark-battery and https://github.com/blchinezu/larkctl.
+
+The transmitter button collection/interface, report schema, approved button usages and duplicate window are declared by this plugin. The host validates that declared HID pattern and selected device; it contains no LARK-specific IDs or button protocol values in the production Windows adapter. A different producer declares its own supported singleton-button pattern through the same capability.

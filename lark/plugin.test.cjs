@@ -5,12 +5,14 @@ const vm = require("node:vm");
 
 const calls = [];
 let granted = false;
+const batteryReport = [0x55, 0xbb, 0xdd, 0x10, 0x80, 0, 9, 0, 1, 0, 97, 0, 0, 0, 4, 0, ...Array(48).fill(0)];
 const status = { granted: false, enabled: false, devicesSelected: false, available: false };
 const sandbox = {
   module: { exports: {} },
   host: {
     localRecording: {
       status: () => status,
+      statusReport: () => batteryReport,
       setEnabled(enabled) {
         calls.push({ enabled });
         if (!granted) throw new Error("local_recording_not_granted");
@@ -40,7 +42,21 @@ assert.equal(plugin.viewCall("unknown").error, "unsupported_lark_action");
 assert.equal(calls.length, 4);
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "plugin.json"), "utf8"));
 assert.deepEqual(manifest.permissions, { local_recording: true });
-assert.deepEqual(manifest.capabilities.localRecordingTrigger,
+const { button, ...trigger } = manifest.capabilities.localRecordingTrigger;
+assert.equal(button.pressUsage, 0xe9);
+assert.deepEqual(trigger,
   { vendorId: 0x3547, productId: 8, usagePage: 12, usage: 1 });
-assert.deepEqual(Object.keys(plugin), ["viewCall"]);
-console.log("lark plugin: 6 capability and confinement fixtures passed");
+assert.deepEqual(Object.keys(plugin), ["statusBubble", "viewCall"]);
+status.granted = true; status.enabled = true; status.available = true;
+assert.equal(plugin.statusBubble({tabId:"selected-tab"}).label, "LARK 97%");
+assert.equal(plugin.statusBubble({tabId:"foreign-tab"}), null);
+assert.equal(plugin.viewCall("battery")[0].percent, null);
+assert.equal(plugin.viewCall("battery")[1].percent, 97);
+for (const [index, value] of [[0, 0], [3, 0x11], [4, 0x40], [5, 1], [6, 3], [7, 2], [9, 101], [10, 255]]) {
+  const previous = batteryReport[index]; batteryReport[index] = value;
+  assert.equal(plugin.statusBubble({tabId:"selected-tab"}), null);
+  batteryReport[index] = previous;
+}
+batteryReport[10] = 0;
+assert.equal(plugin.statusBubble({tabId:"selected-tab"}).tone, "warn");
+console.log("lark plugin: capability, confinement, observed battery and invalid-frame fixtures passed");
