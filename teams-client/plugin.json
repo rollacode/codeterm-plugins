@@ -1,13 +1,12 @@
 {
   "id": "teams-client",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minCodeterm": "1.12.3",
   "hostApi": 2,
   "displayName": "Teams Client",
   "description": "Sign in to Microsoft Teams as the Teams client (device code, no app registration), find chats by name, search message text, read bounded history, and send messages and files for the owner with an idempotent send ledger. Wraps the pinned exo-teams CLI.",
   "readme": "README.md",
-  "iconHint": "💬",
-  "iconColor": "#6264A7",
+  "icon": "icon.svg",
   "entry": "plugin.js",
   "capabilities": {
     "view": true,
@@ -30,6 +29,7 @@
         "sha256sum",
         "uname",
         "chmod",
+        "mkdir",
         "icacls.exe",
         "whoami.exe",
         "taskkill.exe",
