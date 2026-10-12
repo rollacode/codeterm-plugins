@@ -28,6 +28,20 @@ const sandbox = {
 };
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, "plugin.js"), "utf8"), sandbox);
 const plugin = sandbox.module.exports.default;
+const offered = { inputs: [{ inputId: "receiver", collectionId: "Col01" }],
+  microphones: [{ deviceId: "lark-mic", label: "Microphone (Wireless microphone)" },
+    { deviceId: "other-mic", label: "Laptop microphone" }] };
+assert.deepEqual(JSON.parse(JSON.stringify(plugin.viewCall("selectRecordingDevices", offered))),
+  { inputId: "receiver", collectionId: "Col01", microphoneId: "lark-mic" });
+for (const candidates of [null, {}, { ...offered, inputs: [] },
+  { ...offered, inputs: [...offered.inputs, { inputId: "second", collectionId: "Col01" }] },
+  { ...offered, inputs: [{ inputId: "receiver", collectionId: "Col02" }] },
+  { ...offered, microphones: [{ deviceId: "default", label: "Wireless microphone" }] },
+  { ...offered, microphones: [{ deviceId: "unknown", label: "" }] },
+  { ...offered, microphones: [...offered.microphones, { deviceId: "second", label: "Wireless microphone" }] },
+  { ...offered, microphones: [{ deviceId: "other", label: "Laptop microphone" }] }]) {
+  assert.equal(plugin.viewCall("selectRecordingDevices", candidates), null);
+}
 assert.deepEqual(calls, [], "loading the plugin acquires no recorder or permissions");
 assert.equal(plugin.viewCall("status"), status);
 assert.throws(() => plugin.viewCall("enable"), /local_recording_not_granted/);
