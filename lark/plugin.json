@@ -1,6 +1,6 @@
 {
   "id": "lark",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minCodeterm": "1.14.2",
   "hostApi": 2,
   "displayName": "LARK M2",
