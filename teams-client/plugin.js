@@ -569,6 +569,15 @@ function protectStorage(p) {
   return result;
 }
 function applyStorageProtection(p) {
+  if (!host.fs.makeDirs(p.root)) {
+    const created = host.path.isWindows ? runProcess(
+      toolsFor("win32", windowsRoot()).powershell,
+      ["-NoProfile", "-NonInteractive", "-Command", "[IO.Directory]::CreateDirectory($env:CT_PLUGIN_ROOT) | Out-Null"],
+      { CT_PLUGIN_ROOT: nativePath(p.root) },
+      TIMEOUTS.probe
+    ) : runProcess("mkdir", ["-p", "-m", "700", nativePath(p.root)], {}, TIMEOUTS.probe);
+    if (!created.ok) return { error: "storage-protection-failed", message: "Could not create the plugin-owned private directory. Nothing was started." };
+  }
   for (const dir of [p.root, p.home, p.tokenDir, p.runtime, p.noPath]) {
     try {
       if (!host.fs.makeDirs(dir)) return { error: "storage-protection-failed", message: "Could not create the plugin-owned private directory." };
