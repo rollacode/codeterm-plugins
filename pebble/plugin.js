@@ -145,6 +145,13 @@ var plugin = {
       text: formatMessage(payload)
     };
   },
+  renderGlance() {
+    const target = callReceiverTarget("get");
+    return { title: "Pebble", nodes: [
+      { kind: "keyVal", key: "Recipient", value: target.status === "bound" ? "Attached to this tab" : target.status === "general" ? "General Agent" : "Unavailable" },
+      { kind: "keyVal", key: "Battery", value: "Not reported by CoreApp", style: { tone: "muted" } }
+    ] };
+  },
   viewCall
 };
 var plugin_default = plugin;

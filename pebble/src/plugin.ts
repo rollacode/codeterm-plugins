@@ -162,7 +162,7 @@ function viewCall(method: string): unknown {
   return { error: `unknown view method: ${method}` };
 }
 
-const plugin: WebhookReceiver & Pick<PluginModule, "viewCall"> = {
+const plugin: WebhookReceiver & Pick<PluginModule, "viewCall" | "renderGlance"> = {
   webhookReceive(ctx: WebhookReceiveContext): WebhookDelivery | null {
     if (!ctx || typeof ctx !== "object" || typeof ctx.receivedAt !== "string") {
       throw new Error("invalid webhook context: receivedAt must be a string");
@@ -172,6 +172,13 @@ const plugin: WebhookReceiver & Pick<PluginModule, "viewCall"> = {
     return {
       text: formatMessage(payload),
     };
+  },
+  renderGlance() {
+    const target = callReceiverTarget("get");
+    return { title: "Pebble", nodes: [
+      { kind: "keyVal", key: "Recipient", value: target.status === "bound" ? "Attached to this tab" : target.status === "general" ? "General Agent" : "Unavailable" },
+      { kind: "keyVal", key: "Battery", value: "Not reported by CoreApp", style: { tone: "muted" } },
+    ] };
   },
   viewCall,
 };
