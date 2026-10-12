@@ -1,4 +1,5 @@
 import { batteryFromStatus } from "./battery";
+import { selectRecordingDevices } from "./selection";
 import type { Host, PluginModule, ViewNode } from "@codeterm/plugin-sdk";
 
 declare const host: Host;
@@ -27,7 +28,8 @@ const plugin: Pick<PluginModule, "viewCall" | "statusBubble" | "renderGlance"> =
       action: "openPanel:view:lark",
     };
   },
-  viewCall(method) {
+  viewCall(method, args) {
+    if (method === "selectRecordingDevices") return selectRecordingDevices(args);
     if (method === "battery") return batteryFromStatus(host.localRecording.statusReport());
     if (method === "status") return host.localRecording.status();
     if (method === "enable") return host.localRecording.setEnabled(true);

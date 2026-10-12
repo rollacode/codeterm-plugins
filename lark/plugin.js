@@ -33,6 +33,24 @@ function batteryFromStatus(report) {
   return [0, 1].map((i) => ({ slot: i + 1, connected: report[7 + i] === 1, percent: report[7 + i] === 1 ? report[9 + i] : null }));
 }
 
+// lark/src/selection.ts
+function record(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function selectRecordingDevices(value) {
+  const request = record(value);
+  if (!request || !Array.isArray(request.inputs) || request.inputs.length !== 1 || !Array.isArray(request.microphones) || request.microphones.length > 64) return null;
+  const input = record(request.inputs[0]);
+  if (!input || typeof input.inputId !== "string" || !input.inputId || input.collectionId !== "Col01") return null;
+  const microphones = request.microphones.map(record).filter((microphone) => microphone && typeof microphone.deviceId === "string" && microphone.deviceId && microphone.deviceId !== "default" && microphone.deviceId !== "communications" && typeof microphone.label === "string" && /\bwireless microphone\b/i.test(microphone.label));
+  if (microphones.length !== 1) return null;
+  return {
+    inputId: input.inputId,
+    collectionId: input.collectionId,
+    microphoneId: microphones[0].deviceId
+  };
+}
+
 // lark/src/plugin.ts
 var plugin = {
   renderGlance() {
@@ -58,7 +76,8 @@ var plugin = {
       action: "openPanel:view:lark"
     };
   },
-  viewCall(method) {
+  viewCall(method, args) {
+    if (method === "selectRecordingDevices") return selectRecordingDevices(args);
     if (method === "battery") return batteryFromStatus(host.localRecording.statusReport());
     if (method === "status") return host.localRecording.status();
     if (method === "enable") return host.localRecording.setEnabled(true);
