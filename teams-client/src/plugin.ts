@@ -1,4 +1,5 @@
 import type { GlanceView, PluginModule, ViewNode } from "@codeterm/plugin-sdk";
+import { readOutput } from "./read-output";
 import { decideSend, matchChats, parseSendScope, validateSendScope, type SendOrigin, type SendScope } from "../../shared/src/send-scope";
 import {
   CHAT_CACHE_TTL_MS, EXO_HOME_DIR, EXO_MODULE, EXO_MODULE_SUM, EXO_PACKAGE, EXO_TOKEN_DIR, EXO_TOKEN_FILES,
@@ -280,6 +281,10 @@ function runExo(p: Paths, args: string[], timeoutMs: number): RunResult {
   if (!installedMarker(p)) return { ok: false, error: lifecycleMessage("not-installed"), stdout: "", stderr: "" };
   const secured = protectStorage(p);
   if (secured.error) return { ok: false, error: secured.message || "Could not secure plugin storage.", stdout: "", stderr: "" };
+  if (args[0] === "list-chats" || args[0] === "get-chat") {
+    return readOutput(nativePath(p.binary), args, exoEnv(p), p.root,
+      target.platform === "win32" ? target.tools.powershell : null, timeoutMs, runProcess);
+  }
   return runProcess(nativePath(p.binary), args, exoEnv(p), timeoutMs);
 }
 
