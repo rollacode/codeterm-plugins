@@ -1,0 +1,43 @@
+import type { Endpoint, Profile } from "./types";
+import { predefinedProfiles } from "./profiles";
+export interface Settings { endpoints: Endpoint[]; profiles: Profile[]; defaultProfile?: string; decision?: { profile?: string }; root?: string; model?: string }
+export function settings(): Settings {
+  const value = JSON.parse(host.settingsJson() || "{}");
+  if (!Array.isArray(value.endpoints)) throw new Error("configure endpoints first");
+  if (value.profiles === undefined) {
+    value.profiles = predefinedProfiles(value.endpoints[0]?.id || "", value.model || value.endpoints[0]?.models?.[0] || "", value.root || "");
+    value.defaultProfile ||= "coding";
+  }
+  if (!Array.isArray(value.profiles)) throw new Error("invalid profiles");
+  for (const group of [value.endpoints, value.profiles]) {
+    const ids = new Set();
+    for (const item of group) {
+      if (!item || typeof item.id !== "string" || !/^[a-z0-9_-]+$/.test(item.id) || ids.has(item.id)) throw new Error("invalid or duplicate config id");
+      ids.add(item.id);
+    }
+  }
+  return value;
+}
+export function resolve(id?: string, model?: string, systemPrompt?: string): { profile: Profile; endpoint: Endpoint } {
+  const s = settings();
+  const p = s.profiles.find(p => p.id === (id || s.defaultProfile));
+  if (!p) throw new Error("unknown profile");
+  const profile: Profile = { ...p, model: model || p.model,
+    systemPrompt: systemPrompt === undefined ? p.systemPrompt : systemPrompt };
+  const endpoint = s.endpoints.find(e => e.id === p.endpoint);
+  if (!endpoint || typeof endpoint.baseUrl !== "string" || !Array.isArray(endpoint.models)) throw new Error("unknown or invalid endpoint");
+  if (!profile.model || typeof profile.systemPrompt !== "string" || typeof profile.root !== "string"
+    || !/^(\/|[A-Za-z]:[\\/])/.test(profile.root) || !Array.isArray(profile.allow) || !Array.isArray(profile.deny)) throw new Error("invalid profile");
+  for (const [key, ceiling] of [["tokens", 1000000], ["turns", 100], ["deadlineMs", 3600000]] as const) {
+    const budget = profile.budgets?.[key];
+    if (!Number.isInteger(budget) || budget <= 0 || budget > ceiling) throw new Error(`invalid ${key} budget`);
+  }
+  if (profile.params) {
+    for (const [key, value] of Object.entries(profile.params)) {
+      if (!["temperature", "top_p", "seed"].includes(key) || typeof value !== "number" || !Number.isFinite(value)
+        || (key === "temperature" && (value < 0 || value > 2)) || (key === "top_p" && (value < 0 || value > 1))
+        || (key === "seed" && !Number.isInteger(value))) throw new Error("invalid sampling parameter");
+    }
+  }
+  return { profile, endpoint };
+}

@@ -22,15 +22,106 @@ var plugin_exports = {};
 __export(plugin_exports, {
   MODE_PROMPT_RE: () => MODE_PROMPT_RE,
   default: () => plugin_default,
-  deliverText: () => deliverText,
   extractBannerModel: () => extractBannerModel,
   lastNonEmptyLine: () => lastNonEmptyLine,
   parsePromptWithContext: () => parsePromptWithContext,
-  pickTaggedBlockTag: () => pickTaggedBlockTag,
-  promptSafeChoice: () => promptSafeChoice,
-  wrapMultiline: () => wrapMultiline
+  promptSafeChoice: () => promptSafeChoice
 });
 module.exports = __toCommonJS(plugin_exports);
+
+// provider-shared/updateCheck.ts
+function record(raw) {
+  if (typeof raw !== "string") return null;
+  try {
+    const value = JSON.parse(raw);
+    return value !== null && typeof value === "object" ? value : null;
+  } catch {
+    return null;
+  }
+}
+function versionParts(version) {
+  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) return null;
+  const parts = version.split(".").map(Number);
+  return parts.every(Number.isSafeInteger) ? parts : null;
+}
+function compare(left, right) {
+  const a = versionParts(left), b = versionParts(right);
+  if (!a || !b) return null;
+  for (let index = 0; index < 3; index++) {
+    if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
+  }
+  return 0;
+}
+function matchesRange(version, range) {
+  return range.split(",").every((clause) => {
+    const match = clause.trim().match(/^(>=|<=|>|<|=)?\s*(\d+\.\d+\.\d+)$/);
+    if (!match) return false;
+    const order = compare(version, match[2]);
+    if (order === null) return false;
+    switch (match[1] ?? "=") {
+      case ">=":
+        return order >= 0;
+      case "<=":
+        return order <= 0;
+      case ">":
+        return order > 0;
+      case "<":
+        return order < 0;
+      default:
+        return order === 0;
+    }
+  });
+}
+function newestSupportedVersion(versions, compatibility) {
+  return versions.reduce((best, version) => {
+    if (!versionParts(version) || !compatibility.supported.some((range) => matchesRange(version, range)) || compatibility.breaking?.some((rule) => matchesRange(version, rule.range))) return best;
+    return best === null || compare(version, best) === 1 ? version : best;
+  }, null);
+}
+function checkProviderUpdate(host2, binary, metadataUrl, compatibility) {
+  const installed = record(host2.exec(JSON.stringify({ bin: binary, args: ["--version"], timeoutMs: 5e3 })));
+  if (installed?.code !== 0 || typeof installed.stdout !== "string") return null;
+  const currentVersion = installed.stdout.match(/(?:^|\s)(\d+\.\d+\.\d+)(?=\s|$)/)?.[1];
+  if (!currentVersion || !versionParts(currentVersion)) return null;
+  const response = record(host2.fetch(JSON.stringify({
+    url: metadataUrl,
+    method: "GET",
+    timeoutMs: 6e3,
+    headers: { Accept: "application/vnd.npm.install-v1+json" }
+  })));
+  if (response?.status !== 200) return null;
+  const metadata = record(response.body);
+  let latestVersion = typeof metadata?.version === "string" ? metadata.version : null;
+  if (compatibility) {
+    if (!metadata?.versions || typeof metadata.versions !== "object") return null;
+    latestVersion = newestSupportedVersion(Object.keys(metadata.versions), compatibility);
+  }
+  return latestVersion && compare(latestVersion, currentVersion) === 1 ? { currentVersion, latestVersion } : null;
+}
+
+// aider/src/update.ts
+function checkAiderUpdate() {
+  let manifest;
+  try {
+    manifest = JSON.parse(host.manifestJson() ?? "null");
+  } catch {
+    return null;
+  }
+  if (!manifest?.cliCompatibility?.supported?.length) return null;
+  return checkProviderUpdate({
+    exec: (options) => host.exec(options),
+    fetch: (options) => {
+      try {
+        const response = JSON.parse(host.fetch(options));
+        if (response.status !== 200) return JSON.stringify(response);
+        const metadata = JSON.parse(response.body);
+        return JSON.stringify({ ...response, body: JSON.stringify({ versions: metadata.releases }) });
+      } catch {
+        return "null";
+      }
+    }
+  }, "aider", "https://pypi.org/pypi/aider-chat/json", manifest.cliCompatibility);
+}
 
 // aider/src/history.ts
 function utf8Length(text) {
@@ -83,9 +174,9 @@ function parseAiderHistoryDelta(prefix, fromOffset = 0, commitDiffs) {
     if (text.trim()) state.current.end = end;
   }
   const records = prefix.match(/[^\n]*\n|[^\n]+$/g) || [];
-  for (const record of records) {
-    const raw = record.replace(/\r?\n$/, "");
-    const end = offset + utf8Length(record);
+  for (const record2 of records) {
+    const raw = record2.replace(/\r?\n$/, "");
+    const end = offset + utf8Length(record2);
     rowOffset = offset;
     let line = raw;
     if (!fence) {
@@ -274,21 +365,21 @@ function readRelayEvidence(history, sidecar, sessionId, afterOffset) {
   const records = [];
   for (const line of lines) {
     if (!line.trim()) continue;
-    let record;
+    let record2;
     try {
-      record = JSON.parse(line);
+      record2 = JSON.parse(line);
     } catch {
       return null;
     }
-    if (!record || record.version !== 1 || record.sessionId !== sessionId || record.launchMarker !== sessionId || typeof record.processGeneration !== "string" || !record.processGeneration) return null;
-    if (record.kind === "adapter_start") {
-      if (record.aiderVersion !== "0.86.2") return unavailable("Unsupported Aider adapter version; install aider-chat==0.86.2.");
-      if (generations.has(record.processGeneration) && (record.processGeneration !== generation || records.some((turn) => turn.processGeneration === generation))) return null;
-      generation = record.processGeneration;
+    if (!record2 || record2.version !== 1 || record2.sessionId !== sessionId || record2.launchMarker !== sessionId || typeof record2.processGeneration !== "string" || !record2.processGeneration) return null;
+    if (record2.kind === "adapter_start") {
+      if (record2.aiderVersion !== "0.86.2") return unavailable("Unsupported Aider adapter version; install aider-chat==0.86.2.");
+      if (generations.has(record2.processGeneration) && (record2.processGeneration !== generation || records.some((turn) => turn.processGeneration === generation))) return null;
+      generation = record2.processGeneration;
       generations.add(generation);
-    } else if (record.kind === "turn_complete") {
-      if (!generation || record.processGeneration !== generation) return null;
-      records.push(record);
+    } else if (record2.kind === "turn_complete") {
+      if (!generation || record2.processGeneration !== generation) return null;
+      records.push(record2);
     } else return null;
   }
   if (!generation) return unavailable("This session has no Domios Aider adapter_start record.");
@@ -297,12 +388,12 @@ function readRelayEvidence(history, sidecar, sessionId, afterOffset) {
   let sequence = 0;
   let recordGeneration = null;
   let previousHistoryBytes = 0;
-  for (const record of records) {
-    if (record.processGeneration !== recordGeneration) {
-      recordGeneration = record.processGeneration;
+  for (const record2 of records) {
+    if (record2.processGeneration !== recordGeneration) {
+      recordGeneration = record2.processGeneration;
       sequence = 0;
     }
-    const { userRecordStart: user, responseRecordStart: start, responseRecordEnd: end, historyBytes: size, turnSequence: seq } = record;
+    const { userRecordStart: user, responseRecordStart: start, responseRecordEnd: end, historyBytes: size, turnSequence: seq } = record2;
     if (!integer(user) || !integer(start) || !integer(end) || !integer(size) || !integer(seq) || seq <= sequence || user >= start || start > end || end > size || user < previousHistoryBytes) return null;
     sequence = seq;
     previousHistoryBytes = size;
@@ -316,17 +407,17 @@ function readRelayEvidence(history, sidecar, sessionId, afterOffset) {
     const userBlock = userRow.blocks.find((block) => block.kind === "text");
     if (!userBlock || userBlock.kind !== "text") return null;
     const identity = { userTurnId: `aider:${sessionId}:user:${user}`, userRecordStart: user, userText: userBlock.data.text };
-    if (record.complete === false && ["error", "cancelled", "reflection_limit"].includes(String(record.outcome))) {
-      return { ...identity, complete: false, outcome: record.outcome };
+    if (record2.complete === false && ["error", "cancelled", "reflection_limit"].includes(String(record2.outcome))) {
+      return { ...identity, complete: false, outcome: record2.outcome };
     }
-    if (record.complete !== true || record.outcome !== "answered" || start === end) return null;
+    if (record2.complete !== true || record2.outcome !== "answered" || start === end) return null;
     const response = byteSlice(history, start, end);
     if (response === null) return null;
     const rows = parseAiderHistoryDelta(response).messages;
     if (rows.some((row) => row.role === "user")) return null;
     const answer = rows.filter((row) => row.role === "assistant").flatMap((row) => row.blocks.flatMap((block) => block.kind === "text" ? [block.data.text] : [])).join("\n\n").trim();
     if (!answer) return null;
-    return { ...identity, complete: true, assistantTurnId: `aider:${sessionId}:${record.processGeneration}:answer:${seq}:${start}`, answer };
+    return { ...identity, complete: true, assistantTurnId: `aider:${sessionId}:${record2.processGeneration}:answer:${seq}:${start}`, answer };
   }
   return null;
 }
@@ -351,7 +442,7 @@ function contextAttachments(value) {
   return { edit, read };
 }
 
-// ../codeterm/packages/plugin-sdk/src/fileDiffs.ts
+// ../../codeterm/packages/plugin-sdk/src/fileDiffs.ts
 function recordedPatchDiff(path, patch, kind) {
   if (!path.trim()) return [];
   const hunks = [];
@@ -553,29 +644,6 @@ var GITIGNORE_QUESTION_RE = /^Add \.aider\* to \.gitignore \(recommended\)\?\s*\
 var DOCS_URL_QUESTION_RE = /^Open documentation url for more info\?\s*\(Y\)es\/\(N\)o\/\(D\)on't ask again\s*(\[[^\]]*\])?\s*:?\s*$/;
 var COMMAND_LINE_RE = /^[ \t]*[$>][ \t]+(\S[^\n]*)$/;
 var MODE_PROMPT_RE = /^(?:[a-z]+)?>\s*$/;
-var TAGGED_BLOCK_BASE = "domios";
-function isMultiline(text) {
-  return /\r?\n/.test(String(text || ""));
-}
-function pickTaggedBlockTag(text) {
-  let tag = TAGGED_BLOCK_BASE;
-  let suffix = 1;
-  while (text.includes(`{${tag}`) || text.includes(`{/${tag}}`)) {
-    tag = `${TAGGED_BLOCK_BASE}${suffix}`;
-    suffix += 1;
-  }
-  return tag;
-}
-function wrapMultiline(text) {
-  const body = String(text || "");
-  const tag = pickTaggedBlockTag(body);
-  return `{${tag}
-${body}
-${tag}}`;
-}
-function deliverText(text) {
-  return isMultiline(text) ? wrapMultiline(text) : String(text || "");
-}
 function pluginSettings() {
   const raw = typeof host.settingsJson === "function" ? host.settingsJson() : null;
   if (!raw) return {};
@@ -700,6 +768,7 @@ function promptSafeChoice(prompt, screen) {
   return isCodetermOnlyCommandList(extractPromptedCommands(screen)) ? "1" : null;
 }
 var plugin = {
+  checkForUpdate: checkAiderUpdate,
   starterPromptText(_prompt) {
     return void 0;
   },
@@ -825,7 +894,7 @@ var plugin = {
     }
     if (p.skipPermissions) parts.push("--yes-always");
     if (!requestedModel) parts.push("--model", quote(selected.model));
-    parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
+    parts.push("--no-suggest-shell-commands", "--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
     const instructions = `${cwd.replace(/[\\/]+$/, "")}/AGENTS.md`;
     try {
       if (host.fs.readFileHead(instructions, 1) !== null) {
@@ -871,12 +940,6 @@ var plugin = {
   launchOnboardingSafeChoice(screen) {
     const prompt = parsePromptWithContext(String(screen || ""));
     return prompt ? promptSafeChoice(prompt, String(screen || "")) : null;
-  },
-  chatPreprocess(ctx) {
-    if (ctx?.provider !== "aider") return null;
-    const text = String(ctx?.text || "");
-    const delivered = deliverText(text);
-    return delivered === text ? null : { text: delivered };
   },
   detectSessionId(cwd, exclude, maxAgeMs) {
     const excluded = Array.isArray(exclude) ? exclude : exclude ? [exclude] : [];

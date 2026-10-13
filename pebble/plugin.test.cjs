@@ -1,7 +1,9 @@
 const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
-const plugin = require("./plugin.js").default;
+const compiled = { exports: {} };
+new Function("module", readFileSync(join(__dirname, "plugin.js"), "utf8"))(compiled);
+const plugin = compiled.exports.default;
 
 function payload(overrides = {}) {
   return {
@@ -207,3 +209,5 @@ for (const [name, run] of tests) {
   console.log("ok - " + name);
 }
 console.log(tests.length + " Pebble plugin tests passed");
+
+assert.equal(plugin.renderGlance().nodes.find(node => node.key === "Battery").value, "Not reported by CoreApp");

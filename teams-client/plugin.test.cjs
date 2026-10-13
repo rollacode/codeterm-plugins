@@ -171,6 +171,7 @@ function mockHost(options = {}) {
   const files = new Map();
   const calls = [];
   const jobs = new Map();
+  let rootCreated = !options.missingDataRoot;
   let nextJob = 0;
   const state = {
     whoami: options.whoami || WHOAMI_OK,
@@ -251,6 +252,11 @@ function mockHost(options = {}) {
       files.set(normalize(opts.env.CT_EXO_OUTPUT), child.stdout);
       return { ...child, stdout: "" };
     }
+    if (bin === "mkdir" || (bin === "powershell.exe" && opts.env?.CT_PLUGIN_ROOT)) {
+      if (options.bootstrapFails) return { code: 1, stdout: "", stderr: "Permission denied" };
+      rootCreated = true;
+      return { code: 0, stdout: "", stderr: "" };
+    }
     if (bin === "whoami.exe") return { code: 0, stdout: "FIXTURE\\owner\n", stderr: "" };
     if (bin === "icacls.exe" || bin === "chmod" || bin === "taskkill.exe" || bin === "kill") return { code: 0, stdout: "", stderr: "" };
     if (bin === "uname") return { code: 0, stdout: "arm64\n", stderr: "" };
@@ -311,7 +317,7 @@ function mockHost(options = {}) {
     },
     fs: {
       expandHome,
-      makeDirs: () => true,
+      makeDirs: () => rootCreated,
       fileExists: (file) => !deniedReads().has(normalize(file)) && files.has(normalize(file)),
       writeFile: (file, contents) => { files.set(normalize(file), String(contents)); return true; },
       readFile: (file) => !deniedReads().has(normalize(file)) && files.has(normalize(file)) ? files.get(normalize(file)) : null,
@@ -414,6 +420,26 @@ test("macOS resolves its archive through uname and checks it with shasum", () =>
   assert.ok(curl.args.at(-1).endsWith(C.GO_ARCHIVES["darwin/arm64"].file));
   assert.deepEqual(env.calls.find((call) => call.bin === "shasum").args.slice(0, 2), ["-a", "256"]);
   assert.ok(env.calls.some((call) => call.bin === "chmod" && call.args[0] === "700"));
+});
+
+test("first login bootstraps only its absent data root before installing on macOS and Windows", () => {
+  for (const platform of ["darwin", "win32"]) {
+    const env = mockHost({ platform, missingDataRoot: true });
+    const value = loginUntil(env, (v) => v.signIn === "device-code" || v.done);
+    assert.equal(value.signIn, "device-code");
+    const p = plugin.__test_paths();
+    const bootstrap = env.calls.find((c) => c.bin === "mkdir" || c.env.CT_PLUGIN_ROOT);
+    assert.ok(bootstrap);
+    if (platform === "darwin") assert.deepEqual(bootstrap.args, ["-p", "-m", "700", p.root]);
+    else assert.equal(bootstrap.env.CT_PLUGIN_ROOT.replaceAll("\\", "/"), p.root);
+  }
+});
+
+test("failed data-root creation starts neither downloads nor authentication", () => {
+  const env = mockHost({ platform: "darwin", missingDataRoot: true, bootstrapFails: true });
+  const value = command("login");
+  assert.match(value.error, /Could not create/);
+  assert.equal(env.calls.some((c) => ["curl", "exo-teams"].includes(c.bin)), false);
 });
 
 test("login while a code is pending returns the same code without a second sign-in process", () => {

@@ -150,7 +150,7 @@ const tests = [
     assert.equal(manifest.cliBinary, "grok");
     assert.equal(manifest.version, pkg.version);
     assert.equal(manifest.version, entry.version);
-    assert.equal(manifest.minCodeterm, "1.14.0");
+    assert.equal(manifest.minCodeterm, "1.14.2");
     assert.equal(manifest.minCodeterm, entry.minCodeterm);
     assert.deepEqual(manifest.commands.autoApproveFlags, ["--always-approve"]);
     assert.equal(manifest.spawn.systemPromptDelivery.kind, "external");
@@ -261,8 +261,9 @@ const tests = [
     assert.equal(found.source, "pid_registry");
   }],
 
-  ["discoverModels reads models_cache.json and skips hidden", () => {
+  ["discoverModels uses live ids and enriches visible cached metadata", () => {
     const plugin = load(hostFor({
+      host: { exec: () => JSON.stringify({code: 0, stdout: "Available models:\n  - grok-4.6\n"}) },
       files: {
         "/tmp/home/.grok/models_cache.json": {
           models: {
@@ -539,7 +540,8 @@ tests.push(["model switching resumes the exact session with per-model effort cat
     model:{command:"/model {model}"},
     effort:{command:"/effort {effort}"},
   });
-  const plugin=load(hostFor({files:{"/tmp/home/.grok/models_cache.json":{models:{one:{info:{id:"one",name:"One",reasoning_efforts:[{id:"low",label:"Low",default:true}]}},two:{info:{id:"two",name:"Two",reasoning_efforts:[]}}}}}}));
+  let plugin=load(hostFor({files:{"/tmp/home/.grok/models_cache.json":{models:{one:{info:{id:"one",name:"One",reasoning_efforts:[{id:"low",label:"Low",default:true}]}},two:{info:{id:"two",name:"Two",reasoning_efforts:[]}}}}}}));
+  plugin = load(hostFor({files:{"/tmp/home/.grok/models_cache.json":{models:{one:{info:{id:"one",name:"One",reasoning_efforts:[{id:"low",label:"Low",default:true}]}},two:{info:{id:"two",name:"Two",reasoning_efforts:[]}}}}},host:{exec:()=>JSON.stringify({code:0,stdout:"Available models:\n - one\n - two\n"})}}));
   const models=plugin.discoverModels();
   assert.equal(models[0].reasoningEfforts.length,1);
   assert.equal(models[0].defaultReasoningEffort,"low");
@@ -697,6 +699,39 @@ tests.push(["ASCII and macOS composers are TUI-ready only while empty", () => {
     assert.equal(plugin.screenHasTui(frame.replace(/\n/g, "\r\n")), true, fixture);
   }
 }]);
+
+tests.push(["live catalogue supersedes stale cache and offline discovery leaves manifest fallback", () => {
+  const output = "You are logged in with grok.com.\nDefault model: grok-4.6\nAvailable models:\n  - grok-4.7\n  - grok-4.7-build-fast\n  * grok-4.6 (default)\n";
+  const calls = [];
+  const files = {"/tmp/home/.grok/models_cache.json": {models:{stale:{info:{id:"stale"}}}}};
+  const plugin = load(hostFor({files, host:{exec: request => {calls.push(JSON.parse(request));return JSON.stringify({code:0,stdout:output});}}}));
+  assert.deepEqual(Array.from(plugin.discoverModels(), model => model.id), ["grok-4.7", "grok-4.7-build-fast", "grok-4.6"]);
+  assert.deepEqual(calls[0], {bin:"grok",args:["models"],timeoutMs:5000});
+  for (const exec of [()=>JSON.stringify({code:1,stdout:output}),()=>"{",()=>{throw Error("offline");},()=>JSON.stringify({code:0,stdout:"- bogus"})]) {
+    assert.equal(load(hostFor({files,host:{exec}})).discoverModels(), null);
+  }
+}]);
+
+tests.push(["directory trust prompt declares exact safe choice and live response", () => {
+  const manifest = JSON.parse(readFileSync(join(__dirname,"plugin.json"),"utf8"));
+  assert.equal(manifest.spawn.supportsDirectoryTrustPromptParsing,true);
+  assert.deepEqual(manifest.directoryTrustRecord,{format:"toml_folders",path:"~/.grok/trusted_folders.toml"});
+  const plugin = load(hostFor());
+  const screen = "Do you trust the contents of this directory?\n /work/app\n Yes, proceed y\n No, quit n";
+  const prompt = plugin.parseDirectoryTrustPrompt(screen);
+  assert.deepEqual(Array.from(prompt.options, pair=>Array.from(pair)), [["Yes, proceed","y"],["No, quit","n"]]);
+  assert.deepEqual(Array.from(plugin.directoryTrustPromptResponse(screen)), ["eQ=="]);
+  assert.deepEqual(Array.from(plugin.buildPromptResponse(0,screen)), ["eQ=="]);
+  assert.deepEqual(Array.from(plugin.buildPromptResponse(1,screen)), ["bg=="]);
+  assert.equal(plugin.classifyTabState({screenText:screen}).state,"clarifying_question");
+  for (const invalid of ["Quoted: " + screen, screen.replace("No, quit n",""), screen + "\nYes, proceed y", "ordinary output"]) {
+    assert.equal(plugin.parseDirectoryTrustPrompt(invalid),null);
+    assert.equal(plugin.directoryTrustPromptResponse(invalid),null);
+    assert.deepEqual(Array.from(plugin.buildPromptResponse(0,invalid)),[]);
+  }
+}]);
+
+require("../provider-shared/updateTests.cjs")(tests, over => load(hostFor({host: over})), __dirname);
 
 let failed = 0;
 for (const [name, run] of tests) {

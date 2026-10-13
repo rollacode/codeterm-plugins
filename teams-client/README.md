@@ -13,6 +13,8 @@ The first `login` installs exo-teams into the plugin-owned runtime directory (`~
 
 Supported targets are macOS, Linux, and Windows on x64 and arm64. Nothing is installed globally and no system Go is needed.
 
+On hosts that reject filesystem writes while the plugin data root is absent, first login bootstraps only that fixed root with the declared `mkdir` helper (macOS/Linux) or PowerShell directory creation (Windows), then creates its children through the host filesystem API. The existing mode 0700 / Windows ACL protection runs before any dependency download or sign-in. Version 1.0.1 fixes the resulting "Could not create the plugin-owned private directory" first-install failure. Reinstalling a local bundle may require a settings write to refresh the loaded plugin; `codeterm plugin config teams-client --set historyCount=20` triggers its supported live reload.
+
 ## Sign-in and tokens
 
 `login` starts `exo-teams auth` detached, with its output going to a plugin-owned log. Microsoft's device-code message is parsed from it, and `login-status` returns `signInUrl` and `deviceCode` for the owner to open in their usual browser. exo-teams would open a browser itself; it runs with `PATH` pointed at an empty directory so it cannot, and the link goes to chat and the view instead. A second `login` while the code is valid returns the same code. Codes expire after 15 minutes.

@@ -189,7 +189,9 @@ function protectStorage(p: Paths): { error?: string; message?: string } {
 }
 
 function applyStorageProtection(p: Paths): { error?: string; message?: string } {
-  // Older hosts require the private root to exist before granting host.fs mkdir.
+  // Older hosts canonicalize write roots before granting mkdir, so a fresh
+  // plugin data root cannot create itself. Bootstrap only our fixed root via
+  // the declared subprocess API, then use host.fs for every child directory.
   if (!host.fs.makeDirs(p.root)) {
     const created = host.path.isWindows
       ? runProcess(toolsFor("win32", windowsRoot()).powershell,

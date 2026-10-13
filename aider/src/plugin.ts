@@ -1,3 +1,4 @@
+import { checkAiderUpdate } from "./update";
 import type {
   LaunchParams,
   ModelInfo,
@@ -38,32 +39,6 @@ const GITIGNORE_QUESTION_RE = /^Add \.aider\* to \.gitignore \(recommended\)\?\s
 const DOCS_URL_QUESTION_RE = /^Open documentation url for more info\?\s*\(Y\)es\/\(N\)o\/\(D\)on't ask again\s*(\[[^\]]*\])?\s*:?\s*$/;
 const COMMAND_LINE_RE = /^[ \t]*[$>][ \t]+(\S[^\n]*)$/;
 const MODE_PROMPT_RE = /^(?:[a-z]+)?>\s*$/;
-const TAGGED_BLOCK_BASE = "domios";
-
-function isMultiline(text: string): boolean {
-  return /\r?\n/.test(String(text || ""));
-}
-
-function pickTaggedBlockTag(text: string): string {
-  let tag = TAGGED_BLOCK_BASE;
-  let suffix = 1;
-  while (text.includes(`{${tag}`) || text.includes(`{/${tag}}`)) {
-    tag = `${TAGGED_BLOCK_BASE}${suffix}`;
-    suffix += 1;
-  }
-  return tag;
-}
-
-function wrapMultiline(text: string): string {
-  const body = String(text || "");
-  const tag = pickTaggedBlockTag(body);
-  return `{${tag}\n${body}\n${tag}}`;
-}
-
-function deliverText(text: string): string {
-  return isMultiline(text) ? wrapMultiline(text) : String(text || "");
-}
-
 function pluginSettings(): Record<string, unknown> {
   const raw = typeof host.settingsJson === "function" ? host.settingsJson() : null;
   if (!raw) return {};
@@ -220,6 +195,7 @@ function promptSafeChoice(prompt: ParsedPrompt | null | undefined, screen: strin
 }
 
 const plugin: PluginModule = {
+  checkForUpdate: checkAiderUpdate,
   starterPromptText(_prompt: "no_starter" | "assigned_task" | "idle_wakeup" | "team_bootstrap" | "startup_handshake"): string | undefined {
     // No native initial turn: core delivers the exact prepared payload to the
     // interactive composer after readiness, including any required starter.
@@ -369,7 +345,7 @@ const plugin: PluginModule = {
     }
     if (p.skipPermissions) parts.push("--yes-always");
     if (!requestedModel) parts.push("--model", quote(selected.model));
-    parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
+    parts.push("--no-suggest-shell-commands", "--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
     // Aider does not load the agents.md convention itself. Keep repository
     // instructions in read-only context, without scanning the whole tree.
     const instructions = `${cwd.replace(/[\\/]+$/, "")}/AGENTS.md`;
@@ -433,13 +409,6 @@ const plugin: PluginModule = {
   launchOnboardingSafeChoice(screen: string): string | null {
     const prompt = parsePromptWithContext(String(screen || ""));
     return prompt ? promptSafeChoice(prompt, String(screen || "")) : null;
-  },
-
-  chatPreprocess(ctx: { provider?: string | null; text: string }): { text: string } | null {
-    if (ctx?.provider !== "aider") return null;
-    const text = String(ctx?.text || "");
-    const delivered = deliverText(text);
-    return delivered === text ? null : { text: delivered };
   },
 
   detectSessionId(cwd: string, exclude?: string[] | string, maxAgeMs?: number): string | null {
@@ -563,12 +532,9 @@ const plugin: PluginModule = {
 
 export default plugin;
 export {
-  deliverText,
   extractBannerModel,
   lastNonEmptyLine,
   MODE_PROMPT_RE,
-  pickTaggedBlockTag,
   promptSafeChoice,
   parsePromptWithContext,
-  wrapMultiline,
 };
