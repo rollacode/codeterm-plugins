@@ -1,8 +1,8 @@
 # Rotterdom
 
-A lightweight harness for any OpenAI-compatible `/chat/completions` endpoint: LM Studio, Ollama, OpenRouter and compatible hosted services. No watcher or decision adapter.
+A lightweight harness for any OpenAI-compatible `/chat/completions` endpoint: LM Studio, Ollama, OpenRouter and compatible hosted services. Includes the Supporter decision adapter; watcher mode remains unsupported.
 
-Version 0.1.0 requires Domios 1.14.2. Build with `node scripts/build-plugin.mjs rotterdom`; test the built QuickJS-compatible bundle with `node rotterdom/plugin.test.cjs`.
+Version 0.2.0 requires Domios 1.14.2. Build with `node scripts/build-plugin.mjs rotterdom`; test the built QuickJS-compatible bundle with `node rotterdom/plugin.test.cjs`.
 
 Configure `endpoints: [{id, baseUrl, models, secret?}]`, `profiles: [{id, name, endpoint, model, systemPrompt, root, allow, deny, readOnly?, params?, budgets}]` and `defaultProfile`. `baseUrl` includes the API prefix (usually `/v1`). Optional `secret` names a plugin-scoped stored secret; secrets never belong in config or history. Remote endpoints require `codeterm plugin settings rotterdom --allow-host host:port`.
 
@@ -35,3 +35,9 @@ After configuring an existing absolute root, the owner approves `codeterm plugin
 The host exposes an `agent` step for providers declaring `chatBackend.agentTasks`. Use `provider: rotterdom`, a configured `profile`, `task`, `deadline_ms`, `max_tokens` and `max_turns`; its input and output are text. The output is structured JSON: `{status, output, error?}`. Status is `done`, `failed`, `cancelled` or `deadline_exceeded`; the pipeline routes `done` or `failed`. The final assistant response is parsed as JSON when possible, otherwise returned as a string.
 
 The stage shrinks the profile budgets to the requested limits. The exact profile prompt remains unchanged; the task and preceding stage output are user inputs. Task history and a completion ledger persist independently under `task_<runId>`. Repeating an already claimed task returns its saved result or an unconfirmed refusal, never reruns it. Stage results route through Blueprint; the native `report` tool is disabled for stage tasks. Deadline and graph abort interrupt the host wait and cancel subprocess jobs; an unfinished write stays unconfirmed. No timer or poll loop advances an Agent stage.
+
+## Supporter decision mode
+
+Rotterdom supplies choice, noul and score through the configured endpoint's `/chat/completions`. It discovers the decision catalogue from that endpoint's `/models`, independently of the configured chat model list. Configure `decision: {profile: reader}` to choose a profile; otherwise `defaultProfile` supplies the endpoint, model and request budgets. Decision mode requires no project root or tool grants. It never runs profile tools, uses profile endpoint secrets when configured, and accepts no separate Supporter token (`tokenMode: none`).
+
+Run `codeterm supporter models`, then `codeterm supporter use rotterdom --model <listed-id>`. Model selection is kept separate from chat sessions. The endpoint must support OpenAI structured JSON output (`response_format: json_schema`). Model probabilities and confidence are estimates, not calibrated authorization evidence. Named questions share one request and return endpoint token usage when available. Each request is bounded by the caller's remaining deadline and profile deadline budget; invalid JSON, missing answers, invalid probabilities, HTTP failures and expired deadlines fail closed. No retry or watcher is involved.

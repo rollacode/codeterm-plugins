@@ -24,6 +24,61 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
+// rotterdom/src/profiles.ts
+var READ = ["read_file", "glob", "search"];
+var INSPECT = ["identify", "tab_list", "plan_list", "mem_search", "blueprint_list", "tab_read"];
+function predefinedProfiles(endpoint, model, root) {
+  const base = { endpoint, model, root, deny: [], budgets: { tokens: 64e3, turns: 24, deadlineMs: 3e5 } };
+  return [
+    { ...base, id: "coding", name: "Coding", systemPrompt: "Complete the coding task using the available file and search tools. Read current content before edits. Verify your changes and report the result.", allow: [...READ, "write_file", "edit_file", "shell", "report"] },
+    { ...base, id: "reader", name: "Reader", systemPrompt: "Read and explain the material requested by the user. Use only the supplied read and search tools.", allow: READ, readOnly: true },
+    { ...base, id: "domios-inspector", name: "Domios Inspector", systemPrompt: "Inspect Domios using the supplied read tools. Distinguish observations from assumptions and report your findings in your answer.", allow: INSPECT, readOnly: true },
+    { ...base, id: "domios-operator", name: "Domios Operator", systemPrompt: "Operate Domios through the supplied scoped tools. Act only on the approved targets. Report each action's observable result.", allow: [...INSPECT, "tab_describe", "send", "plan_report", "report", "blueprint_input", "blueprint_stop"], targets: { tabs: [], plans: [], blueprints: [] } }
+  ];
+}
+
+// rotterdom/src/config.ts
+function settings() {
+  const value = JSON.parse(host.settingsJson() || "{}");
+  if (!Array.isArray(value.endpoints)) throw new Error("configure endpoints first");
+  if (value.profiles === void 0) {
+    value.profiles = predefinedProfiles(value.endpoints[0]?.id || "", value.model || value.endpoints[0]?.models?.[0] || "", value.root || "");
+    value.defaultProfile || (value.defaultProfile = "coding");
+  }
+  if (!Array.isArray(value.profiles)) throw new Error("invalid profiles");
+  for (const group of [value.endpoints, value.profiles]) {
+    const ids = /* @__PURE__ */ new Set();
+    for (const item of group) {
+      if (!item || typeof item.id !== "string" || !/^[a-z0-9_-]+$/.test(item.id) || ids.has(item.id)) throw new Error("invalid or duplicate config id");
+      ids.add(item.id);
+    }
+  }
+  return value;
+}
+function resolve(id, model, systemPrompt) {
+  const s = settings();
+  const p = s.profiles.find((p2) => p2.id === (id || s.defaultProfile));
+  if (!p) throw new Error("unknown profile");
+  const profile = {
+    ...p,
+    model: model || p.model,
+    systemPrompt: systemPrompt === void 0 ? p.systemPrompt : systemPrompt
+  };
+  const endpoint = s.endpoints.find((e) => e.id === p.endpoint);
+  if (!endpoint || typeof endpoint.baseUrl !== "string" || !Array.isArray(endpoint.models)) throw new Error("unknown or invalid endpoint");
+  if (!profile.model || typeof profile.systemPrompt !== "string" || typeof profile.root !== "string" || !/^(\/|[A-Za-z]:[\\/])/.test(profile.root) || !Array.isArray(profile.allow) || !Array.isArray(profile.deny)) throw new Error("invalid profile");
+  for (const [key, ceiling] of [["tokens", 1e6], ["turns", 100], ["deadlineMs", 36e5]]) {
+    const budget = profile.budgets?.[key];
+    if (!Number.isInteger(budget) || budget <= 0 || budget > ceiling) throw new Error(`invalid ${key} budget`);
+  }
+  if (profile.params) {
+    for (const [key, value] of Object.entries(profile.params)) {
+      if (!["temperature", "top_p", "seed"].includes(key) || typeof value !== "number" || !Number.isFinite(value) || key === "temperature" && (value < 0 || value > 2) || key === "top_p" && (value < 0 || value > 1) || key === "seed" && !Number.isInteger(value)) throw new Error("invalid sampling parameter");
+    }
+  }
+  return { profile, endpoint };
+}
+
 // rotterdom/src/toolwire.ts
 function pairToolCalls(turns) {
   const answered = /* @__PURE__ */ new Set();
@@ -167,13 +222,23 @@ function globPattern(pattern) {
 }
 
 // rotterdom/src/adapters.ts
-function request(endpoint, profile, turns, key, remainingTokens) {
+function endpointRequest(endpoint, path2, key) {
   if (!/^https?:\/\/[^\s?#]+$/.test(endpoint.baseUrl) || /\/\/[^/]*@/.test(endpoint.baseUrl)) throw new Error("invalid endpoint URL");
-  const tools = openAiTools(offeredTools(profile, host.projectWriteAllowed(profile.root)));
   return {
-    url: `${endpoint.baseUrl.replace(/\/+$/, "")}/chat/completions`,
+    url: `${endpoint.baseUrl.replace(/\/+$/, "")}${path2}`,
+    headers: { "content-type": "application/json", ...key ? { authorization: `Bearer ${key}` } : {} }
+  };
+}
+function endpointKey(endpoint) {
+  const key = endpoint.secret ? host.secretGet(endpoint.secret) : null;
+  if (endpoint.secret && !key) throw new Error("endpoint secret unavailable");
+  return key;
+}
+function request(endpoint, profile, turns, key, remainingTokens, enableTools = true) {
+  const tools = enableTools ? openAiTools(offeredTools(profile, host.projectWriteAllowed(profile.root))) : [];
+  return {
+    ...endpointRequest(endpoint, "/chat/completions", key),
     method: "POST",
-    headers: { "content-type": "application/json", ...key ? { authorization: `Bearer ${key}` } : {} },
     body: JSON.stringify({
       temperature: profile.params?.temperature,
       top_p: profile.params?.top_p,
@@ -206,6 +271,155 @@ function response(raw) {
   if (typeof tokens !== "number" || !Number.isInteger(tokens) || tokens < 0) throw new Error("endpoint must report token usage for the token budget");
   return { turn: { role: "assistant", content: message.content || "", ...toolCalls.length ? { toolCalls } : {} }, tokens };
 }
+
+// rotterdom/src/decision.ts
+var selectedModel = "";
+var probability = { type: "number", minimum: 0, maximum: 1 };
+function object(properties) {
+  return { type: "object", properties, required: Object.keys(properties), additionalProperties: false };
+}
+function schema(question) {
+  const type = { type: "string", enum: [question.type] };
+  if (question.type === "noul") return object({ type, p: probability });
+  const labels = question.type === "choice" ? Object.keys(question.options) : question.levels.map((_, i) => String(i));
+  if (!labels.length) throw new Error("empty decision options");
+  return object({
+    type,
+    ...question.type === "choice" ? { choice: { type: "string", enum: labels } } : { score: { type: "number", minimum: 0, maximum: labels.length - 1 } },
+    probabilities: object(Object.fromEntries(labels.map((key) => [key, probability]))),
+    confidence: { type: ["number", "null"], minimum: 0, maximum: 1 }
+  });
+}
+function validProbability(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+function answer(question, value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid decision answer");
+  const a = value;
+  if (a.type !== question.type) throw new Error("wrong decision primitive");
+  if (a.type === "noul") {
+    if (!validProbability(a.p)) throw new Error("invalid noul probability");
+    return a;
+  }
+  const labels = question.type === "choice" ? Object.keys(question.options) : question.type === "score" ? question.levels.map((_, i) => String(i)) : [];
+  const probs = a.probabilities;
+  if (!probs || typeof probs !== "object" || Array.isArray(probs) || Object.keys(probs).length !== labels.length || !labels.every((key) => Object.prototype.hasOwnProperty.call(probs, key) && validProbability(probs[key])) || Math.abs(Object.values(probs).reduce((sum, p) => sum + p, 0) - 1) > 1e-6 || a.confidence !== null && !validProbability(a.confidence)) throw new Error("invalid decision probabilities");
+  if (a.type === "choice" && !labels.includes(a.choice)) throw new Error("unknown decision choice");
+  if (a.type === "score" && (!Number.isFinite(a.score) || a.score < 0 || a.score > labels.length - 1)) throw new Error("invalid decision score");
+  return a;
+}
+function config() {
+  const s = settings();
+  const p = s.profiles.find((p2) => p2.id === (s.decision?.profile || s.defaultProfile));
+  const endpoint = s.endpoints.find((e) => e.id === p?.endpoint);
+  if (!p || !endpoint) throw new Error("decision profile unavailable");
+  if (!Number.isInteger(p.budgets?.deadlineMs) || p.budgets.deadlineMs <= 0 || p.budgets.deadlineMs > 36e5 || !Number.isInteger(p.budgets?.tokens) || p.budgets.tokens <= 0 || p.budgets.tokens > 1e6) throw new Error("invalid decision budget");
+  return { endpoint, profile: { ...p, model: selectedModel || p.model } };
+}
+function models() {
+  try {
+    const { endpoint, profile } = config();
+    return host.fetch.async({ ...endpointRequest(endpoint, "/models", endpointKey(endpoint)), method: "GET", timeoutMs: Math.min(3e4, profile.budgets.deadlineMs) }, (result2) => {
+      if (result2.error || !result2.status || result2.status < 200 || result2.status >= 300) return [];
+      try {
+        const data = JSON.parse(result2.body || "{}");
+        const seen = /* @__PURE__ */ new Set();
+        return Array.isArray(data.data) ? data.data.flatMap((item) => {
+          if (!item || typeof item.id !== "string" || !item.id || seen.has(item.id)) return [];
+          seen.add(item.id);
+          return [{ id: item.id, display_name: typeof item.name === "string" ? item.name : item.id }];
+        }) : [];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+function run(state, questions, remainingMs, batch, decode) {
+  if (remainingMs !== void 0 && (!Number.isFinite(remainingMs) || remainingMs < 1)) return { error: "timeout" };
+  let selected;
+  let key;
+  try {
+    selected = config();
+    key = endpointKey(selected.endpoint);
+  } catch {
+    return { error: "unavailable" };
+  }
+  if (!selected.profile.model) return { error: "unavailable" };
+  const deadline = host.unixNowMs() + Math.min(remainingMs ?? 3e4, selected.profile.budgets.deadlineMs);
+  let responseSchema;
+  try {
+    const properties = Object.fromEntries(Object.entries(questions).map(([name, spec]) => [name, schema(spec.question)]));
+    if (!Object.keys(properties).length) throw new Error("empty questions");
+    responseSchema = batch ? object({ answers: object(properties) }) : properties.single;
+  } catch {
+    return { error: "invalid_response" };
+  }
+  try {
+    const profile = { ...selected.profile, params: { temperature: 0 }, systemPrompt: "Return only JSON matching the supplied schema. Evaluate each question using the shared state. Probabilities must sum to one; confidence is your estimated certainty, or null when unknown." };
+    const opts = request(selected.endpoint, profile, [{ role: "user", content: JSON.stringify({ state, questions }) }], key, Math.min(4096, profile.budgets.tokens), false);
+    const body = JSON.parse(opts.body);
+    body.response_format = { type: "json_schema", json_schema: { name: "domios_decision", strict: true, schema: responseSchema } };
+    opts.body = JSON.stringify(body);
+    opts.timeoutMs = Math.floor(deadline - host.unixNowMs());
+    if (opts.timeoutMs < 1) return { error: "timeout" };
+    return host.fetch.async(opts, (result2) => {
+      if (host.unixNowMs() >= deadline || /timeout|timed out|deadline/i.test(result2.error || "")) return { error: "timeout" };
+      if (result2.error || !result2.status || result2.status < 200 || result2.status >= 300) return { error: "transport" };
+      try {
+        const completion = JSON.parse(result2.body || "{}");
+        const message = completion.choices?.[0]?.message;
+        if (completion.error || typeof message?.content !== "string" || message.tool_calls?.length || completion.choices?.[0]?.finish_reason === "length") throw new Error("invalid decision completion");
+        return decode(JSON.parse(message.content), completion);
+      } catch {
+        return { error: "invalid_response" };
+      }
+    });
+  } catch {
+    return { error: "transport" };
+  }
+}
+var decisionModel = {
+  supportsCalibratedChoiceConfidence: () => false,
+  supportsQuestionBatch: () => true,
+  primitives: () => ({ choice: true, noul: true, score: true }),
+  models,
+  modelId() {
+    try {
+      return config().profile.model || null;
+    } catch {
+      return null;
+    }
+  },
+  selectModel(id) {
+    if (!id) return false;
+    selectedModel = id;
+    return true;
+  },
+  metadata() {
+    try {
+      return { display_name: "Rotterdom", server_address: config().endpoint.baseUrl };
+    } catch {
+      return { display_name: "Rotterdom" };
+    }
+  },
+  decide(input, remainingMs) {
+    return run(input.state, { single: { instructions: input.instructions, question: input.question } }, remainingMs, false, (value) => answer(input.question, value));
+  },
+  decideQuestions(input, remainingMs) {
+    return run(input.state, input.questions, remainingMs, true, (value, completion) => {
+      const answers = value?.answers;
+      if (!answers || Object.keys(answers).length !== Object.keys(input.questions).length) throw new Error("invalid answer set");
+      const decoded = Object.fromEntries(Object.entries(input.questions).map(([name, spec]) => [name, answer(spec.question, answers[name])]));
+      const usage = completion.usage;
+      const tokens = (v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+      return { answers: decoded, usage: tokens(usage?.prompt_tokens) && tokens(usage?.completion_tokens) ? { input_tokens: usage.prompt_tokens, output_tokens: usage.completion_tokens } : null };
+    });
+  }
+};
+var decision_default = decisionModel;
 
 // rotterdom/src/history.ts
 function claim(history, id, signature) {
@@ -496,8 +710,7 @@ function startRequest(s) {
   if (++s.rounds > s.history.profile.budgets.turns) throw new Error("turn budget exhausted");
   const remaining = s.history.profile.budgets.tokens - s.tokens;
   if (remaining <= 0) throw new Error("token budget exhausted");
-  const key = s.endpoint.secret ? host.secretGet(s.endpoint.secret) : null;
-  if (s.endpoint.secret && !key) throw new Error("endpoint secret unavailable");
+  const key = endpointKey(s.endpoint);
   const opts = request(s.endpoint, s.history.profile, s.history.turns, key, remaining);
   opts.timeoutMs = Math.max(1, Math.min(opts.timeoutMs, s.deadline - host.unixNowMs()));
   const job = host.fetch.stream(opts);
@@ -616,79 +829,24 @@ function historyTurns(id) {
   return transcriptTurns(session(id).rows, () => false);
 }
 
-// rotterdom/src/profiles.ts
-var READ = ["read_file", "glob", "search"];
-var INSPECT = ["identify", "tab_list", "plan_list", "mem_search", "blueprint_list", "tab_read"];
-function predefinedProfiles(endpoint, model, root) {
-  const base = { endpoint, model, root, deny: [], budgets: { tokens: 64e3, turns: 24, deadlineMs: 3e5 } };
-  return [
-    { ...base, id: "coding", name: "Coding", systemPrompt: "Complete the coding task using the available file and search tools. Read current content before edits. Verify your changes and report the result.", allow: [...READ, "write_file", "edit_file", "shell", "report"] },
-    { ...base, id: "reader", name: "Reader", systemPrompt: "Read and explain the material requested by the user. Use only the supplied read and search tools.", allow: READ, readOnly: true },
-    { ...base, id: "domios-inspector", name: "Domios Inspector", systemPrompt: "Inspect Domios using the supplied read tools. Distinguish observations from assumptions and report your findings in your answer.", allow: INSPECT, readOnly: true },
-    { ...base, id: "domios-operator", name: "Domios Operator", systemPrompt: "Operate Domios through the supplied scoped tools. Act only on the approved targets. Report each action's observable result.", allow: [...INSPECT, "tab_describe", "send", "plan_report", "report", "blueprint_input", "blueprint_stop"], targets: { tabs: [], plans: [], blueprints: [] } }
-  ];
-}
-
-// rotterdom/src/config.ts
-function settings() {
-  const value = JSON.parse(host.settingsJson() || "{}");
-  if (!Array.isArray(value.endpoints)) throw new Error("configure endpoints first");
-  if (value.profiles === void 0) {
-    value.profiles = predefinedProfiles(value.endpoints[0]?.id || "", value.model || value.endpoints[0]?.models?.[0] || "", value.root || "");
-    value.defaultProfile || (value.defaultProfile = "coding");
-  }
-  if (!Array.isArray(value.profiles)) throw new Error("invalid profiles");
-  for (const group of [value.endpoints, value.profiles]) {
-    const ids = /* @__PURE__ */ new Set();
-    for (const item of group) {
-      if (!item || typeof item.id !== "string" || !/^[a-z0-9_-]+$/.test(item.id) || ids.has(item.id)) throw new Error("invalid or duplicate config id");
-      ids.add(item.id);
-    }
-  }
-  return value;
-}
-function resolve(id, model, systemPrompt) {
-  const s = settings();
-  const p = s.profiles.find((p2) => p2.id === (id || s.defaultProfile));
-  if (!p) throw new Error("unknown profile");
-  const profile = {
-    ...p,
-    model: model || p.model,
-    systemPrompt: systemPrompt === void 0 ? p.systemPrompt : systemPrompt
-  };
-  const endpoint = s.endpoints.find((e) => e.id === p.endpoint);
-  if (!endpoint || typeof endpoint.baseUrl !== "string" || !Array.isArray(endpoint.models)) throw new Error("unknown or invalid endpoint");
-  if (!profile.model || typeof profile.systemPrompt !== "string" || typeof profile.root !== "string" || !/^(\/|[A-Za-z]:[\\/])/.test(profile.root) || !Array.isArray(profile.allow) || !Array.isArray(profile.deny)) throw new Error("invalid profile");
-  for (const [key, ceiling] of [["tokens", 1e6], ["turns", 100], ["deadlineMs", 36e5]]) {
-    const budget = profile.budgets?.[key];
-    if (!Number.isInteger(budget) || budget <= 0 || budget > ceiling) throw new Error(`invalid ${key} budget`);
-  }
-  if (profile.params) {
-    for (const [key, value] of Object.entries(profile.params)) {
-      if (!["temperature", "top_p", "seed"].includes(key) || typeof value !== "number" || !Number.isFinite(value) || key === "temperature" && (value < 0 || value > 2) || key === "top_p" && (value < 0 || value > 1) || key === "seed" && !Number.isInteger(value)) throw new Error("invalid sampling parameter");
-    }
-  }
-  return { profile, endpoint };
-}
-
 // rotterdom/src/agent.ts
 var runs = /* @__PURE__ */ new Map();
 function finish(runId, result2) {
-  const run = runs.get(runId);
-  run.history.taskResult = result2;
+  const run2 = runs.get(runId);
+  run2.history.taskResult = result2;
   try {
-    save(run.history);
+    save(run2.history);
   } finally {
     runs.delete(runId);
   }
   return result2;
 }
 function abortAgentTask(runId) {
-  const run = runs.get(runId);
-  if (!run) return;
-  run.cancelled = true;
-  for (const job of run.jobs) host.exec.close(job);
-  recover(run.history);
+  const run2 = runs.get(runId);
+  if (!run2) return;
+  run2.cancelled = true;
+  for (const job of run2.jobs) host.exec.close(job);
+  recover(run2.history);
   finish(runId, { status: "cancelled", output: null, error: "unfinished tool effects are unconfirmed" });
 }
 function runAgentTask(input) {
@@ -707,9 +865,9 @@ function runAgentTask(input) {
     { role: "user", content: input.task },
     ...input.input ? [{ role: "user", content: input.input }] : []
   ], ledger: {}, run: 1 };
-  const run = { history, deadline: host.unixNowMs() + profile.budgets.deadlineMs, jobs: /* @__PURE__ */ new Set(), tokens: 0, turns: 0, cancelled: false };
+  const run2 = { history, deadline: host.unixNowMs() + profile.budgets.deadlineMs, jobs: /* @__PURE__ */ new Set(), tokens: 0, turns: 0, cancelled: false };
   save(history);
-  runs.set(input.runId, run);
+  runs.set(input.runId, run2);
   const fail = (e) => finish(input.runId, { status: "failed", output: null, error: String(e) });
   function result2(call, raw) {
     complete(history, call.id, raw);
@@ -717,8 +875,8 @@ function runAgentTask(input) {
     save(history);
   }
   function calls(queue) {
-    if (run.cancelled) return { status: "cancelled", output: null };
-    if (host.unixNowMs() >= run.deadline) return finish(input.runId, { status: "deadline_exceeded", output: null, error: "task deadline exceeded" });
+    if (run2.cancelled) return { status: "cancelled", output: null };
+    if (host.unixNowMs() >= run2.deadline) return finish(input.runId, { status: "deadline_exceeded", output: null, error: "task deadline exceeded" });
     const call = queue.shift();
     if (!call) return next();
     try {
@@ -731,16 +889,16 @@ function runAgentTask(input) {
       save(history);
       let value;
       try {
-        value = execute(profile, call.name, JSON.parse(call.arguments), run.deadline);
+        value = execute(profile, call.name, JSON.parse(call.arguments), run2.deadline);
       } catch (e) {
         value = { error: String(e) };
       }
       if (value && typeof value === "object" && "jobId" in value) {
         const job = String(value.jobId);
-        run.jobs.add(job);
+        run2.jobs.add(job);
         return host.awaitJob(job, (value2) => {
-          run.jobs.delete(job);
-          if (run.cancelled) return { status: "cancelled", output: null };
+          run2.jobs.delete(job);
+          if (run2.cancelled) return { status: "cancelled", output: null };
           try {
             result2(call, JSON.stringify(value2).slice(0, 32768));
             return calls(queue);
@@ -756,27 +914,26 @@ function runAgentTask(input) {
     }
   }
   function next() {
-    if (run.cancelled) return { status: "cancelled", output: null };
-    if (host.unixNowMs() >= run.deadline) return finish(input.runId, { status: "deadline_exceeded", output: null, error: "task deadline exceeded" });
-    if (++run.turns > profile.budgets.turns || run.tokens >= profile.budgets.tokens) return fail("task budget exhausted");
+    if (run2.cancelled) return { status: "cancelled", output: null };
+    if (host.unixNowMs() >= run2.deadline) return finish(input.runId, { status: "deadline_exceeded", output: null, error: "task deadline exceeded" });
+    if (++run2.turns > profile.budgets.turns || run2.tokens >= profile.budgets.tokens) return fail("task budget exhausted");
     try {
-      const key = selected.endpoint.secret ? host.secretGet(selected.endpoint.secret) : null;
-      if (selected.endpoint.secret && !key) throw new Error("endpoint secret unavailable");
-      const opts = request(selected.endpoint, profile, history.turns, key, profile.budgets.tokens - run.tokens);
-      opts.timeoutMs = Math.max(1, Math.min(opts.timeoutMs, run.deadline - host.unixNowMs()));
+      const key = endpointKey(selected.endpoint);
+      const opts = request(selected.endpoint, profile, history.turns, key, profile.budgets.tokens - run2.tokens);
+      opts.timeoutMs = Math.max(1, Math.min(opts.timeoutMs, run2.deadline - host.unixNowMs()));
       const started = JSON.parse(host.fetchStart(JSON.stringify(opts)));
       if (!started.jobId) throw new Error(started.error || "request start failed");
       const job = started.jobId;
-      run.jobs.add(job);
+      run2.jobs.add(job);
       return host.awaitJob(job, (value) => {
-        run.jobs.delete(job);
-        if (run.cancelled) return { status: "cancelled", output: null };
+        run2.jobs.delete(job);
+        if (run2.cancelled) return { status: "cancelled", output: null };
         try {
-          if (host.unixNowMs() >= run.deadline) return finish(input.runId, { status: "deadline_exceeded", output: null, error: "task deadline exceeded" });
+          if (host.unixNowMs() >= run2.deadline) return finish(input.runId, { status: "deadline_exceeded", output: null, error: "task deadline exceeded" });
           if (value.error || !value.status || value.status < 200 || value.status >= 300) throw new Error(value.error || `endpoint HTTP ${value.status}`);
           const { turn, tokens } = response(value.body || "");
-          run.tokens += tokens;
-          if (run.tokens > profile.budgets.tokens) throw new Error("task token budget exhausted");
+          run2.tokens += tokens;
+          if (run2.tokens > profile.budgets.tokens) throw new Error("task token budget exhausted");
           history.turns.push(turn);
           save(history);
           if (turn.toolCalls?.length) return calls([...turn.toolCalls]);
@@ -800,15 +957,16 @@ function runAgentTask(input) {
 
 // rotterdom/src/plugin.ts
 var plugin_default = {
+  ...decision_default,
   runAgentTask,
   abortAgentTask,
   openSession(ctx) {
-    const config = ctx.config || {};
+    const config2 = ctx.config || {};
     if (ctx.mode === "watcher") throw new Error("watcher mode is unsupported");
     const selected = resolve(
-      config.profile || ctx.preset || config.preset,
-      ctx.model || config.model,
-      ctx.systemPrompt === void 0 ? config.systemPrompt : ctx.systemPrompt
+      config2.profile || ctx.preset || config2.preset,
+      ctx.model || config2.model,
+      ctx.systemPrompt === void 0 ? config2.systemPrompt : ctx.systemPrompt
     );
     return { sessionId: open(ctx.tabId, selected.profile, selected.endpoint, "auto") };
   },

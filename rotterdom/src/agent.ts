@@ -1,6 +1,6 @@
 import type { AgentTaskInput, AgentTaskResult, FetchResult } from "@codeterm/plugin-sdk";
 import { resolve } from "./config";
-import { request, response } from "./adapters";
+import { endpointKey, request, response } from "./adapters";
 import { claim, complete, load, recover, save, type History } from "./history";
 import { execute } from "./runtime";
 import type { NativeToolCall } from "./types";
@@ -76,8 +76,7 @@ export function runAgentTask(input: AgentTaskInput): AgentTaskResult {
     if (host.unixNowMs() >= run.deadline) return finish(input.runId, { status: "deadline_exceeded", output: null, error: "task deadline exceeded" });
     if (++run.turns > profile.budgets.turns || run.tokens >= profile.budgets.tokens) return fail("task budget exhausted");
     try {
-      const key = selected.endpoint.secret ? host.secretGet(selected.endpoint.secret) : null;
-      if (selected.endpoint.secret && !key) throw new Error("endpoint secret unavailable");
+      const key = endpointKey(selected.endpoint);
       const opts = request(selected.endpoint, profile, history.turns, key, profile.budgets.tokens - run.tokens);
       opts.timeoutMs = Math.max(1, Math.min(opts.timeoutMs, run.deadline - host.unixNowMs()));
       const started = JSON.parse(host.fetchStart(JSON.stringify(opts))) as { jobId?: string; error?: string };

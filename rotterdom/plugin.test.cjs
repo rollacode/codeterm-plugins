@@ -163,3 +163,89 @@ test('aborting an awaiting Agent task persists cancellation and refuses late too
  assert.equal(f.files.has('/project/late.txt'),false);
  assert.equal(f.plugin.runAgentTask(input).status,'cancelled');
 });
+const decisionFixtures = JSON.parse(fs.readFileSync(__dirname+'/fixtures/decision/shared.json','utf8'));
+function decisionFixture() {
+ const f=fixture(); const fetches=[];
+ let result={status:200,body:JSON.stringify({data:[{id:'live',name:'Live endpoint model'},{id:'live'},{id:7}]})};
+ f.host.fetch.async=(opts,then)=>{fetches.push(opts);return then(result)};
+ return {...f,fetches,result:value=>{result=value}};
+}
+function completion(answer, usage={prompt_tokens:123,completion_tokens:45}) {
+ return {status:200,body:JSON.stringify({choices:[{message:{content:JSON.stringify(answer)},finish_reason:'stop'}],usage})};
+}
+test('decision capability and independently released metadata agree',()=>{
+ const manifest=JSON.parse(fs.readFileSync(__dirname+'/plugin.json','utf8'));
+ const pkg=JSON.parse(fs.readFileSync(__dirname+'/package.json','utf8'));
+ const channel=JSON.parse(fs.readFileSync(__dirname+'/../channel.json','utf8')).plugins.find(p=>p.id==='rotterdom');
+ assert.equal(manifest.capabilities.decisionModel.tokenMode,'none');
+ assert.equal(manifest.version,pkg.version);assert.equal(manifest.version,channel.version);
+ assert.equal(manifest.minCodeterm,channel.minCodeterm);
+ const f=decisionFixture();assert.deepEqual(JSON.parse(JSON.stringify(f.plugin.primitives())),{choice:true,noul:true,score:true});
+ assert.equal(f.plugin.supportsQuestionBatch(),true);assert.equal(f.plugin.supportsCalibratedChoiceConfidence(),false);
+});
+test('decision models come from the selected endpoint and secrets stay in headers',()=>{
+ const f=decisionFixture();
+ f.config.endpoints.push({id:'remote',baseUrl:'https://fixture.test/api/v1/',models:['configured-only'],secret:'key'});
+ f.config.profiles.push({...profile,id:'decision',endpoint:'remote',model:'remote-configured'});
+ f.config.decision={profile:'decision'};f.host.secretGet=id=>id==='key'?'opaque-secret':null;
+ assert.deepEqual(JSON.parse(JSON.stringify(f.plugin.models())),[{id:'live',display_name:'Live endpoint model'}]);
+ assert.equal(f.fetches[0].url,'https://fixture.test/api/v1/models');assert.equal(f.fetches[0].headers.authorization,'Bearer opaque-secret');
+ assert.equal(f.plugin.selectModel('live'),true);assert.equal(f.plugin.modelId(),'live');assert.equal(f.plugin.selectModel(''),false);
+ assert.equal(f.plugin.metadata().server_address,'https://fixture.test/api/v1/');
+ f.result({status:500,body:'private error'});assert.equal(f.plugin.models().length,0);
+ f.host.secretGet=()=>null;assert.equal(f.plugin.models().length,0);
+ assert.equal(f.plugin.decide(decisionFixtures[0].request,1000).error,'unavailable');
+});
+test('all decision primitives preserve shared fixtures without tools or filesystem access',()=>{
+ for(const item of decisionFixtures) {
+  const f=decisionFixture();f.result(completion(item.answer));
+  f.config.profiles[0]={...profile,root:'',params:{temperature:1.5,top_p:0.7,seed:5}};
+  f.host.projectWriteAllowed=()=>{throw Error('decision touched project permission')};
+  const result=f.plugin.decide(item.request,250);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)),item.answer);
+  const opts=f.fetches[0],wire=JSON.parse(opts.body);
+  assert.equal(opts.url,'http://localhost:1234/v1/chat/completions');assert.equal(opts.timeoutMs,250);
+  assert.equal(opts.headers.authorization,undefined);assert.equal(wire.model,'fixture');assert.equal(wire.temperature,0);
+  assert.equal(wire.tools,undefined);assert.equal(wire.tool_choice,undefined);
+  assert.deepEqual(JSON.parse(wire.messages[1].content),{state:item.request.state,questions:{single:{instructions:item.request.instructions,question:item.request.question}}});
+  assert.equal(wire.response_format.type,'json_schema');assert.equal(wire.response_format.json_schema.strict,true);
+  assert.equal(f.writes.length,0);
+ }
+});
+test('named decision batch uses one physical request and carries usage',()=>{
+ const f=decisionFixture();const questions={},answers={};
+ for(const item of decisionFixtures){questions[item.request.question.type]={instructions:item.request.instructions,question:item.request.question};answers[item.request.question.type]=item.answer}
+ f.result(completion({answers}));const result=f.plugin.decideQuestions({state:{shared:'opaque'},questions},2000);
+ assert.deepEqual(JSON.parse(JSON.stringify(result)),{answers,usage:{input_tokens:123,output_tokens:45}});
+ assert.equal(f.fetches.length,1);
+ const wire=JSON.parse(f.fetches[0].body);assert.equal(JSON.parse(wire.messages[1].content).state.shared,'opaque');
+ f.result(completion({answers:{noul:answers.noul}}));assert.equal(f.plugin.decideQuestions({state:{},questions},2000).error,'invalid_response');
+});
+test('decision deadlines reject expired work and late completions with no retry',()=>{
+ const f=decisionFixture();const input=decisionFixtures[0].request;
+ for(const ms of [0,-1,NaN,Infinity,0.5]) assert.equal(f.plugin.decide(input,ms).error,'timeout');
+ assert.equal(f.fetches.length,0);
+ f.result(completion(decisionFixtures[0].answer));f.plugin.decide(input,20000);assert.equal(f.fetches[0].timeoutMs,10000);
+ f.host.fetch.async=(opts,then)=>{f.advance();return then(completion(decisionFixtures[0].answer))};
+ assert.equal(f.plugin.decide(input,500).error,'timeout');
+ f.host.fetch.async=(opts,then)=>then({error:'request timed out'});assert.equal(f.plugin.decide(input,500).error,'timeout');
+});
+test('decision malformed and transport failures fail closed',()=>{
+ const f=decisionFixture();const input=decisionFixtures[1].request;
+ for(const bad of [{type:'noul',p:0.8},{type:'choice',choice:'foreign',probabilities:{yes:0.8,no:0.2},confidence:0.8},
+  {type:'choice',choice:'yes',probabilities:{yes:1},confidence:1},
+  {type:'choice',choice:'yes',probabilities:{yes:0.8,no:0.8},confidence:0.8},
+  {type:'choice',choice:'yes',probabilities:{yes:-1,no:2},confidence:0.8}]) {
+  f.result(completion(bad));assert.equal(f.plugin.decide(input,500).error,'invalid_response');
+ }
+ f.result(completion({...decisionFixtures[2].answer,score:3}));assert.equal(f.plugin.decide(decisionFixtures[2].request,500).error,'invalid_response');
+ for(const bad of [{status:200,body:'not-json'},{status:200,body:JSON.stringify({choices:[{message:{content:'not-json'}}]})},
+  {status:200,body:JSON.stringify({choices:[{message:{content:JSON.stringify(decisionFixtures[1].answer),tool_calls:[{}]}}]})}]) {
+  f.result(bad);assert.equal(f.plugin.decide(input,500).error,'invalid_response');
+ }
+ for(const bad of [{status:401,body:'private token details'},{error:'private network details'}]) {
+  f.result(bad);assert.deepEqual(JSON.parse(JSON.stringify(f.plugin.decide(input,500))),{error:'transport'});
+ }
+ f.result(completion({type:'noul',p:1.1}));assert.equal(f.plugin.decide(decisionFixtures[0].request,500).error,'invalid_response');
+ assert.equal(f.plugin.decide({...input,question:{type:'choice',options:{}}},500).error,'invalid_response');
+});

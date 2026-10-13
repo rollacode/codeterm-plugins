@@ -1,3 +1,4 @@
+import decisionModel from "./decision";
 import * as harness from "./harness";
 import { resolve, settings } from "./config";
 import type { ChatBackendOpenSessionCtx } from "@codeterm/plugin-sdk";
@@ -9,6 +10,7 @@ import { predefinedProfiles } from "./profiles";
 import { domiosCommand } from "./domios";
 import { runAgentTask, abortAgentTask } from "./agent";
 export default {
+  ...decisionModel,
   runAgentTask,
   abortAgentTask,
   openSession(ctx: ChatBackendOpenSessionCtx) {

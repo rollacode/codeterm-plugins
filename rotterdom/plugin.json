@@ -1,6 +1,6 @@
 {
   "id": "rotterdom",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minCodeterm": "1.14.2",
   "hostApi": 2,
   "displayName": "Rotterdom",
@@ -14,6 +14,9 @@
       "sessionConfig": true,
       "contextOwner": "plugin",
       "agentTasks": true
+    },
+    "decisionModel": {
+      "tokenMode": "none"
     }
   },
   "permissions": {
