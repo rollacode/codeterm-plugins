@@ -345,7 +345,7 @@ const plugin: PluginModule = {
     }
     if (p.skipPermissions) parts.push("--yes-always");
     if (!requestedModel) parts.push("--model", quote(selected.model));
-    parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
+    parts.push("--no-suggest-shell-commands", "--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
     // Aider does not load the agents.md convention itself. Keep repository
     // instructions in read-only context, without scanning the whole tree.
     const instructions = `${cwd.replace(/[\\/]+$/, "")}/AGENTS.md`;
