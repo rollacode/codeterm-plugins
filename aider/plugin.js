@@ -894,7 +894,7 @@ var plugin = {
     }
     if (p.skipPermissions) parts.push("--yes-always");
     if (!requestedModel) parts.push("--model", quote(selected.model));
-    parts.push("--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
+    parts.push("--no-suggest-shell-commands", "--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
     const instructions = `${cwd.replace(/[\\/]+$/, "")}/AGENTS.md`;
     try {
       if (host.fs.readFileHead(instructions, 1) !== null) {

@@ -1,10 +1,10 @@
 {
   "id": "aider",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minCodeterm": "1.14.2",
   "hostApi": 2,
   "displayName": "Aider",
-  "description": "The bundled adapter requires aider-chat 0.86.2.",
+  "description": "Interactive aider-chat 0.86.2 adapter. Worker dispatch is disabled because autonomous shell execution is unsupported.",
   "binaryName": "aider",
   "cliBinary": "aider",
   "entry": "plugin.js",
@@ -12,7 +12,7 @@
   "capabilities": {
     "agentProvider": true,
     "toolLess": true,
-    "replyRelay": true,
+    "replyRelay": false,
     "contextAttach": {
       "editable": true,
       "readOnly": true

@@ -57,6 +57,18 @@ test("full access maps to --yes-always and stays off otherwise", () => {
   assert.match(p.buildLaunchCommand({cwd: "/work", skipPermissions: true}), /--yes-always/);
   assert.doesNotMatch(p.buildLaunchCommand({cwd: "/work"}), /--yes-always/);
 });
+test("tool-less launches disable model shell suggestions in every permission mode", () => {
+  for (const platform of ["linux", "windows"]) {
+    const p = configured([mimoEndpoint], {platform: () => platform});
+    for (const skipPermissions of [false, true]) {
+      const command = p.buildLaunchCommand({cwd: "/work", skipPermissions});
+      assert.match(command, /--no-suggest-shell-commands/);
+      assert.equal(command.includes("--yes-always"), skipPermissions);
+    }
+    assert.match(p.buildResumeCommand("existing"), /--no-suggest-shell-commands/);
+  }
+});
+
 test("runtime settings and nonce are applied in the launch shell", () => {
   const p = load({settingsJson: () => JSON.stringify({endpoints: [mimoEndpoint], configPath: "/work/aider.yml"})});
   const command = p.buildLaunchCommand({cwd: "/work", launchMarker: "nonce", args: ["--model", "openai/mimo-v2.6-pro"]});
@@ -920,10 +932,10 @@ test("missing adapter path refuses instead of silently launching plain Aider", (
   assert.throws(() => p.buildLaunchCommand({}), /Reinstall.*plainMode=true/);
 });
 
-test("manifest declares tool-less relay and installer/updater preserve adapter pin", () => {
+test("manifest refuses managed Workers and installer/updater preserve adapter pin", () => {
   const manifest = JSON.parse(readFileSync(join(__dirname, "plugin.json")));
   assert.equal(manifest.capabilities.toolLess, true);
-  assert.equal(manifest.capabilities.replyRelay, true);
+  assert.equal(manifest.capabilities.replyRelay, false);
   for (const platform of ["macos", "linux", "windows"]) {
     assert.equal(manifest.installer[platform], manifest.updater[platform].replaceAll("{version}", "0.86.2"));
     assert.match(manifest.installer[platform], /uv tool install --force aider-chat==0\.86\.2/);
