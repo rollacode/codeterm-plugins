@@ -1,6 +1,6 @@
 {
   "id": "lark",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minCodeterm": "1.14.2",
   "hostApi": 2,
   "displayName": "LARK M2",
@@ -119,7 +119,9 @@
     "glanceView": true
   },
   "permissions": {
-    "local_recording": true
+    "local_recording": true,
+    "agent_commands": true
   },
-  "configHelp": "Grant local recording, then enable LARK and explicitly select the connected receiver and LARK microphone in the host picker. Choose a recipient using its tab menu. Double-press to start the existing voice recorder; double-press again to stop and send through the configured Transcriber. No receiver means no capture. Windows support requires the matching host wiring. macOS mapping and hardware verification remain pending."
+  "configHelp": "Before giving setup instructions, run codeterm plugin get lark, then codeterm plugin lark status and codeterm plugin lark diagnostics on the machine with the receiver. Diagnostic verbs are read-only and require the agent_commands grant. The LARK settings show recording status, then Refresh status, Enable LARK, Disable LARK, Show diagnostics in that order. Grant local_recording in Domios plugin permissions before Enable LARK. Show diagnostics exposes the host status and receiver battery report. There is no receiver/microphone picker in LARK settings: the current host owns device selection and may show no picker when no receiver is offered. LARK cannot list devices, remember a selection or reconnect automatically with this host API; a generic host capability is pending. Do not tell the user to pick a device in this settings page. Use the recipient tab menu: Use LARK recording here. Double-press starts the existing recorder; double-press again stops and sends through Transcriber. Connected status proves host attachment, not a working physical button; verify button and battery on the target machine.",
+  "agentGuide": "AGENT.md"
 }
