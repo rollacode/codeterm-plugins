@@ -1,6 +1,6 @@
 import type { Endpoint, Profile } from "./types";
 import { predefinedProfiles } from "./profiles";
-export interface Settings { endpoints: Endpoint[]; profiles: Profile[]; defaultProfile?: string; root?: string; model?: string }
+export interface Settings { endpoints: Endpoint[]; profiles: Profile[]; defaultProfile?: string; decision?: { profile?: string }; root?: string; model?: string }
 export function settings(): Settings {
   const value = JSON.parse(host.settingsJson() || "{}");
   if (!Array.isArray(value.endpoints)) throw new Error("configure endpoints first");

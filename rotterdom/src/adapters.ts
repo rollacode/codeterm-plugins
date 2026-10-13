@@ -2,11 +2,19 @@ import { openAiMessage, pairToolCalls } from "./toolwire";
 import type { ChatTurn, Endpoint, Profile } from "./types";
 import { offeredTools } from "./policy";
 import { openAiTools } from "./toolspec";
-export function request(endpoint: Endpoint, profile: Profile, turns: ChatTurn[], key: string | null, remainingTokens: number) {
+export function endpointRequest(endpoint: Endpoint, path: string, key: string | null) {
   if (!/^https?:\/\/[^\s?#]+$/.test(endpoint.baseUrl) || /\/\/[^/]*@/.test(endpoint.baseUrl)) throw new Error("invalid endpoint URL");
-  const tools = openAiTools(offeredTools(profile, host.projectWriteAllowed(profile.root)));
-  return { url: `${endpoint.baseUrl.replace(/\/+$/, "")}/chat/completions`, method: "POST",
-    headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
+  return { url: `${endpoint.baseUrl.replace(/\/+$/, "")}${path}`,
+    headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) } };
+}
+export function endpointKey(endpoint: Endpoint): string | null {
+  const key = endpoint.secret ? host.secretGet(endpoint.secret) : null;
+  if (endpoint.secret && !key) throw new Error("endpoint secret unavailable");
+  return key;
+}
+export function request(endpoint: Endpoint, profile: Profile, turns: ChatTurn[], key: string | null, remainingTokens: number, enableTools = true) {
+  const tools = enableTools ? openAiTools(offeredTools(profile, host.projectWriteAllowed(profile.root))) : [];
+  return { ...endpointRequest(endpoint, "/chat/completions", key), method: "POST",
     body: JSON.stringify({ temperature: profile.params?.temperature, top_p: profile.params?.top_p, seed: profile.params?.seed, model: profile.model, stream: false,
       max_tokens: Math.min(4096, remainingTokens),
       messages: [{ role: "system", content: profile.systemPrompt }, ...pairToolCalls(turns).map(openAiMessage)],

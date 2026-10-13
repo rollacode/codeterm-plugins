@@ -1,6 +1,6 @@
 import type { NormalizedChatMessage } from "@codeterm/plugin-sdk";
 import type { Endpoint, NativeToolCall, Profile } from "./types";
-import { request, response } from "./adapters";
+import { endpointKey, request, response } from "./adapters";
 import { claim, complete, load, recover, save, type History } from "./history";
 import { execute } from "./runtime";
 import { transcriptTurns, type TranscriptRow } from "./transcript";
@@ -64,8 +64,7 @@ function startRequest(s: Session): void {
   if (++s.rounds > s.history.profile.budgets.turns) throw new Error("turn budget exhausted");
   const remaining = s.history.profile.budgets.tokens - s.tokens;
   if (remaining <= 0) throw new Error("token budget exhausted");
-  const key = s.endpoint.secret ? host.secretGet(s.endpoint.secret) : null;
-  if (s.endpoint.secret && !key) throw new Error("endpoint secret unavailable");
+  const key = endpointKey(s.endpoint);
   const opts = request(s.endpoint, s.history.profile, s.history.turns, key, remaining);
   opts.timeoutMs = Math.max(1, Math.min(opts.timeoutMs, s.deadline - host.unixNowMs()));
   const job = host.fetch.stream(opts);
