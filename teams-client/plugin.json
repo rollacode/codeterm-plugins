@@ -1,6 +1,6 @@
 {
   "id": "teams-client",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "minCodeterm": "1.12.3",
   "hostApi": 2,
   "displayName": "Teams Client",
@@ -26,6 +26,8 @@
         "tar",
         "tar.exe",
         "powershell.exe",
+        "sh",
+        "mkdir",
         "shasum",
         "sha256sum",
         "uname",

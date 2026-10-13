@@ -1,4 +1,5 @@
 import type { GlanceView, PluginModule, ViewNode } from "@codeterm/plugin-sdk";
+import { readOutput } from "./read-output";
 import { decideSend, matchChats, parseSendScope, validateSendScope, type SendOrigin, type SendScope } from "../../shared/src/send-scope";
 import {
   CHAT_CACHE_TTL_MS, EXO_HOME_DIR, EXO_MODULE, EXO_MODULE_SUM, EXO_PACKAGE, EXO_TOKEN_DIR, EXO_TOKEN_FILES,
@@ -188,6 +189,15 @@ function protectStorage(p: Paths): { error?: string; message?: string } {
 }
 
 function applyStorageProtection(p: Paths): { error?: string; message?: string } {
+  // Older hosts require the private root to exist before granting host.fs mkdir.
+  if (!host.fs.makeDirs(p.root)) {
+    const created = host.path.isWindows
+      ? runProcess(toolsFor("win32", windowsRoot()).powershell,
+        ["-NoProfile", "-NonInteractive", "-Command", "[IO.Directory]::CreateDirectory($env:CT_PLUGIN_ROOT) | Out-Null"],
+        { CT_PLUGIN_ROOT: nativePath(p.root) }, TIMEOUTS.probe)
+      : runProcess("mkdir", ["-p", "-m", "700", nativePath(p.root)], {}, TIMEOUTS.probe);
+    if (!created.ok) return { error: "storage-protection-failed", message: "Could not create the plugin-owned private directory. Nothing was started." };
+  }
   for (const dir of [p.root, p.home, p.tokenDir, p.runtime, p.noPath]) {
     try { if (!host.fs.makeDirs(dir)) return { error: "storage-protection-failed", message: "Could not create the plugin-owned private directory." }; }
     catch { return { error: "storage-protection-failed", message: "Could not create the plugin-owned private directory." }; }
@@ -269,6 +279,10 @@ function runExo(p: Paths, args: string[], timeoutMs: number): RunResult {
   if (!installedMarker(p)) return { ok: false, error: lifecycleMessage("not-installed"), stdout: "", stderr: "" };
   const secured = protectStorage(p);
   if (secured.error) return { ok: false, error: secured.message || "Could not secure plugin storage.", stdout: "", stderr: "" };
+  if (args[0] === "list-chats" || args[0] === "get-chat") {
+    return readOutput(nativePath(p.binary), args, exoEnv(p), p.root,
+      target.platform === "win32" ? target.tools.powershell : null, timeoutMs, runProcess);
+  }
   return runProcess(nativePath(p.binary), args, exoEnv(p), timeoutMs);
 }
 

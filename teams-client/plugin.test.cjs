@@ -244,6 +244,13 @@ function mockHost(options = {}) {
     const bin = normalize(opts.bin || "").split("/").pop();
     const args = (opts.args || []).map(String);
     calls.push({ bin, raw: String(opts.bin), args, env: { ...(opts.env || {}) }, detach: !!opts.detach, timeoutMs: opts.timeoutMs, logFile: opts.logFile });
+    if ((bin === "powershell.exe" || bin === "sh") && opts.env?.CT_EXO_OUTPUT) {
+      const childArgs = JSON.parse(opts.env.CT_EXO_ARGS);
+      calls.push({ bin: "exo-teams", args: childArgs, env: opts.env, timeoutMs: opts.timeoutMs });
+      const child = exo(childArgs, opts);
+      files.set(normalize(opts.env.CT_EXO_OUTPUT), child.stdout);
+      return { ...child, stdout: "" };
+    }
     if (bin === "whoami.exe") return { code: 0, stdout: "FIXTURE\\owner\n", stderr: "" };
     if (bin === "icacls.exe" || bin === "chmod" || bin === "taskkill.exe" || bin === "kill") return { code: 0, stdout: "", stderr: "" };
     if (bin === "uname") return { code: 0, stdout: "arm64\n", stderr: "" };
@@ -477,6 +484,28 @@ test("chats lists display names and search finds Alexander Kouznetsov's 1:1 chat
   assert.equal(env.exoCalls().filter((call) => call.args[0] === "list-chats").length, 1, "the chat list is cached");
   result(command("chats", ["--refresh"]));
   assert.equal(env.exoCalls().filter((call) => call.args[0] === "list-chats").length, 2);
+});
+
+test("large chat lists and histories survive the host stdout cap and leave no response files", () => {
+  for (const platform of ["win32", "linux", "darwin"]) {
+    const chats = RAW_CHATS.concat(Array.from({ length: 150 }, (_, index) => ({
+      id: `19:large_${index}@thread.v2`, title: `Group ${index}`, members: [],
+      ignoredMetadata: "x".repeat(2000),
+    })));
+    const messages = [{ id: "1", messagetype: "Text", content: "Readable message", imdisplayname: "Alexander Kouznetsov", originalarrivaltime: "2026-10-13T10:00:00Z", ignoredMetadata: "x".repeat(200000) }];
+    assert.ok(JSON.stringify(chats).length > 128 * 1024);
+    const env = mockHost({ platform, chats, messages });
+    env.install(); env.signIn();
+    assert.equal(result(command("search", ["Alexander"])).match.id, ALEX_CHAT);
+    assert.match(JSON.stringify(result(command("history", [ALEX_CHAT]))), /Readable message/);
+    assert.equal([...env.files.keys()].some((file) => /\/read-.*\.json$/.test(file)), false);
+    const readCalls = env.calls.filter((call) => call.env?.CT_EXO_OUTPUT);
+    assert.ok(readCalls.length > 0);
+    if (platform !== "win32") assert.ok(readCalls.some((call) => call.args.includes('umask 077; exec "$CT_EXO_BIN" "$@" > "$CT_EXO_OUTPUT"')));
+    env.state.getChatError = "Error: fetching messages: returned status 403";
+    assert.match(command("history", [ALEX_CHAT]).error, /403/);
+    assert.equal([...env.files.keys()].some((file) => /\/read-.*\.json$/.test(file)), false);
+  }
 });
 
 test("send posts the escaped text through exo-teams and returns the message id read back from the chat", () => {

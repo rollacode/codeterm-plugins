@@ -24,6 +24,36 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
+// teams-client/src/read-output.ts
+var WINDOWS_READ = [
+  '$ErrorActionPreference = "Stop"',
+  "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)",
+  "$readArgs = @(ConvertFrom-Json $env:CT_EXO_ARGS)",
+  "$readOutput = & $env:CT_EXO_BIN @readArgs",
+  "$readCode = $LASTEXITCODE",
+  '[IO.File]::WriteAllText($env:CT_EXO_OUTPUT, ($readOutput -join "`n"), [Text.UTF8Encoding]::new($false))',
+  "exit $readCode"
+].join("; ");
+function readOutput(binary, args, env, root, powershell, timeoutMs, run) {
+  const file = host.path.normalize(`${root}/read-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
+  const native = host.path.toNative(file);
+  const readEnv = { ...env, CT_EXO_BIN: binary, CT_EXO_OUTPUT: native, CT_EXO_ARGS: JSON.stringify(args) };
+  try {
+    const result = powershell ? run(powershell, ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_READ], readEnv, timeoutMs) : run("/bin/sh", ["-c", 'umask 077; exec "$CT_EXO_BIN" "$@" > "$CT_EXO_OUTPUT"', "teams-read", ...args], readEnv, timeoutMs);
+    if (!result.ok) return result;
+    const stdout = host.fs.readFile(file);
+    if (stdout === null) return { ok: false, error: "Could not read the complete Teams response from private storage.", stdout: "", stderr: result.stderr };
+    return { ok: true, stdout, stderr: result.stderr };
+  } catch {
+    return { ok: false, error: "Could not capture the complete Teams response in private storage.", stdout: "", stderr: "" };
+  } finally {
+    try {
+      host.fs.removeFile(file);
+    } catch {
+    }
+  }
+}
+
 // shared/src/send-scope.ts
 var ALL_CHATS = { mode: "all" };
 var MAX_SCOPE_CHATS = 200;
@@ -569,6 +599,15 @@ function protectStorage(p) {
   return result;
 }
 function applyStorageProtection(p) {
+  if (!host.fs.makeDirs(p.root)) {
+    const created = host.path.isWindows ? runProcess(
+      toolsFor("win32", windowsRoot()).powershell,
+      ["-NoProfile", "-NonInteractive", "-Command", "[IO.Directory]::CreateDirectory($env:CT_PLUGIN_ROOT) | Out-Null"],
+      { CT_PLUGIN_ROOT: nativePath(p.root) },
+      TIMEOUTS.probe
+    ) : runProcess("mkdir", ["-p", "-m", "700", nativePath(p.root)], {}, TIMEOUTS.probe);
+    if (!created.ok) return { error: "storage-protection-failed", message: "Could not create the plugin-owned private directory. Nothing was started." };
+  }
   for (const dir of [p.root, p.home, p.tokenDir, p.runtime, p.noPath]) {
     try {
       if (!host.fs.makeDirs(dir)) return { error: "storage-protection-failed", message: "Could not create the plugin-owned private directory." };
@@ -648,6 +687,17 @@ function runExo(p, args, timeoutMs) {
   if (!installedMarker(p)) return { ok: false, error: lifecycleMessage("not-installed"), stdout: "", stderr: "" };
   const secured = protectStorage(p);
   if (secured.error) return { ok: false, error: secured.message || "Could not secure plugin storage.", stdout: "", stderr: "" };
+  if (args[0] === "list-chats" || args[0] === "get-chat") {
+    return readOutput(
+      nativePath(p.binary),
+      args,
+      exoEnv(p),
+      p.root,
+      target.platform === "win32" ? target.tools.powershell : null,
+      timeoutMs,
+      runProcess
+    );
+  }
   return runProcess(nativePath(p.binary), args, exoEnv(p), timeoutMs);
 }
 function failureText(run) {
