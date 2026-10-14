@@ -731,6 +731,127 @@ tests.push(["directory trust prompt declares exact safe choice and live response
   }
 }]);
 
+function sessionChat(fixtureDir, cwd, id, extra = {}) {
+  const base = `/tmp/home/.grok/sessions/${encodeURIComponent(cwd)}/${id}`;
+  const files = {};
+  for (const name of ["updates.jsonl", "events.jsonl"]) {
+    const path = join(__dirname, "tests/fixtures", fixtureDir, name);
+    if (existsSync(path)) files[`${base}/${name}`] = readFileSync(path, "utf8");
+  }
+  Object.assign(files, extra);
+  const plugin = load(hostFor({ files }));
+  const read = (cursor) => JSON.parse(JSON.stringify(plugin.readStructuredChat(cwd, id, cursor)));
+  return { plugin, files, base, read };
+}
+
+const PULSE_CWD = "C:\\Developer\\codeterm\\codeterm-worktrees\\pl-7lsisa-task-df4mdr-4a2f3501";
+const PULSE_ID = "01a13ade-172b-7101-bc82-f5f7f189ae79";
+
+tests.push(["recorded Grok session maps assistant text, tool targets, counts, edits, failures and compaction", () => {
+  const { read } = sessionChat("pulse-session", PULSE_CWD, PULSE_ID);
+  const { messages } = read(null);
+  const byType = (type) => messages.filter(m => m.type === type);
+  assert.equal(byType("user").length, 1);
+  assert.ok(byType("assistant").length >= 1);
+  assert.equal(byType("assistant")[0].content, "I'll acknowledge the assignment first, then project the existing heartbeat schedule into the tab's recurring list.");
+  const call = (name) => messages.find(m => m.type === "tool_call" && m.toolName === name);
+  const result = (c) => messages.find(m => m.type === "tool_result" && m.toolId === c.toolId);
+
+  const readCall = call("read_file");
+  assert.equal(readCall.toolKind, "read");
+  assert.equal(readCall.toolSummary, "src-tauri/src/delayed_send.rs");
+  assert.match(readCall.toolDetail, /^C:\/Developer\/codeterm\/.*\/src-tauri\/src\/delayed_send\.rs$/);
+
+  const grepCall = call("grep");
+  assert.equal(grepCall.toolKind, "search");
+  assert.match(grepCall.toolSummary, /^grep "[^"]+"/);
+  const raw = readFileSync(join(__dirname, "tests/fixtures/pulse-session/updates.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l));
+  const grepOut = raw.map(r => r.params.update.rawOutput).find(o => o && o.type === "GrepSearch");
+  const matches = grepOut.file_matches.reduce((n, f) => n + f.matches.length, 0);
+  assert.ok(matches > 0 && grepOut.file_matches.length > 0);
+  assert.ok(result(grepCall).toolResult.startsWith(`${matches} ${matches === 1 ? "match" : "matches"} in ${grepOut.file_matches.length} ${grepOut.file_matches.length === 1 ? "file" : "files"}\n`));
+
+  const listCall = call("list_dir");
+  assert.equal(listCall.toolSummary, "src/components/Terminal");
+
+  const searchReplace = call("search_replace");
+  assert.equal(searchReplace.toolKind, "edit");
+  assert.equal(searchReplace.toolEdits.length, 1);
+  assert.equal(searchReplace.toolEdits[0].path, searchReplace.toolInput.file_path);
+  const editResult = result(searchReplace);
+  assert.equal(editResult.fileDiffs.length, 1);
+  assert.ok(editResult.fileDiffs[0].additions > 0);
+  assert.equal(editResult.toolSummary, "src-tauri/src/service/hierarchy/plan_reminder_nudge/projection.rs");
+  assert.equal(call("write").toolEdits[0].old, "");
+
+  const failedResult = messages.find(m => m.type === "tool_result" && m.toolError === true);
+  assert.match(failedResult.toolResult, /does not exist/);
+  assert.equal(failedResult.content, failedResult.toolResult);
+
+  const bash = messages.filter(m => m.type === "tool_result" && m.toolExitCode !== undefined);
+  assert.ok(bash.some(m => m.toolExitCode === 1));
+  assert.ok(bash.some(m => m.toolExitCode === 0));
+
+  const system = byType("system");
+  const started = system.find(m => m.systemSubtype === "context_compaction_started");
+  assert.equal(started.content, "Context 81% full. Compacting…");
+  const done = system.find(m => m.systemSubtype === "contextCompaction");
+  assert.deepEqual(done.timelineMarker, { kind: "context_compaction" });
+  assert.equal(done.content, "Context compacted (206276 → 38936 tokens)");
+  assert.ok(system.some(m => m.systemSubtype === "turn_cancelled"));
+  assert.equal(system.filter(m => m.systemSubtype === "grok_unknown_update").length, 0, "known bookkeeping kinds are not unknown");
+  assert.equal(messages.every(m => typeof m.id === "string" && m.id), true);
+  assert.equal(new Set(messages.map(m => m.id)).size, messages.length, "row ids are unique");
+}]);
+
+tests.push(["unknown Grok update kinds degrade to a generic row and never vanish", () => {
+  const unknown = JSON.stringify({ method: "_x.ai/session/update", params: { sessionId: PULSE_ID,
+    update: { sessionUpdate: "brand_new_kind", detail: "x" }, _meta: { eventId: "evt-unknown", agentTimestampMs: 5 } } });
+  const { read, files, base } = sessionChat("pulse-session", PULSE_CWD, PULSE_ID);
+  files[`${base}/updates.jsonl`] += unknown + "\n";
+  const generic = read(null).messages.find(m => m.id === "evt-unknown");
+  assert.equal(generic.type, "system");
+  assert.equal(generic.systemSubtype, "grok_unknown_update");
+  assert.match(generic.content, /^Grok update: brand_new_kind\n.*"detail":"x"/);
+}]);
+
+tests.push(["structured chat reads only the tab's own claimed session", () => {
+  const { plugin } = sessionChat("pulse-session", PULSE_CWD, PULSE_ID);
+  const other = "01a13ade-ffff-7101-bc82-f5f7f189ae79";
+  assert.deepEqual(JSON.parse(JSON.stringify(plugin.readStructuredChat(PULSE_CWD, other, null))), { messages: [], cursor: "0" });
+  assert.deepEqual(JSON.parse(JSON.stringify(plugin.readStructuredChat("/elsewhere", PULSE_ID, null))), { messages: [], cursor: "0" });
+}]);
+
+tests.push(["model switch notices come from recorded turn model changes and are not replayed", () => {
+  const id = "01a122fc-abe9-7281-9837-24a92a378d30";
+  const { read } = sessionChat("switch-session", "/work/switchqa", id);
+  const first = read(null);
+  const switches = first.messages.filter(m => m.systemSubtype === "model_switch");
+  assert.deepEqual(switches.map(m => m.content), ["Switched to grok-4.5", "Switched to grok-4.6"]);
+  assert.equal(switches[0].id, `grok-model-${id}-1`);
+  assert.equal(first.messages.filter(m => m.type === "assistant").length, 6);
+  const order = first.messages.map(m => m.systemSubtype === "model_switch" ? "S" : m.type[0]).join("");
+  assert.ok(order.indexOf("S") > order.indexOf("a"), "a switch follows the first answered turn");
+  assert.match(first.cursor, /^\d+:\d+$/);
+  assert.deepEqual(read(first.cursor).messages, []);
+}]);
+
+tests.push(["a model switch recorded after the cursor is emitted exactly once", () => {
+  const id = "01a122fc-abe9-7281-9837-24a92a378d30";
+  const events = readFileSync(join(__dirname, "tests/fixtures/switch-session/events.jsonl"), "utf8").trim().split("\n");
+  const base = `/tmp/home/.grok/sessions/${encodeURIComponent("/work/switchqa")}/${id}`;
+  const updates = readFileSync(join(__dirname, "tests/fixtures/switch-session/updates.jsonl"), "utf8");
+  const files = { [`${base}/updates.jsonl`]: updates, [`${base}/events.jsonl`]: events.slice(0, 1).join("\n") + "\n" };
+  const plugin = load(hostFor({ files }));
+  const read = (cursor) => JSON.parse(JSON.stringify(plugin.readStructuredChat("/work/switchqa", id, cursor)));
+  const first = read(null);
+  assert.equal(first.messages.filter(m => m.systemSubtype === "model_switch").length, 0);
+  files[`${base}/events.jsonl`] = events.slice(0, 2).join("\n") + "\n";
+  const second = read(first.cursor);
+  assert.deepEqual(second.messages.map(m => m.content), ["Switched to grok-4.5"]);
+  assert.deepEqual(read(second.cursor).messages, []);
+}]);
+
 require("../provider-shared/updateTests.cjs")(tests, over => load(hostFor({host: over})), __dirname);
 
 let failed = 0;

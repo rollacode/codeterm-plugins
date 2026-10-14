@@ -180,21 +180,158 @@ function canonicalToolKind(kind: unknown): string {
     ? kind : "generic";
 }
 
-function grokUpdateToChat(row: Record<string, unknown>, seq: number): Record<string, unknown> | null {
+const SILENT_KINDS = new Set([
+  "hook_execution", "background_tasks", "task_backgrounded", "task_completed", "compaction_checkpoint",
+  "memory_dream_queued", "memory_dream_started", "memory_dream_completed",
+]);
+
+const CHAT_KINDS = new Set([
+  "tool_call", "tool_call_update", "user_message_chunk", "agent_thought_chunk", "agent_message_chunk",
+]);
+const LIFECYCLE_KINDS = new Set([
+  "auto_compact_started", "auto_compact_completed", "turn_completed", "retry_state", "session_recap", "plan",
+]);
+
+function stringField(source: unknown, keys: string[]): string {
+  if (!source || typeof source !== "object") return "";
+  for (const key of keys) {
+    const value = (source as Record<string, unknown>)[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "";
+}
+
+function slashPath(path: string): string {
+  return path.replace(/\\/g, "/");
+}
+
+function displayPath(path: string, cwd?: string): string {
+  const normal = slashPath(path);
+  const root = cwd ? slashPath(cwd).replace(/\/+$/, "") + "/" : "";
+  return root && normal.toLowerCase().startsWith(root.toLowerCase()) ? normal.slice(root.length) : normal;
+}
+
+function describeTool(name: string, input: unknown, cwd?: string): { summary: string; detail: string } {
+  const path = stringField(input, ["target_file", "file_path", "filePath", "path", "target_directory"]);
+  if (name === "grep") {
+    const pattern = stringField(input, ["pattern"]);
+    const scope = [stringField(input, ["path"]), stringField(input, ["glob"])]
+      .filter(Boolean).map(part => displayPath(part, cwd)).join(" ");
+    const text = `grep "${pattern}"${scope ? ` ${scope}` : ""}`;
+    return { summary: text, detail: text };
+  }
+  if (path) return { summary: displayPath(path, cwd), detail: slashPath(path) };
+  const command = stringField(input, ["command", "cmd"]);
+  if (command) return { summary: command, detail: command };
+  const other = stringField(input, ["query", "url", "pattern", "description", "prompt"]);
+  return { summary: other || name, detail: other };
+}
+
+function toolEditsOf(input: unknown): Record<string, string>[] {
+  const path = stringField(input, ["file_path", "filePath", "path"]);
+  if (!path || !input || typeof input !== "object") return [];
+  const record = input as Record<string, unknown>;
+  if (typeof record.old_string === "string" || typeof record.new_string === "string") {
+    return [{ path, old: String(record.old_string ?? ""), new: String(record.new_string ?? "") }];
+  }
+  return typeof record.content === "string" ? [{ path, old: "", new: record.content }] : [];
+}
+
+function decodeBytes(bytes: unknown): string {
+  if (!Array.isArray(bytes)) return "";
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) {
+    const b = Number(bytes[i]);
+    let code = b;
+    if (b >= 0xf0) { code = ((b & 7) << 18) | ((bytes[i + 1] & 63) << 12) | ((bytes[i + 2] & 63) << 6) | (bytes[i + 3] & 63); i += 3; }
+    else if (b >= 0xe0) { code = ((b & 15) << 12) | ((bytes[i + 1] & 63) << 6) | (bytes[i + 2] & 63); i += 2; }
+    else if (b >= 0xc0) { code = ((b & 31) << 6) | (bytes[i + 1] & 63); i += 1; }
+    out += String.fromCodePoint(code);
+  }
+  return out;
+}
+
+function searchResult(output: Record<string, unknown>): string {
+  const files = Array.isArray(output.file_matches) ? output.file_matches as {matches?: unknown[]}[] : [];
+  const matches = files.reduce((sum, file) => sum + (Array.isArray(file.matches) ? file.matches.length : 0), 0)
+    || Number(output.match_count) || 0;
+  const body = decodeBytes(output.stdout).split("\n").filter(line => !/^<\/?workspace_result\b/.test(line)).join("\n").trim();
+  return `${matches} ${matches === 1 ? "match" : "matches"} in ${files.length} ${files.length === 1 ? "file" : "files"}${body ? `\n\n${body}` : ""}`;
+}
+
+function failureReason(update: Record<string, unknown>): string {
+  const output = update.rawOutput;
+  if (typeof output === "string" && output.trim()) return output;
+  if (output && typeof output === "object") {
+    for (const value of Object.values(output as Record<string, unknown>)) {
+      if (typeof value === "string" && value.trim() && value !== (output as {type?: string}).type) return value;
+    }
+  }
+  return "Tool failed without a recorded reason";
+}
+
+function systemRow(id: string, subtype: string, content: string, seq: number, timestamp?: string,
+  extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { id, type: "system", systemSubtype: subtype, content, seq, timestamp, ...extra };
+}
+
+function sessionLifecycleRow(kind: string, update: Record<string, unknown>, id: string, seq: number,
+  timestamp?: string): Record<string, unknown> | null {
+  if (kind === "auto_compact_started") {
+    const pct = typeof update.percentage === "number" ? `Context ${update.percentage}% full. ` : "";
+    return systemRow(id, "context_compaction_started", `${pct}Compacting…`, seq, timestamp);
+  }
+  if (kind === "auto_compact_completed") {
+    const before = Number(update.tokens_before), after = Number(update.tokens_after);
+    const detail = before > 0 && after > 0 ? ` (${before} → ${after} tokens)` : "";
+    return systemRow(id, "contextCompaction", `Context compacted${detail}`, seq, timestamp,
+      { timelineMarker: { kind: "context_compaction" } });
+  }
+  if (kind === "turn_completed") {
+    if (update.stop_reason === "cancelled") return systemRow(id, "turn_cancelled", "Turn cancelled", seq, timestamp);
+    if (update.stop_reason === "error") return systemRow(id, "turn_error", "Turn ended with an error", seq, timestamp);
+    return null;
+  }
+  if (kind === "retry_state") {
+    return systemRow(id, "api_error", stringField(update, ["message"]) || "Grok request failed", seq, timestamp);
+  }
+  if (kind === "session_recap") {
+    return systemRow(id, "session_recap", `Session recap: ${stringField(update, ["summary"])}`, seq, timestamp);
+  }
+  if (kind === "plan") {
+    const entries = Array.isArray(update.entries) ? update.entries as {content?: string; status?: string}[] : [];
+    const lines = entries.map(entry => `${entry.status === "completed" ? "[x]" : entry.status === "in_progress" ? "[~]" : "[ ]"} ${entry.content ?? ""}`);
+    return systemRow(id, "plan_update", `Plan\n${lines.join("\n")}`, seq, timestamp);
+  }
+  return null;
+}
+
+function grokUpdateToChat(row: Record<string, unknown>, seq: number, cwd?: string): Record<string, unknown> | null {
   const params = row.params && typeof row.params === "object" ? row.params as Record<string, unknown> : null;
   const update = params && params.update && typeof params.update === "object"
     ? params.update as Record<string, unknown>
     : null;
   const kind = update ? String(update.sessionUpdate || "") : "";
-  const sourceMeta = params?._meta as {agentTimestampMs?: number} | undefined;
+  const sourceMeta = params?._meta as {agentTimestampMs?: number; eventId?: string} | undefined;
   const timestamp = typeof sourceMeta?.agentTimestampMs === "number" ? String(sourceMeta.agentTimestampMs) : undefined;
+  const rowId = typeof sourceMeta?.eventId === "string" && sourceMeta.eventId ? sourceMeta.eventId : `grok-${seq}`;
+  if (update && SILENT_KINDS.has(kind)) return null;
+  if (update && kind && !CHAT_KINDS.has(kind)) {
+    if (LIFECYCLE_KINDS.has(kind)) return sessionLifecycleRow(kind, update, rowId, seq, timestamp);
+    const raw = JSON.stringify(update);
+    return systemRow(rowId, "grok_unknown_update", `Grok update: ${kind}\n${raw.length > 600 ? `${raw.slice(0, 600)}…` : raw}`, seq, timestamp);
+  }
   if (kind === "tool_call" && typeof update?.toolCallId === "string") {
     const meta = update._meta as {"x.ai/tool"?: {name?: string; kind?: string}} | undefined;
+    const name = meta?.["x.ai/tool"]?.name ?? String(update.title || "tool");
+    const target = describeTool(name, update.rawInput, cwd);
+    const edits = toolEditsOf(update.rawInput);
     return {id: `grok-call-${update.toolCallId}`, type: "tool_call", content: "", seq, timestamp,
-      toolId: update.toolCallId, toolName: meta?.["x.ai/tool"]?.name ?? String(update.title || "tool"),
+      toolId: update.toolCallId, toolName: name,
       toolKind: canonicalToolKind(meta?.["x.ai/tool"]?.kind ?? update.kind),
-      toolSummary: String(update.title || meta?.["x.ai/tool"]?.name || "tool"),
+      toolSummary: target.summary, toolDetail: target.detail,
       toolArgs: JSON.stringify(update.rawInput ?? {}), toolInput: update.rawInput ?? {},
+      ...(edits.length ? { toolEdits: edits } : {}),
       toolCallSourceId: `grok-call-${update.toolCallId}`, toolPairing: "exact"};
   }
   if (kind === "tool_call_update" && update?.status === "completed" && Array.isArray(update.content)) {
@@ -206,6 +343,7 @@ function grokUpdateToChat(row: Record<string, unknown>, seq: number): Record<str
     if (diffs.length && typeof update.toolCallId === "string") {
       return { id: `grok-edit-${update.toolCallId}`, type: "tool_result", content: "", seq, timestamp,
         toolId: update.toolCallId, toolName: "file_change", toolKind: "edit", toolError: false,
+        toolSummary: diffs.map(diff => displayPath(diff.path, cwd)).join(", "),
         fileDiffs: diffs, toolCallSourceId: `grok-call-${update.toolCallId}`, toolPairing: "exact" };
     }
   }
@@ -217,11 +355,20 @@ function grokUpdateToChat(row: Record<string, unknown>, seq: number): Record<str
       const value = item.type === "text" ? item.text : item.content?.text;
       return typeof value === "string" ? [value] : [];
     }).join("\n") : "";
-    const output = update.rawOutput as {Content?: {content?: unknown}} | undefined;
-    const result = text || (typeof update.rawOutput === "string" ? update.rawOutput
-      : typeof output?.Content?.content === "string" ? output.Content.content : "");
+    const output = update.rawOutput as Record<string, unknown> | undefined;
+    const failed = update.status === "failed";
+    const nested = (key: string) => {
+      const value = output?.[key] as {content?: unknown} | undefined;
+      return typeof value?.content === "string" ? value.content : "";
+    };
+    let result = text || (typeof update.rawOutput === "string" ? update.rawOutput
+      : nested("Content") || nested("FileContent"));
+    if (output?.type === "GrepSearch" && !failed) result = searchResult(output);
+    if (!result && failed) result = failureReason(update);
+    const exitCode = output?.type === "Bash" && typeof output.exit_code === "number" ? output.exit_code : undefined;
     return {id: `grok-result-${update.toolCallId}`, type: "tool_result", content: result, seq, timestamp,
-      toolResult: result, toolId: update.toolCallId, toolError: update.status === "failed",
+      toolResult: result, toolId: update.toolCallId, toolError: failed,
+      ...(exitCode === undefined ? {} : { toolExitCode: exitCode }),
       toolCallSourceId: `grok-call-${update.toolCallId}`, toolPairing: "exact"};
   }
   let type = "";
@@ -240,14 +387,53 @@ function grokUpdateToChat(row: Record<string, unknown>, seq: number): Record<str
   return { id, type, content, timestamp: String(tsMs || seq), seq };
 }
 
+function modelSwitchRows(dir: string, sessionId: string, from: number): { rows: Record<string, unknown>[]; next: number } {
+  const raw = host.fs.readFile(joinPath(dir, "events.jsonl"));
+  if (!raw) return { rows: [], next: from };
+  const lines = String(raw).split("\n");
+  const rows: Record<string, unknown>[] = [];
+  let previous = "";
+  let next = from;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].indexOf('"turn_started"') === -1) {
+      if (i >= from && i < lines.length - 1) next = i + 1;
+      continue;
+    }
+    let event: Record<string, unknown> | null = null;
+    try { event = JSON.parse(lines[i]); } catch (_) { if (i === lines.length - 1) break; }
+    if (i >= from) next = i + 1;
+    if (!event || event.type !== "turn_started" || event.session_id !== sessionId) continue;
+    const model = typeof event.model_id === "string" ? event.model_id : "";
+    if (!model) continue;
+    if (previous && previous !== model && i >= from) {
+      const ts = Date.parse(String(event.ts));
+      rows.push(systemRow(`grok-model-${sessionId}-${event.turn_number}`, "model_switch",
+        `Switched to ${model}`, 0, Number.isFinite(ts) ? String(ts) : undefined));
+    }
+    previous = model;
+  }
+  return { rows, next };
+}
+
+function insertByTime(messages: unknown[], extra: Record<string, unknown>[]): void {
+  for (const row of extra) {
+    const at = Number(row.timestamp);
+    const index = Number.isFinite(at)
+      ? messages.findIndex(message => Number((message as {timestamp?: string}).timestamp) > at) : -1;
+    if (index === -1) messages.push(row); else messages.splice(index, 0, row);
+  }
+}
+
 function readGrokChat(cwd: string, sessionId: string, cursor?: string | null): { messages: unknown[]; cursor: string } {
   const path = sessionDir(cwd, sessionId);
-  const empty = { messages: [] as unknown[], cursor: cursor && /^\d+$/.test(cursor) ? cursor : "0" };
+  const parsedCursor = /^(\d+)(?::(\d+))?$/.exec(cursor || "");
+  const start = parsedCursor ? parseInt(parsedCursor[1], 10) : 0;
+  const eventStart = parsedCursor?.[2] ? parseInt(parsedCursor[2], 10) : 0;
+  const empty = { messages: [] as unknown[], cursor: parsedCursor ? String(cursor) : "0" };
   if (!path) return empty;
   const file = joinPath(path, "updates.jsonl");
   const raw = host.fs.readFile(file);
   if (!raw) return empty;
-  const start = cursor && /^\d+$/.test(cursor) ? parseInt(cursor, 10) : 0;
   const lines = String(raw).split("\n");
   const messages: unknown[] = [];
   let next = start;
@@ -260,10 +446,12 @@ function readGrokChat(cwd: string, sessionId: string, cursor?: string | null): {
     }
     next = i + 1;
     if (!row || typeof row !== "object") continue;
-    const msg = grokUpdateToChat(row, i);
+    const msg = grokUpdateToChat(row, i, cwd);
     if (msg) messages.push(msg);
   }
-  return { messages, cursor: String(next) };
+  const switches = modelSwitchRows(path, sessionId, eventStart);
+  insertByTime(messages, switches.rows);
+  return { messages, cursor: switches.next > 0 ? `${next}:${switches.next}` : String(next) };
 }
 
 function listSessionIds(cwd: string): string[] {
