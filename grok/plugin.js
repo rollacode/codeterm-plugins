@@ -141,7 +141,7 @@ function grokTrustPromptResponse(index, screen) {
   return index === 0 ? ["eQ=="] : index === 1 ? ["bg=="] : [];
 }
 
-// ../../codeterm/packages/plugin-sdk/src/fileDiffs.ts
+// ../codeterm/codeterm/packages/plugin-sdk/src/fileDiffs.ts
 function textLines(text) {
   return text ? text.replace(/\n$/, "").split("\n") : [];
 }
@@ -262,12 +262,26 @@ function resumeCommand(params) {
   const extra = params.args || [];
   for (let i = 0; i < extra.length; i++) parts.push(quote(String(extra[i])));
   const system = String(params.systemPrompt || "").trim();
-  if (system) parts.push("--system-prompt-override", quote(system));
+  appendRules(parts, system);
   return parts.join(" ");
 }
+function appendRules(parts, instructions) {
+  if (!instructions) return;
+  const inline = ["--rules", quote(instructions)];
+  if (host.platform() === "windows" && [...parts, ...inline].join(" ").length > 6e3) {
+    const definition = "---\nname: domios\ndescription: Domios session instructions\npromptMode: extend\n---\n\n" + instructions;
+    const path = host.fs.writeTempFile(definition, ".ct-grok-agent.md");
+    if (!path) throw new Error("failed to write Grok append-only agent instructions");
+    parts.push("--agent", quote(path));
+  } else {
+    parts.push(...inline);
+  }
+}
 function starterTask(params) {
-  const handshake = params.starterPrompt === "startup_handshake" ? String(params.starterPromptText || "").trim() : "";
-  return [handshake, params.task].filter(Boolean).join("\n\n");
+  if (!params.starterPrompt || params.starterPrompt === "no_starter" || params.starterPrompt === "startup_handshake") return "";
+  const text = params.starterPromptText || (params.starterPrompt === "assigned_task" ? "Begin the task assigned in your system instructions." : "");
+  if (!text) throw new Error("Grok starter requires host starterPromptText");
+  return params.starterPromptPrefix ? params.starterPromptPrefix + text + "</domios>" : text;
 }
 function updateText(update) {
   if (!update) return "";
@@ -514,6 +528,7 @@ var plugin = {
     const p = params || {};
     const parts = ["grok"];
     appendLaunchFlags(parts, p);
+    appendRules(parts, String(p.task || ""));
     const task = starterTask(p);
     if (task) parts.push("--", quote(task));
     return parts.join(" ");

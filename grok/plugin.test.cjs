@@ -83,10 +83,23 @@ const tests = [
         const host = hostFor({ platform });
         const plugin = load(host);
         const cases = [
-          [plugin.buildLaunchCommand({ task: text }), ["--always-approve", "--", text]],
+          [plugin.buildLaunchCommand({ task: text, starterPrompt: "no_starter" }), ["--always-approve", "--rules", text]],
+          [plugin.buildLaunchCommand({ task: "role", starterPrompt: "assigned_task", starterPromptText: text }),
+            ["--always-approve", "--rules", "role", "--", text]],
           [plugin.buildResumeCommandWithContext({ sessionId: "fixture-session", systemPrompt: text }),
-            ["--always-approve", "--resume", "fixture-session", "--system-prompt-override", text.trim()]],
+            ["--always-approve", "--resume", "fixture-session", "--rules", text.trim()]],
         ];
+        if (platform === "windows") {
+          const instructions = text.repeat(200);
+          const definition = join(dir, "role's file.md");
+          host.fs.writeTempFile = (body) => {
+            writeFileSync(definition, body);
+            return definition;
+          };
+          cases.push([plugin.buildLaunchCommand({ task: instructions, starterPrompt: "no_starter" }),
+            ["--always-approve", "--agent", definition]]);
+          assert.equal(readFileSync(definition, "utf8").split("---\n\n")[1], instructions);
+        }
         for (const [command, expected] of cases) {
           assert.doesNotMatch(command, /[\r\n]/, shell);
           const exe = host.shell.quoteFor(process.execPath.replace(/\\/g, "/"), platform);
@@ -112,7 +125,8 @@ const tests = [
     const host = hostFor({ platform });
     const plugin = load(host);
     const invalidMode = "__parser_probe_invalid__";
-    const command = plugin.buildLaunchCommand({ args: ["--permission-mode", invalidMode], task: "-=opaque-fixture" });
+    const command = plugin.buildLaunchCommand({ args: ["--permission-mode", invalidMode],
+      task: "role", starterPrompt: "assigned_task", starterPromptText: "-=opaque-fixture" });
     const invocation = command.replace(/^grok/, `${platform === "windows" ? "& " : ""}${host.shell.quoteFor(executable, platform)}`);
     const result = spawnSync(platform === "windows" ? "powershell.exe" : "bash",
       platform === "windows" ? ["-NoProfile", "-NonInteractive", "-Command", invocation + "; exit $LASTEXITCODE"] : ["-c", invocation],
@@ -153,7 +167,7 @@ const tests = [
     assert.equal(manifest.minCodeterm, "1.14.2");
     assert.equal(manifest.minCodeterm, entry.minCodeterm);
     assert.deepEqual(manifest.commands.autoApproveFlags, ["--always-approve"]);
-    assert.equal(manifest.spawn.systemPromptDelivery.kind, "external");
+    assert.deepEqual(manifest.spawn.systemPromptDelivery, { kind: "cli_flag", flag: "--rules" });
   }],
 
   ["first-turn capability parses the Grok structured transcript fixture", () => {
@@ -179,6 +193,50 @@ const tests = [
     assert.match(cmd, /^grok --always-approve /);
     assert.match(cmd, /'fix it'$/);
     assert.doesNotMatch(cmd, /--permission-mode/);
+  }],
+
+  ["idle role launch appends rules and never submits a startup handshake", () => {
+    for (const platform of ["windows", "linux", "macos"]) {
+      const plugin = load(hostFor({ platform }));
+      for (const starterPrompt of [undefined, "no_starter", "startup_handshake"]) {
+        const command = plugin.buildLaunchCommand({ task: "You are the Planner.", starterPrompt,
+          starterPromptText: "RAW STARTUP HANDSHAKE" });
+        assert.equal(command, "grok --always-approve --rules 'You are the Planner.'");
+      }
+      assert.equal(plugin.buildLaunchCommand({ starterPrompt: "no_starter" }), "grok --always-approve");
+    }
+  }],
+
+  ["assigned task stays in rules and the real host-selected starter stays positional", () => {
+    const plugin = load(hostFor());
+    const command = plugin.buildLaunchCommand({ task: "You are a Worker. Fix the bug.",
+      starterPrompt: "assigned_task", starterPromptText: "Fix the bug.", starterPromptPrefix: '<domios from="user">' });
+    assert.equal(command, `grok --always-approve --rules 'You are a Worker. Fix the bug.' -- '<domios from="user">Fix the bug.</domios>'`);
+    assert.equal(plugin.buildLaunchCommand({ task: "Fix the bug.", starterPrompt: "assigned_task" }),
+      "grok --always-approve --rules 'Fix the bug.' -- 'Begin the task assigned in your system instructions.'");
+  }],
+
+  ["long Windows role uses an append-only definition file on launch and resume", () => {
+    const instructions = "You are the Orchestrator.\n".repeat(2000) + "${{ literal }}\n---\n☃";
+    const writes = [];
+    const host = hostFor({ platform: "windows" });
+    host.fs.writeTempFile = (body, suffix) => {
+      writes.push({ body, suffix });
+      return "C:/runtime/role's file.md";
+    };
+    const plugin = load(host);
+    const launch = plugin.buildLaunchCommand({ task: instructions, starterPrompt: "no_starter" });
+    const resume = plugin.buildResumeCommandWithContext({ sessionId: "own-session", systemPrompt: instructions });
+    assert.equal(launch, "grok --always-approve --agent 'C:/runtime/role''s file.md'");
+    assert.equal(resume, "grok --always-approve --resume 'own-session' --agent 'C:/runtime/role''s file.md'");
+    for (const write of writes) {
+      assert.equal(write.suffix, ".ct-grok-agent.md");
+      assert.equal(write.body, "---\nname: domios\ndescription: Domios session instructions\npromptMode: extend\n---\n\n" + instructions);
+    }
+    assert.equal(writes.length, 2);
+    host.fs.writeTempFile = () => null;
+    assert.throws(() => plugin.buildLaunchCommand({ task: instructions }), /failed to write/);
+    assert.throws(() => plugin.buildResumeCommandWithContext({ sessionId: "own", systemPrompt: instructions }), /failed to write/);
   }],
 
   ["skip-permissions adds bypassPermissions without dropping always-approve", () => {

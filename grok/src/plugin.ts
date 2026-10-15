@@ -153,15 +153,34 @@ function resumeCommand(params: ResumeParams): string {
   const extra = params.args || [];
   for (let i = 0; i < extra.length; i++) parts.push(quote(String(extra[i])));
   const system = String(params.systemPrompt || "").trim();
-  if (system) parts.push("--system-prompt-override", quote(system));
+  appendRules(parts, system);
   return parts.join(" ");
 }
 
+function appendRules(parts: string[], instructions: string): void {
+  if (!instructions) return;
+  // --rules is text-only. Keep long Windows launches below shell/native argv
+  // limits using Grok's append-only agent definition mode, never a full prompt.
+  const inline = ["--rules", quote(instructions)];
+  if (host.platform() === "windows" && [...parts, ...inline].join(" ").length > 6000) {
+    const definition = "---\nname: domios\ndescription: Domios session instructions\npromptMode: extend\n---\n\n" + instructions;
+    const path = host.fs.writeTempFile(definition, ".ct-grok-agent.md");
+    if (!path) throw new Error("failed to write Grok append-only agent instructions");
+    parts.push("--agent", quote(path));
+  } else {
+    parts.push(...inline);
+  }
+}
+
 function starterTask(params: LaunchParams): string {
-  const handshake = params.starterPrompt === "startup_handshake"
-    ? String(params.starterPromptText || "").trim()
-    : "";
-  return [handshake, params.task].filter(Boolean).join("\n\n");
+  // With cli_flag delivery, task is the composed system content. Only a
+  // host-selected task starter is a user turn; startup ACKs belong to the host.
+  if (!params.starterPrompt || params.starterPrompt === "no_starter"
+    || params.starterPrompt === "startup_handshake") return "";
+  const text = params.starterPromptText
+    || (params.starterPrompt === "assigned_task" ? "Begin the task assigned in your system instructions." : "");
+  if (!text) throw new Error("Grok starter requires host starterPromptText");
+  return params.starterPromptPrefix ? params.starterPromptPrefix + text + "</domios>" : text;
 }
 
 function updateText(update: Record<string, unknown> | null): string {
@@ -395,6 +414,7 @@ const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: 
     const p = params || {};
     const parts = ["grok"];
     appendLaunchFlags(parts, p);
+    appendRules(parts, String(p.task || ""));
     const task = starterTask(p);
     if (task) parts.push("--", quote(task));
     return parts.join(" ");
