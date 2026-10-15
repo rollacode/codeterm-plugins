@@ -93,17 +93,24 @@ module.exports = (tests, load, directory) => {
       } else assert.equal(pinned, `grok update --version ${target}`);
     }
   }]);
-  tests.push(["Unix updater executes exact target without interactive flags", () => {
+  tests.push(["native updater executes exact target without interactive flags", () => {
     const dir = mkdtempSync(join(tmpdir(), "plugin-update-"));
     try {
       const log = join(dir, "args.json");
-      const shim = `#!${process.execPath}\nrequire('node:fs').writeFileSync(process.env.UPDATE_ARGS, JSON.stringify(process.argv.slice(2)));\n`;
-      for (const platform of ["macos", "linux"]) {
+      const windows = process.platform === "win32";
+      const fixture = join(dir, "argv.cjs");
+      const recordArgs = "require('node:fs').writeFileSync(process.env.UPDATE_ARGS, JSON.stringify(process.argv.slice(2)));\n";
+      writeFileSync(fixture, recordArgs);
+      const shim = windows ? `@echo off\r\n"${process.execPath}" "${fixture}" %*\r\n`
+        : `#!${process.execPath}\n${recordArgs}`;
+      for (const platform of windows ? ["windows"] : ["macos", "linux"]) {
         for (const runner of aider ? ["uv", "pipx"] : ["grok"]) {
-          const binary = join(dir, runner);
+          const binary = join(dir, runner + (windows ? ".cmd" : ""));
           writeFileSync(binary, shim, {mode:0o755});
           const command = manifest.updater[platform].replaceAll("{version}", target);
-          const result = spawnSync("/bin/bash", ["-c", command], {env: {...process.env, PATH:dir, UPDATE_ARGS:log}, encoding:"utf8"});
+          const shell = windows ? join(process.env.SystemRoot, "System32/WindowsPowerShell/v1.0/powershell.exe") : "/bin/bash";
+          const shellArgs = windows ? ["-NoProfile", "-NonInteractive", "-Command", command] : ["-c", command];
+          const result = spawnSync(shell, shellArgs, {env: {...process.env, PATH:dir, UPDATE_ARGS:log}, encoding:"utf8", windowsHide:true});
           assert.equal(result.status, 0, result.stderr);
           assert.deepEqual(JSON.parse(readFileSync(log, "utf8")), aider
             ? runner === "uv" ? ["tool", "install", "--force", `aider-chat==${target}`] : ["install", "--force", `aider-chat==${target}`]
