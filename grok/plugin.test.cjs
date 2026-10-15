@@ -86,6 +86,9 @@ const tests = [
           [plugin.buildLaunchCommand({ task: text, starterPrompt: "no_starter" }), ["--always-approve", "--rules", text]],
           [plugin.buildLaunchCommand({ task: "role", starterPrompt: "assigned_task", starterPromptText: text }),
             ["--always-approve", "--rules", "role", "--", text]],
+          [plugin.buildLaunchCommand({ task: "role", starterPrompt: "startup_handshake", starterPromptText: text,
+            starterPromptPrefix: '<domios from="system">' }),
+            ["--always-approve", "--rules", "role", "--", '<domios from="system">' + text + "</domios>"]],
           [plugin.buildResumeCommandWithContext({ sessionId: "fixture-session", systemPrompt: text }),
             ["--always-approve", "--resume", "fixture-session", "--rules", text.trim()]],
         ];
@@ -195,15 +198,32 @@ const tests = [
     assert.doesNotMatch(cmd, /--permission-mode/);
   }],
 
-  ["idle role launch appends rules and never submits a startup handshake", () => {
+  ["idle role launch appends rules without a positional starter", () => {
     for (const platform of ["windows", "linux", "macos"]) {
       const plugin = load(hostFor({ platform }));
-      for (const starterPrompt of [undefined, "no_starter", "startup_handshake"]) {
+      for (const starterPrompt of [undefined, "no_starter"]) {
         const command = plugin.buildLaunchCommand({ task: "You are the Planner.", starterPrompt,
           starterPromptText: "RAW STARTUP HANDSHAKE" });
         assert.equal(command, "grok --always-approve --rules 'You are the Planner.'");
       }
       assert.equal(plugin.buildLaunchCommand({ starterPrompt: "no_starter" }), "grok --always-approve");
+    }
+  }],
+
+  ["supervised launch keeps the host handshake positional and framed alongside rules", () => {
+    for (const platform of ["windows", "linux", "macos"]) {
+      const plugin = load(hostFor({ platform }));
+      const params = { task: "You are the Worker.", starterPrompt: "startup_handshake",
+        starterPromptText: "Run codeterm agent startup-ack.", starterPromptPrefix: '<domios from="system">' };
+      const framed = plugin.buildLaunchCommand(params);
+      if (platform === "windows") {
+        // Exact native Windows argv is checked by the shell execution fixture.
+        assert.match(framed, /^grok --always-approve --rules 'You are the Worker\.' -- /);
+        assert.ok(framed.includes('<domios from="system">Run codeterm agent startup-ack.</domios>'));
+      } else assert.equal(framed,
+        `grok --always-approve --rules 'You are the Worker.' -- '<domios from="system">Run codeterm agent startup-ack.</domios>'`);
+      assert.equal(plugin.buildLaunchCommand({ ...params, starterPromptPrefix: undefined }),
+        "grok --always-approve --rules 'You are the Worker.' -- 'Run codeterm agent startup-ack.'");
     }
   }],
 

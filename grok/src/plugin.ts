@@ -174,9 +174,8 @@ function appendRules(parts: string[], instructions: string): void {
 
 function starterTask(params: LaunchParams): string {
   // With cli_flag delivery, task is the composed system content. Only a
-  // host-selected task starter is a user turn; startup ACKs belong to the host.
-  if (!params.starterPrompt || params.starterPrompt === "no_starter"
-    || params.starterPrompt === "startup_handshake") return "";
+  // host-selected starter is a user turn, including supervised startup ACKs.
+  if (!params.starterPrompt || params.starterPrompt === "no_starter") return "";
   const text = params.starterPromptText
     || (params.starterPrompt === "assigned_task" ? "Begin the task assigned in your system instructions." : "");
   if (!text) throw new Error("Grok starter requires host starterPromptText");

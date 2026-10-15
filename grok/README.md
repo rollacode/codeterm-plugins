@@ -17,9 +17,11 @@ Then `grok login`. CodeTerm launches `grok --always-approve` so tool prompts do 
 Role and identity instructions append to Grok's own system prompt through the
 declared `cli_flag` capability (`--rules`). In this host contract, launch
 `task` contains the composed system instructions; `starterPrompt: no_starter`
-opens an empty chat without submitting a turn. Startup handshakes are never
-prepended to a task. Assigned work remains in the system instructions and only
-the host-selected starter is passed after `--`. Resume reapplies instructions
+opens an empty chat without submitting a turn. For supervised launches, the
+host-selected startup handshake is passed separately after `--`, including the
+host's frame when supplied, so the agent can acknowledge startup. Assigned work
+remains in the system instructions and its host-selected starter is also passed
+after `--`. Resume reapplies instructions
 with the same append-only behavior.
 
 For Windows commands above 6,000 characters, the plugin writes the instructions

@@ -278,7 +278,7 @@ function appendRules(parts, instructions) {
   }
 }
 function starterTask(params) {
-  if (!params.starterPrompt || params.starterPrompt === "no_starter" || params.starterPrompt === "startup_handshake") return "";
+  if (!params.starterPrompt || params.starterPrompt === "no_starter") return "";
   const text = params.starterPromptText || (params.starterPrompt === "assigned_task" ? "Begin the task assigned in your system instructions." : "");
   if (!text) throw new Error("Grok starter requires host starterPromptText");
   return params.starterPromptPrefix ? params.starterPromptPrefix + text + "</domios>" : text;
