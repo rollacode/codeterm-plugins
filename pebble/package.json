@@ -1,6 +1,7 @@
 {
   "name": "@codeterm/plugin-pebble",
   "version": "0.2.3",
+  "license": "PolyForm-Shield-1.0.0",
   "private": true,
   "type": "module",
   "description": "CodeTerm Pebble ring webhook receiver plugin.",

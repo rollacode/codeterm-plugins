@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Andrey's CodeTerm capability plugins \u2014 Git, Transcriber, Bitwarden. Authored in TypeScript against @codeterm/plugin-sdk, built to QuickJS-compatible plugin.js + split UI bundles.",
-  "license": "ISC",
+  "license": "PolyForm-Shield-1.0.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/rollacode/codeterm-plugins.git"
