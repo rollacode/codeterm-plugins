@@ -81,3 +81,7 @@ branch. A plugin committed only to a feature or lane branch is not released.
    report the new version and the `codeterm-plugins` channel source.
 5. Delete an integrated lane only after its tip is proven to be an ancestor of
    `main`. Do not leave release branches as alternate marketplace heads.
+
+Licensed under [PolyForm Shield 1.0.0](LICENSE) from 2026-10-16. Required Notice: Copyright (c) 2025 Andrey Kovalev.
+
+2026-10-16: All versions of this software, including every prior revision in this repository's history, are licensed solely under the PolyForm Shield License 1.0.0. No revision was ever distributed under the MIT License.
