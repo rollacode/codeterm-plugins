@@ -1,10 +1,28 @@
 // Plugin-side tests for the Git plugin's pure porcelain/log parsers.
 // Run: npx tsx plugins/git/plugin.test.cjs
 
-globalThis.host = new Proxy(
-  {},
-  { get: () => () => { throw new Error("host called at load time"); } },
-);
+// Immediate jobs keep existing fixtures synchronous; deferred fixtures model VM yields.
+let currentHost;
+Object.defineProperty(globalThis, "host", {
+  configurable: true,
+  get: () => currentHost,
+  set: (mock) => {
+    let sequence = 0;
+    const jobs = new Map();
+    currentHost = {
+      log: () => {},
+      execClose: () => {},
+      execStart: (raw) => {
+        const jobId = String(++sequence);
+        jobs.set(jobId, JSON.parse(mock.exec(raw)));
+        return JSON.stringify({ jobId });
+      },
+      awaitJob: (jobId, then) => then(jobs.get(jobId)),
+      ...mock,
+    };
+  },
+});
+globalThis.host = {};
 
 const plugin = require("./plugin.js").default;
 
@@ -260,6 +278,76 @@ test("parseWorktrees preserves paths, branches, and exceptional states", () => {
   assert(parsed[0].branch === "main" && parsed[0].detached === false, "normal branch parsed");
   assert(parsed[1].detached === true && parsed[1].locked === "review in progress", "detached lock parsed");
   assert(parsed[2].prunable.includes("non-existent"), "prunable reason retained");
+});
+
+test("concurrent bubble callers share all jobs and cache expiry recomputes", () => {
+  let now = 20000;
+  let starts = 0;
+  const logs = [];
+  const jobs = new Map();
+  globalThis.host = {
+    unixNowMs: () => now,
+    exec: () => { throw new Error("bubble used synchronous exec"); },
+    log: (level, message) => logs.push([level, message]),
+    execStart: (raw) => {
+      const id = String(++starts);
+      const args = JSON.parse(raw).args.slice(2);
+      jobs.set(id, { code: 0, stdout: args[0] === "symbolic-ref" ? "main\n" : " M file\n" });
+      return JSON.stringify({ jobId: id });
+    },
+    awaitJob: (id, then) => ({ id, then }),
+  };
+  const ctx = { cwd: "C:/coalesced-secret" };
+  const a = plugin.statusBubble(ctx);
+  const b = plugin.statusBubble(ctx);
+  assert(starts === 1 && a.id === b.id, "one branch job shared");
+  const aStatus = a.then(jobs.get(a.id));
+  const bStatus = b.then(jobs.get(b.id));
+  assert(starts === 2 && aStatus.id === bStatus.id, "one status job shared");
+  const second = bStatus.then(jobs.get(bStatus.id));
+  const first = aStatus.then(jobs.get(aStatus.id));
+  assert(JSON.stringify(first) === JSON.stringify(second), "both callers get identical output");
+  assert(plugin.statusBubble(ctx) === first && starts === 2, "cached within TTL");
+  now += 4000;
+  const expired = plugin.statusBubble(ctx);
+  assert(starts === 3, "expiry starts a new computation");
+  const status = expired.then(jobs.get(expired.id));
+  status.then(jobs.get(status.id));
+  assert(starts === 4, "expiry recomputes both commands");
+  assert(logs.length === 4 && logs.every(([level, line]) => level === "debug" && /^git bubble (symbolic-ref|status) elapsed_ms=\d+$/.test(line)), "one safe timing per command");
+});
+
+test("bubble output is byte-identical to the previous synchronous implementation", () => {
+  // Frozen direct-repository behavior from 0.1.6, independent of Git history.
+  function oldBubble(ctx, mock) {
+    const branchResult = JSON.parse(mock.exec(JSON.stringify({ bin: "git", args: ["-C", ctx.cwd, "symbolic-ref", "--quiet", "--short", "HEAD"] })));
+    const branch = branchResult.error || branchResult.code !== 0 ? null : (branchResult.stdout || "").trim() || null;
+    if (!branch) return null;
+    const status = JSON.parse(mock.exec(JSON.stringify({ bin: "git", args: ["-C", ctx.cwd, "status", "--porcelain"] })));
+    const total = (status.stdout || "").split("\n").filter(line => line.length > 0).length;
+    return {
+      label: branch,
+      tone: "default",
+      icon: "git",
+      tooltip: total ? `${total} changed — open Git` : "clean — open Git",
+      action: "openPanel:view:git",
+    };
+  }
+  for (const [index, branch, porcelain] of [[0, "main", ""], [1, "feature/é", "M  staged\n?? new\n"], [2, null, ""]]) {
+    const mock = {
+      unixNowMs: () => 30000,
+      listChildDirs: () => [],
+      exec: (raw) => {
+        const command = JSON.parse(raw).args[2];
+        return JSON.stringify(command === "symbolic-ref"
+          ? { code: branch ? 0 : 1, stdout: branch ? ` ${branch}\n` : "" }
+          : command === "status" ? { code: 0, stdout: porcelain } : { code: 1 });
+      },
+    };
+    globalThis.host = mock;
+    const ctx = { cwd: `C:/parity-${index}` };
+    assert(JSON.stringify(plugin.statusBubble(ctx)) === JSON.stringify(oldBubble(ctx, mock)), `identical output fixture ${index}`);
+  }
 });
 
 let failed = 0;

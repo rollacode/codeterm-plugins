@@ -79,14 +79,41 @@ const BUBBLE_CACHE_MAX = 64;
 const bubbleCache: Record<string, { bubble: StatusBubble | null; ts: number }> = {};
 const selectedRepoByCwd: Record<string, string> = {};
 
-function computeBubble(cwd: string): StatusBubble | null {
-  const directBranch = branchOf(cwd);
-  const repos = directBranch ? [] : gitRepos(cwd);
-  const selectedPath = selectedRepoByCwd[cwd];
+type BubbleSteps<T> = Generator<ExecOpts, T, ExecResult>;
+
+function* bubbleGit(cwd: string, args: string[]): BubbleSteps<ExecResult> {
+  return yield { bin: "git", args: ["-C", cwd].concat(args) };
+}
+
+function* bubbleBranch(cwd: string): BubbleSteps<string | null> {
+  const r = yield* bubbleGit(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  return r.error || r.code !== 0 ? null : (r.stdout || "").trim() || null;
+}
+
+function* bubbleRepos(cwd: string): BubbleSteps<Repo[]> {
+  const top = yield* bubbleGit(cwd, ["rev-parse", "--show-toplevel"]);
+  if (ok(top) && (top.stdout || "").trim()) {
+    const root = (top.stdout || "").trim();
+    return [{ path: root, name: baseName(root), branch: yield* bubbleBranch(root) }];
+  }
+  const sep = cwd.replace(/[/\\]$/, "");
+  const out: Repo[] = [];
+  const names = listChildDirs(cwd);
+  for (let i = 0; i < names.length && out.length < 20; i++) {
+    const p = `${sep}/${names[i]}`;
+    if (host.fileExists(`${p}/.git`)) out.push({ path: p, name: names[i], branch: yield* bubbleBranch(p) });
+  }
+  return out;
+}
+
+function* computeBubble(cwd: string, selectedPath: string | undefined): BubbleSteps<StatusBubble | null> {
+  const directBranch = yield* bubbleBranch(cwd);
+  const repos = directBranch ? [] : yield* bubbleRepos(cwd);
   let selected = repos.find((repo) => repo.path === selectedPath);
   if (!selected && selectedPath) {
     for (const repo of repos) {
-      const worktree = gitWorktrees(repo.path).find((candidate) => candidate.path === selectedPath);
+      const result = yield* bubbleGit(repo.path, ["worktree", "list", "--porcelain"]);
+      const worktree = (ok(result) ? parseWorktrees(result.stdout) : []).find((candidate) => candidate.path === selectedPath);
       if (worktree) {
         selected = { path: worktree.path, name: baseName(worktree.path), branch: worktree.branch };
         break;
@@ -97,7 +124,7 @@ function computeBubble(cwd: string): StatusBubble | null {
   const repoCwd = selected?.path || cwd;
   const branch = directBranch || selected?.branch;
   if (!branch) return null;
-  const d = parsePorcelain(git(repoCwd, ["status", "--porcelain"]).stdout);
+  const d = parsePorcelain((yield* bubbleGit(repoCwd, ["status", "--porcelain"])).stdout);
   const extra = repos.length > 1 ? ` +${repos.length - 1}` : "";
   const repoLabel = selected ? `${selected.name} · ` : "";
   return {
@@ -110,18 +137,66 @@ function computeBubble(cwd: string): StatusBubble | null {
   };
 }
 
+interface BubbleRefresh {
+  steps: BubbleSteps<StatusBubble | null>;
+  job?: { id: string; started: number; command: string };
+  done: boolean;
+  bubble: StatusBubble | null;
+  ts: number;
+}
+const bubbleRefreshes = new Map<string, BubbleRefresh>();
+
+function advanceBubble(cwd: string, refresh: BubbleRefresh, result: ExecResult): void {
+  let next = refresh.steps.next(result);
+  while (!next.done) {
+    const started = host.unixNowMs();
+    const command = next.value.args?.[2] || "unknown";
+    const job = JSON.parse(host.execStart(JSON.stringify(next.value))) as { jobId?: string; error?: string };
+    if (job.jobId) {
+      refresh.job = { id: job.jobId, started, command };
+      return;
+    }
+    host.log("debug", `git bubble ${command} elapsed_ms=${host.unixNowMs() - started}`);
+    next = refresh.steps.next({ error: job.error || "execStart failed" });
+  }
+  refresh.done = true;
+  refresh.bubble = next.value;
+  refresh.job = undefined;
+  if (bubbleRefreshes.get(cwd) !== refresh) return;
+  bubbleRefreshes.delete(cwd);
+  if (Object.keys(bubbleCache).length >= BUBBLE_CACHE_MAX) {
+    for (const k of Object.keys(bubbleCache)) delete bubbleCache[k];
+  }
+  bubbleCache[cwd] = { bubble: next.value, ts: refresh.ts };
+}
+
+function awaitBubble(cwd: string, refresh: BubbleRefresh): StatusBubble | null {
+  if (refresh.done) return refresh.bubble;
+  const job = refresh.job!;
+  return host.awaitJob(job.id, (result) => {
+    // Every waiter resumes, but only the first advances the shared computation.
+    if (refresh.job === job) {
+      host.log("debug", `git bubble ${job.command} elapsed_ms=${host.unixNowMs() - job.started}`);
+      host.execClose(job.id);
+      advanceBubble(cwd, refresh, result);
+    }
+    return awaitBubble(cwd, refresh);
+  });
+}
+
 function statusBubble(ctx: TabContext): StatusBubble | null {
   const cwd = ctx && ctx.cwd;
   if (!cwd) return null;
   const now = host.unixNowMs();
   const hit = bubbleCache[cwd];
   if (hit && now - hit.ts < BUBBLE_TTL_MS) return hit.bubble;
-  const bubble = computeBubble(cwd);
-  if (Object.keys(bubbleCache).length >= BUBBLE_CACHE_MAX) {
-    for (const k of Object.keys(bubbleCache)) delete bubbleCache[k];
+  let refresh = bubbleRefreshes.get(cwd);
+  if (!refresh) {
+    refresh = { steps: computeBubble(cwd, selectedRepoByCwd[cwd]), done: false, bubble: null, ts: now };
+    bubbleRefreshes.set(cwd, refresh);
+    advanceBubble(cwd, refresh, {});
   }
-  bubbleCache[cwd] = { bubble, ts: now };
-  return bubble;
+  return awaitBubble(cwd, refresh);
 }
 
 function renderGlance(ctx: TabContext): GlanceView {
@@ -621,6 +696,7 @@ function selectRepo(cwd: string, path: string): { selected: true } | { error: st
   if (!allowed) return { error: "repository is outside this workspace" };
   selectedRepoByCwd[cwd] = path;
   delete bubbleCache[cwd];
+  bubbleRefreshes.delete(cwd);
   return { selected: true };
 }
 
