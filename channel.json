@@ -19,8 +19,8 @@
     {
       "id": "transcriber",
       "path": "transcriber",
-      "version": "0.4.3",
-      "minCodeterm": "1.0.0"
+      "version": "0.4.4",
+      "minCodeterm": "1.15.1"
     },
     {
       "id": "bitwarden",

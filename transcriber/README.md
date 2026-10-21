@@ -15,7 +15,7 @@ Offline speech-to-text for CodeTerm — voice notes in, text out. Nothing leaves
 ## Self-bootstrap (first use)
 
 Dependencies are detected first and only installed if missing — into
-`~/.codeterm/transcriber/` (model) and `~/.codeterm/transcriber/bin/` (downloaded binaries).
+`<instance data directory>/transcriber/` (model) and `<instance data directory>/transcriber/bin/` (downloaded binaries).
 
 | OS | whisper-cli | ffmpeg |
 |----|-------------|--------|
@@ -37,11 +37,13 @@ plugin returns a clear message telling you exactly what to install by hand.
 
 Set them with `codeterm plugin config transcriber --set model=base --set language=ru`.
 
+The host selects the instance data directory, including isolated development roots.
+
 ## Permissions
 
 | Permission | Why |
 |------------|-----|
-| `subprocess: brew, curl, powershell.exe, tar, whisper-cli, whisper-cli.exe, ffmpeg, ffmpeg.exe` | Install deps (brew / curl + tar; PowerShell only as a Windows download fallback), then convert and transcribe. CodeTerm allows full downloaded paths by basename, so the Windows `.exe` entries cover `~/.codeterm/transcriber/bin/**/ffmpeg.exe` and `**/whisper-cli.exe`. |
+| `subprocess: brew, curl, powershell.exe, tar, whisper-cli, whisper-cli.exe, ffmpeg, ffmpeg.exe` | Install deps (brew / curl + tar; PowerShell only as a Windows download fallback), then convert and transcribe. CodeTerm allows full downloaded paths by basename, so the Windows `.exe` entries cover `<instance data directory>/transcriber/bin/**/ffmpeg.exe` and `**/whisper-cli.exe`. |
 
 No network or secrets permissions are needed — downloads run through `curl`, and there
 are no credentials to store.

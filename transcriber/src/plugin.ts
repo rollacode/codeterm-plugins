@@ -10,7 +10,7 @@
 //
 //   • macOS   — `brew install whisper-cpp` (gives `whisper-cli`) and `brew install ffmpeg`.
 //   • Windows — `curl` the whisper-bin-x64.zip GitHub release + a static ffmpeg zip,
-//               extract with `tar` into ~/.codeterm/transcriber/bin.
+//               extract with `tar` into the instance data directory under transcriber/bin.
 //   • Linux   — `curl` the whisper-bin-Linux.zip release + a static ffmpeg build, extract
 //               with `tar`; clear manual-install message if that path is unavailable.
 //
@@ -81,8 +81,7 @@ function endpoint(): string {
 }
 
 function baseDir(): string {
-  const home = host.homeDir() || ".";
-  return home + "/.codeterm/transcriber";
+  return host.dataDir() + "/transcriber";
 }
 
 function binDir(): string {
@@ -659,7 +658,6 @@ function present(name: string): boolean {
 function transcribeStatus(): StatusResult {
   const ep = endpoint();
   if (ep.length) return { state: "ready", reason: "remote: " + ep };
-  if (!host.homeDir()) return { state: "unavailable", reason: "no home directory" };
   const hasFfmpeg = present("ffmpeg");
   const hasEngine = present("whisper-cli");
   const hasModel = host.fileExists(modelPath()) && host.fileExists(modelDonePath());

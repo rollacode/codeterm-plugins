@@ -6,8 +6,9 @@ const { readFileSync } = require("fs");
 const { join } = require("path");
 
 const HOME = "/home/test";
-const MODEL = HOME + "/.codeterm/transcriber/ggml-small.bin";
-const BASE_MODEL = HOME + "/.codeterm/transcriber/ggml-base.bin";
+const DATA_DIR = "/instances/custom-data";
+const MODEL = DATA_DIR + "/transcriber/ggml-small.bin";
+const BASE_MODEL = DATA_DIR + "/transcriber/ggml-base.bin";
 const MANIFEST = JSON.parse(readFileSync(join(__dirname, "plugin.json"), "utf8"));
 const SUBPROCESS_ALLOW = MANIFEST.permissions.subprocess.allow;
 
@@ -24,6 +25,7 @@ globalThis.host = {
   settingsJson: () => JSON.stringify(settingsObj),
   platform: () => platformStr,
   homeDir: () => HOME,
+  dataDir: () => DATA_DIR,
   expandHome: (p) => p,
   envGet: () => null,
   unixNow: () => 1700000000,
@@ -227,7 +229,7 @@ test("poison partial: model file present but no .done sentinel → re-downloads 
 
 test("model switch cleanup: removes orphan ggml bins and matching done sentinels, keeps active and part", () => {
   reset({ model: "base" }, "macos");
-  const dir = HOME + "/.codeterm/transcriber";
+  const dir = DATA_DIR + "/transcriber";
   const active = dir + "/ggml-base.bin";
   files[active] = "active"; files[active + ".done"] = "ok";
   files[dir + "/ggml-small.bin"] = "old"; files[dir + "/ggml-small.bin.done"] = "ok";
@@ -248,7 +250,7 @@ test("model switch cleanup: removes orphan ggml bins and matching done sentinels
 
 test("model switch cleanup: active-only model deletes nothing", () => {
   reset({ model: "base" }, "macos");
-  const dir = HOME + "/.codeterm/transcriber";
+  const dir = DATA_DIR + "/transcriber";
   const active = dir + "/ggml-base.bin";
   files[active] = "active"; files[active + ".done"] = "ok";
   execHandler = happyHandler(["active only"]);
@@ -318,7 +320,7 @@ test("missing deps that cannot be installed: clear actionable error", () => {
 
 test("windows: downloads whisper.cpp from current ggml-org release asset", () => {
   reset({}, "windows");
-  files[HOME + "/.codeterm/transcriber/bin/ffmpeg.exe"] = "ffmpeg";
+  files[DATA_DIR + "/transcriber/bin/ffmpeg.exe"] = "ffmpeg";
   files[MODEL] = "x"; files[MODEL + ".done"] = "x";
   execHandler = withSandbox((opts) => {
     if (opts.bin === "ffmpeg" && (opts.args || [])[0] === "-version") {
@@ -333,7 +335,7 @@ test("windows: downloads whisper.cpp from current ggml-org release asset", () =>
       return JSON.stringify({ code: 0 });
     }
     if (opts.bin === "tar") {
-      files[HOME + "/.codeterm/transcriber/bin/Release/whisper-cli.exe"] = "exe";
+      files[DATA_DIR + "/transcriber/bin/Release/whisper-cli.exe"] = "exe";
       return JSON.stringify({ code: 0 });
     }
     if (/whisper-cli/.test(opts.bin)) {
@@ -354,9 +356,9 @@ test("windows: downloads whisper.cpp from current ggml-org release asset", () =>
 
 test("windows: discovers ffmpeg inside nested gyan.dev zip layout", () => {
   reset({}, "windows");
-  const nestedFfmpeg = HOME + "/.codeterm/transcriber/bin/ffmpeg-7.1.1-essentials_build/bin/ffmpeg.exe";
+  const nestedFfmpeg = DATA_DIR + "/transcriber/bin/ffmpeg-7.1.1-essentials_build/bin/ffmpeg.exe";
   files[nestedFfmpeg] = "ffmpeg";
-  files[HOME + "/.codeterm/transcriber/bin/whisper-cli.exe"] = "whisper";
+  files[DATA_DIR + "/transcriber/bin/whisper-cli.exe"] = "whisper";
   files[MODEL] = "x"; files[MODEL + ".done"] = "x";
   execHandler = withSandbox((opts) => {
     if (opts.bin === "ffmpeg" && (opts.args || [])[0] === "-version") {
@@ -381,8 +383,8 @@ test("windows: discovers ffmpeg inside nested gyan.dev zip layout", () => {
 
 test("windows: falls back to PowerShell when curl cannot write the release asset", () => {
   reset({}, "windows");
-  const archive = HOME + "/.codeterm/transcriber/whisper.zip";
-  files[HOME + "/.codeterm/transcriber/bin/ffmpeg.exe"] = "ffmpeg";
+  const archive = DATA_DIR + "/transcriber/whisper.zip";
+  files[DATA_DIR + "/transcriber/bin/ffmpeg.exe"] = "ffmpeg";
   files[MODEL] = "x"; files[MODEL + ".done"] = "x";
   execHandler = withSandbox((opts) => {
     if (opts.bin === "ffmpeg" && (opts.args || [])[0] === "-version") {
@@ -399,7 +401,7 @@ test("windows: falls back to PowerShell when curl cannot write the release asset
       return JSON.stringify({ code: 0 });
     }
     if (opts.bin === "tar") {
-      files[HOME + "/.codeterm/transcriber/bin/Release/whisper-cli.exe"] = "exe";
+      files[DATA_DIR + "/transcriber/bin/Release/whisper-cli.exe"] = "exe";
       return JSON.stringify({ code: 0 });
     }
     if (/whisper-cli/.test(opts.bin)) {
@@ -418,10 +420,10 @@ test("windows: falls back to PowerShell when curl cannot write the release asset
     "must not run downloaded whisper-cli through powershell");
 });
 
-test("windows: downloaded binaries execute directly by manifest basename, without sandbox denial", () => {
+test("data root: reuses existing nested Windows assets outside home", () => {
   reset({}, "windows");
-  files[HOME + "/.codeterm/transcriber/bin/ffmpeg.exe"] = "ffmpeg";
-  const nestedWhisper = HOME + "/.codeterm/transcriber/bin/Release/whisper-cli.exe";
+  files[DATA_DIR + "/transcriber/bin/ffmpeg.exe"] = "ffmpeg";
+  const nestedWhisper = DATA_DIR + "/transcriber/bin/Release/whisper-cli.exe";
   files[nestedWhisper] = "exe";
   files[MODEL] = "x"; files[MODEL + ".done"] = "x";
   execHandler = withSandbox((opts) => {
@@ -440,12 +442,18 @@ test("windows: downloaded binaries execute directly by manifest basename, withou
 
   const r = plugin.transcribe("/tmp/note.oga");
   assert(r.text === "direct", "transcribes by direct downloaded binary exec, got " + JSON.stringify(r));
-  assert(execCalls.some((c) => c.bin === HOME + "/.codeterm/transcriber/bin/ffmpeg.exe"),
+  assert(execCalls.some((c) => c.bin === DATA_DIR + "/transcriber/bin/ffmpeg.exe"),
     "direct local ffmpeg.exe exec should be allowed by manifest basename");
   assert(execCalls.some((c) => c.bin === nestedWhisper),
     "direct nested whisper-cli.exe exec should be allowed by manifest basename");
   assert(!execCalls.some((c) => c.bin === "powershell.exe"),
     "must not use powershell runtime wrapper for downloaded binaries");
+  assert(!execCalls.some((c) => ["curl", "tar", "brew"].includes(c.bin)),
+    "existing data-root assets must not be downloaded or reinstalled");
+  assert(!JSON.stringify(execCalls).includes(HOME),
+    "storage must use host.dataDir independently of homeDir");
+  assert(execCalls.some((c) => (c.args || []).includes(MODEL)),
+    "the existing model must be loaded from the instance data root");
 });
 
 test("transcribeStatus: ready when deps+model present, unloaded otherwise", () => {
@@ -619,7 +627,7 @@ test("macOS: a Homebrew ffmpeg outside the plugin PATH is used by absolute path"
   // Installed where brew puts it, invisible to a runtime with no login PATH.
   files["/usr/local/bin/ffmpeg"] = "binary";
   files["/usr/local/bin/whisper-cli"] = "binary";
-  files[HOME + "/.codeterm/transcriber/ggml-small.bin"] = "x".repeat(200000);
+  files[DATA_DIR + "/transcriber/ggml-small.bin"] = "x".repeat(200000);
   execHandler = withSandbox((opts) => {
     if (basename(opts.bin) === "ffmpeg" && opts.bin.indexOf("/") === -1) {
       return JSON.stringify({ error: "not found" });
@@ -651,7 +659,7 @@ test("macOS: brew --prefix decides where an installed binary is looked for", () 
   reset({ model: "small" }, "macos");
   files["/opt/custom/bin/ffmpeg"] = "binary";
   files["/opt/custom/bin/whisper-cli"] = "binary";
-  files[HOME + "/.codeterm/transcriber/ggml-small.bin"] = "x".repeat(200000);
+  files[DATA_DIR + "/transcriber/ggml-small.bin"] = "x".repeat(200000);
   execHandler = withSandbox((opts) => {
     if (opts.bin.indexOf("/") === -1 && basename(opts.bin) !== "brew") {
       return JSON.stringify({ error: "not found" });

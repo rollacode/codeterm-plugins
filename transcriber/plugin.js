@@ -17,7 +17,7 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// transcriber/src/plugin.ts
+// ../../../codeterm-plugins-worktrees/transcriber-root/transcriber/src/plugin.ts
 var plugin_exports = {};
 __export(plugin_exports, {
   default: () => plugin_default
@@ -50,8 +50,7 @@ function endpoint() {
   return ep && ep.length ? ep.trim() : "";
 }
 function baseDir() {
-  const home = host.homeDir() || ".";
-  return home + "/.codeterm/transcriber";
+  return host.dataDir() + "/transcriber";
 }
 function binDir() {
   return baseDir() + "/bin";
@@ -494,7 +493,6 @@ function present(name) {
 function transcribeStatus() {
   const ep = endpoint();
   if (ep.length) return { state: "ready", reason: "remote: " + ep };
-  if (!host.homeDir()) return { state: "unavailable", reason: "no home directory" };
   const hasFfmpeg = present("ffmpeg");
   const hasEngine = present("whisper-cli");
   const hasModel = host.fileExists(modelPath()) && host.fileExists(modelDonePath());
