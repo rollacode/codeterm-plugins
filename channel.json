@@ -13,8 +13,8 @@
     {
       "id": "git",
       "path": "git",
-      "version": "0.1.6",
-      "minCodeterm": "1.0.0"
+      "version": "0.1.7",
+      "minCodeterm": "1.10.0"
     },
     {
       "id": "transcriber",

@@ -1,7 +1,7 @@
 {
   "id": "git",
-  "version": "0.1.6",
-  "minCodeterm": "1.0.0",
+  "version": "0.1.7",
+  "minCodeterm": "1.10.0",
   "hostApi": 2,
   "displayName": "Git",
   "description": "Live Git branch and working-tree status in the pane footer, a glance popover, and a full Git view. Reads each pane's repo with the local git binary.",
