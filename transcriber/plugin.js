@@ -17,7 +17,7 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// ../../../codeterm-plugins-worktrees/transcriber-root/transcriber/src/plugin.ts
+// transcriber/src/plugin.ts
 var plugin_exports = {};
 __export(plugin_exports, {
   default: () => plugin_default
