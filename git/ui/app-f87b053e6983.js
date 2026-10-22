@@ -130,7 +130,7 @@ lucide-react/dist/esm/icons/upload.mjs:
 lucide-react/dist/esm/icons/x.mjs:
 lucide-react/dist/esm/lucide-react.mjs:
   (**
-   * @license lucide-react v1.60.0 - ISC
+   * @license lucide-react v1.61.0 - ISC
    *
    * This source code is licensed under the ISC license.
    * See the LICENSE file in the root directory of this source tree.
