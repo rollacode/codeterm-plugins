@@ -39,6 +39,24 @@ test("bw error-message mapping", () => {
   );
 });
 
+const SENTINEL = "SENTINEL-VALUE-7f3a";
+const leakedItems = JSON.stringify([{ id: "i1", login: { password: SENTINEL }, notes: SENTINEL }]);
+
+test("bw errors never carry the bw payload", () => {
+  const backend = plugin.__test_mapError("Unexpected: " + leakedItems);
+  assert(backend.kind === "backend" && !JSON.stringify(backend).includes(SENTINEL), "mapBwError withholds text");
+  const parsed = plugin.__test_parseBwOutput({ stdout: leakedItems.slice(0, 40) + SENTINEL, stderr: SENTINEL, code: 1 });
+  assert(!parsed.success && parsed.message === "bw output was not valid JSON (exit 1)", "parse failure is fixed text");
+  for (const ex of [
+    { error: "spawn bw ENOENT " + SENTINEL },
+    { error: SENTINEL },
+    { stdout: JSON.stringify({ success: false, message: leakedItems }), code: 1 },
+    { stdout: SENTINEL, stderr: SENTINEL, code: 2 },
+  ]) {
+    assert(!JSON.stringify(plugin.__test_statusFromExec(ex)).includes(SENTINEL), "status failure withholds payload");
+  }
+});
+
 test("list-envelope unwrap", () => {
   const out = plugin.__test_unwrap({ object: "list", data: [1, 2] });
   assert(Array.isArray(out) && out.length === 2 && out[0] === 1 && out[1] === 2, "unwrap data array");
@@ -298,7 +316,7 @@ test("auto-relogin: server login failure is surfaced and keeps persisted credent
   };
   try {
     const r = plugin.secretGetItem("token");
-    assert("error" in r && r.error.kind === "backend" && r.error.message === "Error saving device", "expected server failure, got " + JSON.stringify(r));
+    assert("error" in r && r.error.kind === "backend" && r.error.message === "bw failed", "expected server failure, got " + JSON.stringify(r));
     assert(loginCalls === 1 && unlockCalls === 0, "failed login must stop before unlock");
     assert(secrets.master_password === MASTER, "transient server failure must retain the password");
   } finally {
@@ -502,13 +520,13 @@ test("status cause: bw binary missing → unavailable with probed detail", () =>
   try {
     const s = plugin.secretStatus();
     assert(s.status === "unavailable", "expected unavailable, got " + JSON.stringify(s));
-    assert(/No such file/i.test(s.reason || ""), "reason must surface the exec error, got " + s.reason);
+    assert(s.reason === "Bitwarden CLI (bw) not found", "reason must be the fixed binary-missing text, got " + s.reason);
   } finally {
     globalThis.host = savedHost;
   }
 });
 
-test("status cause: bw-level error passes the bw message through", () => {
+test("status cause: bw-level error maps to a fixed reason", () => {
   const secrets = {};
   const savedHost = globalThis.host;
   globalThis.host = {
@@ -522,7 +540,7 @@ test("status cause: bw-level error passes the bw message through", () => {
   try {
     const s = plugin.secretStatus();
     assert(s.status === "unavailable", "expected unavailable, got " + JSON.stringify(s));
-    assert(/unreachable/i.test(s.reason || ""), "reason must pass the bw message through, got " + s.reason);
+    assert(s.reason === "Bitwarden server is unreachable", "reason must be the fixed unreachable text, got " + s.reason);
   } finally {
     globalThis.host = savedHost;
   }
