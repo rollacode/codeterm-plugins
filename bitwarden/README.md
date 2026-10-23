@@ -10,6 +10,7 @@ Use a [Bitwarden](https://bitwarden.com) vault as CodeTerm's secret store, so `c
 
 ## Requirements
 
+- Node.js (`node`) on your `PATH` for metadata projection before host output capture.
 - The Bitwarden CLI (`bw`) on your `PATH`. Install via `brew install bitwarden-cli`, `npm i -g @bitwarden/cli`, or the official download. On Linux, user-local installs in `~/.local/bin` are also detected for GUI-launched CodeTerm daemons with a minimal `PATH`.
 - A Bitwarden account (cloud `vault.bitwarden.com`, or a self-hosted server URL set in the view).
 
@@ -17,7 +18,7 @@ Use a [Bitwarden](https://bitwarden.com) vault as CodeTerm's secret store, so `c
 
 | Permission | Why |
 |------------|-----|
-| `subprocess: bw, env` | All vault operations go through the official `bw` CLI; `env` is used only to expand `PATH` for user-local Linux installs. |
+| `subprocess: bw, node, env` | All vault operations go through the official `bw` CLI; `env` is used only to expand `PATH` for user-local Linux installs. |
 | `network: vault.bitwarden.com` | Lets `bw` reach Bitwarden's cloud API. For self-hosted servers, the CLI is pointed at your host. |
 | `secrets` | Lets the plugin serve as CodeTerm's secret backend. |
 
@@ -66,3 +67,23 @@ nothing — every operation still authenticates against the vault itself.
 ## Status detail
 
 When the vault is unreachable the connection view names the cause instead of a generic "unavailable": the `bw` binary not being found (with the exec error), other spawn failures, or a `bw`-level error (server unreachable / bad session) with the CLI's own message passed through.
+
+List/search run `bw` through a Node subprocess that strips login, notes, fields
+and attachments before the host captures output. Host 1.15.2 caps each captured
+stream at 128 KiB; raw vault listings can exceed that cap. The subprocess allows
+up to 32 MiB of raw output and emits at most 120 KiB of metadata. Errors report
+fixed failure kinds and bounded exit codes, never CLI stdout or stderr.
+
+On host 1.15.2, plugin reload updates the registry but leaves the active secret
+backend holding its previous VM. After updating the plugin, re-select Bitwarden
+in Settings (POST `/api/secrets/backend` with `{"backend":"bitwarden"}`) to
+activate the new code without restarting Domios. This route also reads vault status.
+
+The replay fixture pins host `v1.15.2` / `d926b1bac`: `js_backend.rs` invokes
+`secretList` with one serialized `ListFilter` argument, or `secretSearch` with
+one query string. Its `Envelope<Vec<SecretRef>>` expects `{ok: [...]}` or
+`{error: {kind, ...}}`; a Bitwarden `{success, data}` response is an internal
+CLI envelope and must never be returned as that host envelope. Metadata keys
+are `item_id`, `name`, `folder`, `organization`, `collection`, and `last_modified`
+(Unix milliseconds). `bitwarden/tests/host-1.15.2.test.cjs` executes the pinned
+host invocation helper against the shipped bundle and checks this decode shape.

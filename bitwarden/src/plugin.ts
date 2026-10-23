@@ -1,3 +1,4 @@
+import { METADATA_PROCESS } from "./metadata-process";
 // Bitwarden secret-backend plugin (capability: secret_backend).
 // Authored in TypeScript against @codeterm/plugin-sdk and compiled to a
 // QuickJS-compatible plugin.js by scripts/build-plugin.mjs.
@@ -50,7 +51,7 @@ function canUnlockHeadlessly(): boolean {
 // bw's wording for "these credentials are wrong", as opposed to a network or
 // server failure. Only the former is worth forgetting a stored password over.
 function isRejectedCredential(msg: string | undefined): boolean {
-  const m = (msg || "").toLowerCase();
+  const m = (typeof msg === "string" ? msg : "").toLowerCase();
   return (
     m.indexOf("invalid master password") >= 0 ||
     m.indexOf("username or password is incorrect") >= 0 ||
@@ -102,7 +103,7 @@ function base64Encode(str: string): string {
 
 // Translate a bw error message → a SecretError kind (mirror map_bw_message).
 function mapBwError(msg: string | undefined): SecretError {
-  const m = (msg || "").toLowerCase();
+  const m = (typeof msg === "string" ? msg : "").toLowerCase();
   if (m.indexOf("vault is locked") >= 0) return { kind: "locked" };
   if (m.indexOf("you are not logged in") >= 0) return { kind: "logged_out" };
   if (m.indexOf("not found") >= 0) return { kind: "not_found" };
@@ -110,6 +111,9 @@ function mapBwError(msg: string | undefined): SecretError {
   if (m.indexOf("already") >= 0 && m.indexOf("exists") >= 0) return { kind: "already_exists" };
   if (m.indexOf("unreachable") >= 0 || m.indexOf("econnrefused") >= 0 || m.indexOf("enotfound") >= 0) {
     return { kind: "backend", message: "Bitwarden server is unreachable" };
+  }
+  if (/^bw metadata (failed: exit -?\d{1,3}|timed out|exceeded capture limit|could not start|returned invalid json|returned unexpected shape|exceeded host output limit|process failed)$/.test(m)) {
+    return { kind: "backend", message: m };
   }
   return { kind: "backend", message: "bw failed" };
 }
@@ -207,10 +211,11 @@ interface BwOpts {
   timeoutMs?: number;
 }
 
-interface BwExec { error?: string; stdout?: string; stderr?: string; code?: number }
+interface BwExec { error?: string; stdout?: string; stderr?: string; code?: number; truncated?: boolean }
 
 // Shape a raw exec/poll result into bw's { success, data, message } envelope.
 function parseBwOutput(ex: BwExec): BwResponse {
+  if (ex.truncated) return { success: false, message: "bw metadata exceeded host output limit" };
   if (ex.error) return { success: false, message: ex.error };
   try {
     return JSON.parse((ex.stdout || "").trim()); // { success, data, message, errorCode }
@@ -270,11 +275,14 @@ function bwExecOpts(args: string[], opts: BwOpts): string {
   const full = args.concat(["--nointeraction", "--response"]);
   const env = opts.env || {};
   if (opts.session) env.BW_SESSION = opts.session;
+  const metadata = args[0] === "list" && args[1] === "items";
+  const bin = metadata ? "node" : "bw";
+  const commandArgs = metadata ? ["-e", METADATA_PROCESS, "--"].concat(full) : full;
   const path = expandedBwPath();
   if (path) {
-    return JSON.stringify({ bin: "env", args: [`PATH=${path}`, "bw"].concat(full), env: env, stdin: opts.stdin || null, timeoutMs: opts.timeoutMs || BW_TIMEOUT_MS });
+    return JSON.stringify({ bin: "env", args: [`PATH=${path}`, bin].concat(commandArgs), env: env, stdin: opts.stdin || null, timeoutMs: opts.timeoutMs || BW_TIMEOUT_MS });
   }
-  return JSON.stringify({ bin: "bw", args: full, env: env, stdin: opts.stdin || null, timeoutMs: opts.timeoutMs || BW_TIMEOUT_MS });
+  return JSON.stringify({ bin: bin, args: commandArgs, env: env, stdin: opts.stdin || null, timeoutMs: opts.timeoutMs || BW_TIMEOUT_MS });
 }
 
 function bw(args: string[], opts?: BwOpts): BwResponse {
@@ -446,7 +454,7 @@ type StatusFailure = { kind: "binary_missing" | "exec_error" | "bw_error"; messa
 type StatusResult = { status?: BwStatus; failure?: StatusFailure };
 
 function isBinaryMissing(msg: string): boolean {
-  const m = (msg || "").toLowerCase();
+  const m = (typeof msg === "string" ? msg : "").toLowerCase();
   return m.indexOf("no such file") >= 0 || m.indexOf("enoent") >= 0 ||
     m.indexOf("cannot find") >= 0 || m.indexOf("executable file not found") >= 0 ||
     (m.indexOf("spawn") >= 0 && m.indexOf("bw") >= 0);
@@ -654,6 +662,15 @@ function metadataRefs(listed: unknown): SecretRefOut[] | null {
     v = (v as Record<string, unknown>).data;
   }
   if (!Array.isArray(v)) return null;
+  for (const item of v) {
+    if (!item || typeof item !== "object") return null;
+    const c = item as Record<string, unknown>;
+    for (const key of ["folderId", "organizationId", "revisionDate"]) {
+      if (c[key] != null && typeof c[key] !== "string") return null;
+    }
+    if (c.collectionIds != null && (!Array.isArray(c.collectionIds) ||
+      !c.collectionIds.every((id: unknown) => typeof id === "string"))) return null;
+  }
   return (v as CipherItem[])
     .filter((c) => c && c.type === 1 && typeof c.id === "string" && typeof c.name === "string")
     .map(toRef);
@@ -734,7 +751,7 @@ function secretGetItem(nameOrId: string): Envelope {
   return { ok: { item_id: item.id, name: item.name, value: value, notes: item.notes || null } };
 }
 
-function secretList(filter?: SecretListFilter): Envelope {
+function listMetadata(filter?: SecretListFilter): Envelope {
   filter = filter || {};
   let args = ["list", "items"];
   if (filter.organization) args = args.concat(["--organizationid", filter.organization]);
@@ -753,13 +770,29 @@ function secretList(filter?: SecretListFilter): Envelope {
   return { ok: items };
 }
 
-function secretSearch(query: string): Envelope {
+function searchMetadata(query: string): Envelope {
   const q = (query || "").trim();
   if (!q) return { error: { kind: "bad_request", message: "query must not be empty" } };
   const r = runWithSession(["list", "items", "--search", q]);
   if ("error" in r) return r;
   const items = metadataRefs(r.ok);
   return items ? { ok: items } : UNEXPECTED_LIST;
+}
+
+function metadataCall(run: () => Envelope): Envelope {
+  try {
+    return run();
+  } catch {
+    return { error: { kind: "backend", message: "bw metadata request failed" } };
+  }
+}
+
+function secretList(filter?: SecretListFilter): Envelope {
+  return metadataCall(() => listMetadata(filter));
+}
+
+function secretSearch(query: string): Envelope {
+  return metadataCall(() => searchMetadata(query));
 }
 
 function secretDelete(nameOrId: string): Envelope<true> {
@@ -1014,6 +1047,7 @@ const plugin: PluginModule = {
   // exported for parity tests (pure logic, no host.exec)
   __test_base64: base64Encode,
   __test_mapError: mapBwError,
+  __test_metadataProcess: METADATA_PROCESS,
   __test_metadataRefs: metadataRefs,
   __test_parseBwOutput: parseBwOutput,
   __test_statusFromExec: (ex: BwExec) => bwExecToStatusResult(ex),
