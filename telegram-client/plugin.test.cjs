@@ -1788,6 +1788,56 @@ test("manifest and settings let agents discover send-file and search-messages", 
   assert.match(readme, /`search-messages /);
 });
 
+const PAD_BODY = ('  "quoted" `code` $value <tag> & **markdown** cafe\u0301 🚀\r\nsecond line\n\n').repeat(12);
+
+test("host bodies round-trip through previews and both send verbs unchanged", () => {
+  for (const body of [PAD_BODY, "--key", "--message", "--"]) {
+    const env = mockHost({ chats: sendFixtureChats });
+    try {
+      configureLoggedInFixture(env);
+      const invoke = (verb, args) => plugin.onAgentCommand({ sessionId: "pad", verb, args, body });
+      assert.equal(JSON.parse(invoke("preview", ["id:4242"]).result).text, body);
+      for (const verb of ["send", "send-to"]) {
+        const sent = invoke(verb, ["id:4242", "--key", `pad-${verb}`]);
+        assert.equal(sent.error, undefined, sent.error);
+        assert.equal(JSON.parse(sent.result).status, "sent");
+      }
+      assert.equal(sendCalls(env).length, 2);
+      for (const call of sendCalls(env)) {
+        assert.deepEqual(call.words, ["send", "--peer", "id:4242", "--", body]);
+      }
+    } finally { env.cleanup(); }
+  }
+});
+
+test("host body captions reach file uploads unchanged including option-looking text", () => {
+  for (const body of [PAD_BODY, "--message", "--", ""]) {
+    const env = mockHost({ chats: sendFixtureChats });
+    try {
+      configureLoggedInFixture(env);
+      const file = ownerFile(env, "pad.txt");
+      const sent = plugin.onAgentCommand({ sessionId: "pad", verb: "send-file", args: ["id:4242", file, "--key", "pad-file"], body });
+      assert.equal(sent.error, undefined, sent.error);
+      assert.equal(JSON.parse(sent.result).status, "sent");
+      assert.deepEqual(uploadCalls(env).map((call) => call.words), [["upload", "--peer", "id:4242", ...(body ? [`--message=${body}`] : []), "--", file]]);
+    } finally { env.cleanup(); }
+  }
+});
+
+test("mixed inline and host bodies are refused before any host operation", () => {
+  globalThis.host = new Proxy({}, { get: () => { throw new Error("host must not be used"); } });
+  for (const [verb, args] of [
+    ["send", ["id:4242", "--key", "mixed", "inline"]],
+    ["send-to", ["id:4242", "inline"]],
+    ["preview", ["id:4242", ""]],
+    ["send-file", ["id:4242", "/tmp/file", "--message", ""]],
+  ]) {
+    for (const body of [PAD_BODY, ""]) {
+      assert.match(plugin.onAgentCommand({ sessionId: "pad", verb, args, body }).error, /cannot be combined with a body source/);
+    }
+  }
+});
+
 async function main() {
   let failures = 0;
   for (const [name, fn] of tests) {

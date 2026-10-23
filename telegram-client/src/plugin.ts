@@ -403,7 +403,7 @@ function agentChats(args: string[] = []): { result: string } | { error: string }
   if (!query) return { result: JSON.stringify({ chats: listed.chats }) };
   const found = matchChats(listed.chats, query);
   const next = found.match
-    ? `Send with: send ${found.match.id} --key <unique-key> <text>`
+    ? `Send with: send ${found.match.id} --key <unique-key> --from-pad message.md`
     : found.ambiguous
       ? "Several chats match. Show the candidates to the owner and ask which one, then use its id."
       : "No chat in the 100 most recent dialogs matches. Ask the owner for a more exact name or @username.";
@@ -466,10 +466,11 @@ function resolveDestination(id: string, sender: any): { destination: any } | { e
 }
 
 let previewSequence = 0;
-function previewCommand(args: string[], origin: SendOrigin = "agent"): { result: string } | { error: string } {
-  if (args.length < 2) return { error: "Usage: preview <immutable-chat-id> <text>." };
-  if (!validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> <text>. Display names are not accepted; find the id with `chats <name>`." };
-  const text = args.slice(1).join(" ");
+function previewCommand(args: string[], origin: SendOrigin = "agent", body?: string): { result: string } | { error: string } {
+  if (args.length < (body === undefined ? 2 : 1)) return { error: "Usage: preview <immutable-chat-id> --from-pad message.md." };
+  if (!validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> --from-pad message.md. Display names are not accepted; find the id with `chats <name>`." };
+  if (body !== undefined && args.length > 1) return { error: "invalid-request: Inline text cannot be combined with a body source." };
+  const text = body ?? args.slice(1).join(" ");
   if (!text.length) return { error: "Preview text must not be empty." };
   const resolved = resolveSender();
   if ("error" in resolved) return { error: resolved.error };
@@ -513,7 +514,7 @@ type Outbox = { schema: 1; attempts: Attempt[] };
 function failureMessage(kind: SendFailure, detail?: any): string {
   switch (kind) {
     case "invalid-markup": return `invalid-markup: ${String(detail || "tg rejected the markup")}`;
-    case "invalid-request": return `invalid-request: ${String(detail || "Usage: send <immutable-chat-id> [--key <idempotency-key>] [--format plain|html|markdown] [--] <text>.")} Find the chat id with \`chats <name>\`, then send again.`;
+    case "invalid-request": return `invalid-request: ${String(detail || "Usage: send <immutable-chat-id> [--key <idempotency-key>] [--format plain|html|markdown] --from-pad message.md.")} Find the chat id with \`chats <name>\`, then send again.`;
     case "file-not-found": return `file-not-found: ${String(detail || "The file")} does not exist, is not a regular file, or is outside the folders this plugin may read. Check the absolute path; nothing was sent.`;
     case "file-too-large": return `file-too-large: ${String(detail || "The file is over the configured limit")}. Raise "Maximum file size" in Telegram Client settings or send a smaller file; nothing was sent.`;
     case "file-unreadable": return `file-unreadable: ${String(detail || "The file")} exists but could not be opened for reading. Close any program locking it or fix its permissions, then send again; nothing was sent.`;
@@ -574,8 +575,8 @@ function sendPayloadHash(text: string, format: SendFormat): string {
   return sha256Hex(format === "plain" ? text : `${format}\u0000${text}`);
 }
 
-function parseSendArgs(args: string[]): { chatId: string; text: string; key?: string; format: SendFormat } | { error: string } {
-  if (args.length < 2 || !validChatId(args[0])) return { error: failureMessage("invalid-request", "Usage: send <immutable-chat-id> [--key <idempotency-key>] [--format plain|html|markdown] [--] <text>; display names are not accepted.") };
+function parseSendArgs(args: string[], body?: string): { chatId: string; text: string; key?: string; format: SendFormat } | { error: string } {
+  if (args.length < (body === undefined ? 2 : 1) || !validChatId(args[0])) return { error: failureMessage("invalid-request", "Usage: send <immutable-chat-id> [--key <idempotency-key>] [--format plain|html|markdown] --from-pad message.md; display names are not accepted.") };
   let start = 1;
   let key: string | undefined;
   let format: SendFormat = "plain";
@@ -595,7 +596,8 @@ function parseSendArgs(args: string[]): { chatId: string; text: string; key?: st
     }
     start += 2;
   }
-  const text = args.slice(start).join(" ");
+  if (body !== undefined && args.length > start) return { error: failureMessage("invalid-request", "Inline text cannot be combined with a body source.") };
+  const text = body ?? args.slice(start).join(" ");
   if (!text.length) return { error: failureMessage("invalid-request", "Message text must not be empty.") };
   if (format === "markdown") return { error: failureMessage("invalid-request", "The pinned tg v0.11.0 client has no native Markdown parse mode. Use --format html or plain; nothing was sent.") };
   return { chatId: args[0], text, key, format };
@@ -678,8 +680,8 @@ function serverMessageId(data: any): string | null {
   return null;
 }
 
-function sendCommand(origin: SendOrigin, args: string[]): { result: string } | { error: string } {
-  const parsed = parseSendArgs(args);
+function sendCommand(origin: SendOrigin, args: string[], body?: string): { result: string } | { error: string } {
+  const parsed = parseSendArgs(args, body);
   if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
   const matchingPreview = parsed.format === "plain" ? Object.values(previewTokens).reverse().find((token: any) => token.destination.id === parsed.chatId && token.text === parsed.text) : undefined;
   let key = parsed.key || matchingPreview?.previewNonce;
@@ -873,8 +875,8 @@ function settleFileJobs(): void {
   }
 }
 
-function sendFileCommand(origin: SendOrigin, args: string[]): { result: string } | { error: string } {
-  const parsed = parseSendFileArgs(args);
+function sendFileCommand(origin: SendOrigin, args: string[], body?: string): { result: string } | { error: string } {
+  const parsed = parseSendFileArgs(args, body);
   if ("error" in parsed) return requestFailure(parsed.error);
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
@@ -1352,7 +1354,7 @@ function logout(): { result: string } | { error: string } {
   return { result: "Logged out. Telegram config and local session files were removed." };
 }
 
-function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }): { result: string } | { error: string } {
+function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[]; body?: string }): { result: string } | { error: string } {
   const args = Array.isArray(ctx.args) ? ctx.args : [];
   switch (ctx.verb) {
     case "login": {
@@ -1400,9 +1402,9 @@ function onAgentCommand(ctx: { sessionId: string; verb: string; args: string[] }
     }
     case "logout": return logout();
     case "send-to":
-    case "send": return sendCommand("agent", args);
-    case "preview": return previewCommand(args, "agent");
-    case "send-file": return sendFileCommand("agent", args);
+    case "send": return sendCommand("agent", args, ctx.body);
+    case "preview": return previewCommand(args, "agent", ctx.body);
+    case "send-file": return sendFileCommand("agent", args, ctx.body);
     case "send-file-status": return sendFileStatus(args);
     default: return { error: `Unknown Telegram verb: ${ctx.verb}` };
   }

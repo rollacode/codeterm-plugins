@@ -36,9 +36,9 @@ export function parentDir(value: string): string {
   return parent || trimmed.slice(0, 1);
 }
 
-const SEND_FILE_USAGE = "Usage: send-file <chat-id-or-name> <absolute-file-path> [--message <caption>] [--key <idempotency-key>] [--format plain|html]; quote a caption or path that contains spaces.";
+const SEND_FILE_USAGE = "Usage: send-file <chat-id-or-name> <absolute-file-path> [--from-pad caption.md] [--key <idempotency-key>] [--format plain|html]; quote a caption or path that contains spaces.";
 
-export function parseSendFileArgs(args: string[]): SendFileArgs | { error: string } {
+export function parseSendFileArgs(args: string[], body?: string): SendFileArgs | { error: string } {
   if (args.length < 2) return { error: SEND_FILE_USAGE };
   const chat = String(args[0] || "").trim();
   const path = String(args[1] || "");
@@ -62,7 +62,8 @@ export function parseSendFileArgs(args: string[]): SendFileArgs | { error: strin
       format = value;
     } else return { error: `Unexpected argument ${JSON.stringify(flag)}. ${SEND_FILE_USAGE}` };
   }
-  return { chat, path, caption: caption || "", key, format: format || "plain" };
+  if (body !== undefined && caption !== undefined) return { error: "Inline --message cannot be combined with a body source." };
+  return { chat, path, caption: body ?? caption ?? "", key, format: format || "plain" };
 }
 
 const SEARCH_USAGE = "Usage: search-messages <query> [--chat <chat-id-or-name>] [--limit 1-50].";
