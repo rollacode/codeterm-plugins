@@ -488,6 +488,15 @@ function isoToMs(s) {
   const t = Date.parse(s);
   return isNaN(t) ? null : t;
 }
+function metadataRefs(listed) {
+  let v = listed;
+  while (v && typeof v === "object" && !Array.isArray(v) && v.data !== void 0) {
+    v = v.data;
+  }
+  if (!Array.isArray(v)) return null;
+  return v.filter((c) => c && c.type === 1 && typeof c.id === "string" && typeof c.name === "string").map(toRef);
+}
+var UNEXPECTED_LIST = { error: { kind: "backend", message: "bw list returned an unexpected shape" } };
 function toRef(c) {
   return {
     item_id: c.id,
@@ -557,22 +566,24 @@ function secretList(filter) {
   if (filter.collection) args = args.concat(["--collectionid", filter.collection]);
   const r = runWithSession(args);
   if ("error" in r) return r;
-  let items = (r.ok || []).filter((c) => c.type === 1);
+  let items = metadataRefs(r.ok);
+  if (!items) return UNEXPECTED_LIST;
   if (filter.folder) {
     const fid = resolveFolderId(filter.folder);
     if ("error" in fid) return fid;
-    items = items.filter((c) => (c.folderId || null) === (fid.ok || null));
+    items = items.filter((c) => c.folder === (fid.ok || null));
   }
   items.sort((a, b) => a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1);
   if (filter.limit) items = items.slice(0, filter.limit);
-  return { ok: items.map(toRef) };
+  return { ok: items };
 }
 function secretSearch(query) {
   const q = (query || "").trim();
   if (!q) return { error: { kind: "bad_request", message: "query must not be empty" } };
   const r = runWithSession(["list", "items", "--search", q]);
   if ("error" in r) return r;
-  return { ok: (r.ok || []).filter((c) => c.type === 1).map(toRef) };
+  const items = metadataRefs(r.ok);
+  return items ? { ok: items } : UNEXPECTED_LIST;
 }
 function secretDelete(nameOrId) {
   const item = runWithSession(["get", "item", nameOrId]);
@@ -785,6 +796,7 @@ var plugin = {
   // exported for parity tests (pure logic, no host.exec)
   __test_base64: base64Encode,
   __test_mapError: mapBwError,
+  __test_metadataRefs: metadataRefs,
   __test_parseBwOutput: parseBwOutput,
   __test_statusFromExec: (ex) => bwExecToStatusResult(ex),
   __test_unwrap: unwrapData,
