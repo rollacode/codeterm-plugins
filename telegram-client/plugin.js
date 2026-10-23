@@ -34,9 +34,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// ../codeterm-plugins/node_modules/qrcode-generator/qrcode.js
+// node_modules/qrcode-generator/qrcode.js
 var require_qrcode = __commonJS({
-  "../codeterm-plugins/node_modules/qrcode-generator/qrcode.js"(exports, module2) {
+  "node_modules/qrcode-generator/qrcode.js"(exports, module2) {
     var qrcode2 = (function() {
       var qrcode3 = function(typeNumber, errorCorrectionLevel) {
         var PAD0 = 236;
