@@ -76,7 +76,10 @@ function mapBwError(msg) {
   if (m.indexOf("not found") >= 0) return { kind: "not_found" };
   if (m.indexOf("more than one result") >= 0) return { kind: "ambiguous", candidates: [] };
   if (m.indexOf("already") >= 0 && m.indexOf("exists") >= 0) return { kind: "already_exists" };
-  return { kind: "backend", message: msg && msg.length ? msg : "bw failed" };
+  if (m.indexOf("unreachable") >= 0 || m.indexOf("econnrefused") >= 0 || m.indexOf("enotfound") >= 0) {
+    return { kind: "backend", message: "Bitwarden server is unreachable" };
+  }
+  return { kind: "backend", message: "bw failed" };
 }
 function unwrapData(v) {
   if (v && typeof v === "object" && v.data !== void 0) {
@@ -139,8 +142,7 @@ function parseBwOutput(ex) {
   try {
     return JSON.parse((ex.stdout || "").trim());
   } catch (e) {
-    const combined = ex.stderr && ex.stderr.length ? ex.stderr : ex.stdout || "bw exited " + ex.code;
-    return { success: false, message: combined };
+    return { success: false, message: "bw output was not valid JSON (exit " + ex.code + ")" };
   }
 }
 function hostStringCall(name) {
@@ -199,7 +201,7 @@ function bw(args, opts) {
   try {
     ex = JSON.parse(raw);
   } catch (e) {
-    return { success: false, message: "exec parse: " + e };
+    return { success: false, message: "bw exec result was not valid JSON" };
   }
   return parseBwOutput(ex);
 }
@@ -331,12 +333,12 @@ function isBinaryMissing(msg) {
 function bwExecToStatusResult(ex) {
   if (ex.error) {
     if (isBinaryMissing(ex.error)) {
-      return { failure: { kind: "binary_missing", message: "Bitwarden CLI (bw) not found: " + ex.error } };
+      return { failure: { kind: "binary_missing", message: "Bitwarden CLI (bw) not found" } };
     }
-    return { failure: { kind: "exec_error", message: ex.error } };
+    return { failure: { kind: "exec_error", message: "bw could not be started" } };
   }
   const resp = parseBwOutput(ex);
-  if (!resp.success) return { failure: { kind: "bw_error", message: resp.message || "bw status failed" } };
+  if (!resp.success) return { failure: { kind: "bw_error", message: mapBwError(resp.message).message || "bw status failed" } };
   return { status: unwrapData(resp.data) };
 }
 function bwStatus() {
@@ -348,7 +350,7 @@ function bwStatus() {
   try {
     ex = JSON.parse(raw);
   } catch (e) {
-    return { failure: { kind: "exec_error", message: "exec parse: " + e } };
+    return { failure: { kind: "exec_error", message: "bw exec result was not valid JSON" } };
   }
   return bwExecToStatusResult(ex);
 }
@@ -477,7 +479,7 @@ function resetConnection() {
   clearStoredCredentials();
   const configured = bw(["config", "server", server]);
   if (!configured.success) {
-    return { error: { kind: "backend", message: configured.message || "could not point bw at " + server } };
+    return { error: { kind: "backend", message: "could not point bw at " + server } };
   }
   return { ok: true };
 }
@@ -623,7 +625,7 @@ function startFlowJob(flowId, phase, args, opts, usedApiKey) {
     return null;
   }
   if (started.error || !started.jobId) {
-    lastRecoveryError = { kind: "backend", message: started.error || "exec start returned no jobId" };
+    lastRecoveryError = { kind: "backend", message: "bw could not be started" };
     return null;
   }
   statusFlows[flowId] = { hostJobId: started.jobId, phase, usedApiKey };
@@ -783,6 +785,8 @@ var plugin = {
   // exported for parity tests (pure logic, no host.exec)
   __test_base64: base64Encode,
   __test_mapError: mapBwError,
+  __test_parseBwOutput: parseBwOutput,
+  __test_statusFromExec: (ex) => bwExecToStatusResult(ex),
   __test_unwrap: unwrapData,
   __test_buildCipher: buildLoginCipher,
   __test_hostOf: hostOf,
