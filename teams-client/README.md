@@ -2,6 +2,19 @@
 
 Teams Client works as a personal Teams client for the owner. It wraps the [exo-teams](https://github.com/alxxpersonal/exo-teams) CLI, which signs in as the first-party Microsoft Teams desktop client (`1fec8e78-bce4-4aaf-ab1b-5451cc387264`) with the OAuth device-code flow and talks to the same internal Teams services the desktop app uses: the region chat service (`*.ng.msg.teams.microsoft.com`) for messages and `chatsvcagg` for the chat list. No Entra app registration, Microsoft Graph application, or tenant admin consent is involved, which is why it works in tenants that require administrator approval for third-party apps. Tenant policies that apply to the Teams client itself, such as Conditional Access, still apply and are reported as `refused` with Microsoft's message.
 
+## Authored message bodies
+
+Requires Domios 1.15.3 or newer. Write authored text to your AgentPad, then pass its relative path:
+
+```sh
+domios plugin teams-client send <chat-id> --key <unique-key> --from-pad message.md
+domios plugin teams-client send-to <person> --from-pad message.md
+domios plugin teams-client preview <chat-id> --from-pad message.md
+domios plugin teams-client send-file <chat-id> <absolute-file-path> --from-pad caption.md
+```
+
+All four verbs also accept `--from-file <path>` or `--stdin`. The host resolves the calling tab's pad with the same containment checks as `domios send`; a missing pad file gives an error before the plugin runs. Sources preserve UTF-8 text, quotes, backticks, markdown, newlines and trailing whitespace. Teams applies its normal HTML escaping and encodes line endings as `<br>`; Telegram plain mode keeps markup literal. Inline bodies remain supported, but combining inline text or `--message` with a body source is refused. A body supplied to `send-file` is the caption. Put source flags before a literal `--` separator.
+
 ## Install
 
 The first `login` installs exo-teams into the plugin-owned runtime directory (`~/.codeterm/teams-client/runtime`, `~/.codeterm-dev/...` on a dev instance). exo-teams has no release binaries, so the plugin builds it:

@@ -847,7 +847,7 @@ function agentChats(args, preferDirect = false) {
   if ("error" in listed) return listed;
   if (!query) return { result: JSON.stringify({ chats: listed.chats }) };
   const found = findChats(listed.chats, query, preferDirect);
-  const next = found.match ? `Send with: send ${found.match.id} --key <unique-key> <text>` : found.ambiguous ? "Several chats match. Show the candidates to the owner and ask which one, then use its id." : "No chat matches. Ask the owner for a more exact name, or use send-to <full name> to start a 1:1 chat.";
+  const next = found.match ? `Send with: send ${found.match.id} --key <unique-key> --from-pad message.md` : found.ambiguous ? "Several chats match. Show the candidates to the owner and ask which one, then use its id." : "No chat matches. Ask the owner for a more exact name, or use send-to <full name> to start a 1:1 chat.";
   return { result: JSON.stringify({ query, match: found.match, ambiguous: found.ambiguous, candidates: found.candidates, next }) };
 }
 function resolveDestination(id, sender) {
@@ -956,9 +956,10 @@ function agentHistory(args) {
   return { result: JSON.stringify(boundedHistory(args[0], historyRows(read.messages), count, configured.historyMaxBytes)) };
 }
 var previewSequence = 0;
-function previewCommand(args, origin = "agent") {
-  if (args.length < 2 || !validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> <text>. Find the id with `chats <name>`; chat names are not accepted." };
-  const text = args.slice(1).join(" ");
+function previewCommand(args, origin = "agent", body) {
+  if (args.length < (body === void 0 ? 2 : 1) || !validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> --from-pad message.md. Find the id with `chats <name>`; chat names are not accepted." };
+  if (body !== void 0 && args.length > 1) return { error: "invalid-request: Inline text cannot be combined with a body source." };
+  const text = body ?? args.slice(1).join(" ");
   if (!text.length) return { error: "invalid-request: Preview text must not be empty." };
   const resolved = previewSender();
   if ("error" in resolved) return resolved;
@@ -982,7 +983,7 @@ var SEND_FAILURES = ["invalid-request", "not-logged-in", "reauth-needed", "chat-
 function failureMessage(kind, detail, cause) {
   switch (kind) {
     case "invalid-request":
-      return `invalid-request: ${String(detail || "Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>.")} Find the chat id with \`chats <name>\`, then send again.`;
+      return `invalid-request: ${String(detail || "Usage: send <immutable-chat-id> [--key <idempotency-key>] --from-pad message.md.")} Find the chat id with \`chats <name>\`, then send again.`;
     case "not-logged-in":
       return "not-logged-in: Sign in to Teams through `codeterm plugin teams-client login` (or Sign in in the view) before sending.";
     case "reauth-needed":
@@ -1036,16 +1037,17 @@ function rememberPrefixedFailure(message) {
   const state = message.slice(0, message.indexOf(":"));
   return SEND_FAILURES.includes(state) ? rememberSendFailure(state, message) : sendFailureResult("unknown", "The command result could not be classified safely. Inspect the Teams chat before retrying.");
 }
-function parseSendArgs(args, target, usage) {
-  if (args.length < 2 || !target(args[0])) return { error: failureMessage("invalid-request", usage) };
+function parseSendArgs(args, target, usage, body) {
+  if (args.length < (body === void 0 ? 2 : 1) || !target(args[0])) return { error: failureMessage("invalid-request", usage) };
   let start = 1;
   let key;
   if (args[1] === "--key") {
-    if (args.length < 4 || !/^[A-Za-z0-9._:-]{1,160}$/.test(args[2])) return { error: failureMessage("invalid-request", "--key needs a 1\u2013160 character idempotency key ([A-Za-z0-9._:-]), followed by message text.") };
+    if (args.length < (body === void 0 ? 4 : 3) || !/^[A-Za-z0-9._:-]{1,160}$/.test(args[2])) return { error: failureMessage("invalid-request", "--key needs a 1\u2013160 character idempotency key ([A-Za-z0-9._:-]), followed by message text.") };
     key = args[2];
     start = 3;
   }
-  const text = args.slice(start).join(" ");
+  if (body !== void 0 && args.length > start) return { error: failureMessage("invalid-request", "Inline text cannot be combined with a body source.") };
+  const text = body ?? args.slice(start).join(" ");
   if (!text.trim().length) return { error: failureMessage("invalid-request", "Message text must not be empty.") };
   return { target: args[0], text, key };
 }
@@ -1126,7 +1128,7 @@ function deliver(origin, plan, payload, explicitKey) {
     }
     if (found.match) destination = { id: found.match.id, label: found.match.title };
     else if (payload.kind === "file") {
-      return sendFailureResult("invalid-request", `No 1:1 chat with "${plan.query}" exists, and a file can only go to an existing chat. Start the chat with send-to <full name> <text> first, or send the file to a chat id.`);
+      return sendFailureResult("invalid-request", `No 1:1 chat with "${plan.query}" exists, and a file can only go to an existing chat. Start the chat with send-to <full name> --from-pad message.md first, or send the file to a chat id.`);
     } else {
       if (personQuery(plan.query).split(/\s+/).filter(Boolean).length < 2) {
         return sendFailureResult("invalid-request", `No chat with "${plan.query}" exists. To start a new 1:1 chat, give the person's full name.`);
@@ -1182,23 +1184,23 @@ function deliver(origin, plan, payload, explicitKey) {
   if (!persistOutbox(p, ledger)) return persistFailure(p, ledger, attempt, "unknown", "Teams accepted the message but the sent result could not be recorded.");
   return attemptResult(attempt, fileSummary(payload));
 }
-function sendCommand(origin, args) {
-  const parsed = parseSendArgs(args, validChatId, "Usage: send <immutable-chat-id> [--key <idempotency-key>] <text>; chat names are not ids. Use send-to <person> for a person.");
+function sendCommand(origin, args, body) {
+  const parsed = parseSendArgs(args, validChatId, "Usage: send <immutable-chat-id> [--key <idempotency-key>] --from-pad message.md; chat names are not ids. Use send-to <person> for a person.", body);
   if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
   return deliver(origin, { kind: "chat", chatId: parsed.target }, { kind: "text", text: parsed.text }, parsed.key);
 }
-function sendToCommand(args) {
+function sendToCommand(args, body) {
   const separator = args.indexOf("--");
   const rest = separator > 0 ? [args.slice(0, separator).join(" "), ...args.slice(separator + 1)] : args;
-  const parsed = parseSendArgs(rest, (value) => !!value.trim() && value.length <= 200, "Usage: send-to <person name or email> [--key <idempotency-key>] <text>. Quote a multi-word name, or put -- after it.");
+  const parsed = parseSendArgs(rest, (value) => !!value.trim() && value.length <= 200, "Usage: send-to <person name or email> [--key <idempotency-key>] --from-pad message.md. Quote a multi-word name, or put -- after it.", body);
   if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
   return deliver("agent", { kind: "person", query: parsed.target.trim() }, { kind: "text", text: parsed.text }, parsed.key);
 }
-var SEND_FILE_USAGE = "Usage: send-file <chat-id | person> <absolute path> [--message <text>] [--key <idempotency-key>]. Quote a multi-word name or a path with spaces.";
+var SEND_FILE_USAGE = "Usage: send-file <chat-id | person> <absolute path> [--from-pad caption.md] [--key <idempotency-key>]. Quote a multi-word name or a path with spaces.";
 function absolutePath(value) {
   return host.path.isWindows ? /^[A-Za-z]:[\\/]/.test(value) : value.startsWith("/");
 }
-function parseSendFileArgs(args) {
+function parseSendFileArgs(args, body) {
   const positional = [];
   const message = [];
   let key;
@@ -1222,7 +1224,8 @@ function parseSendFileArgs(args) {
   const path = positional.slice(at).join(" ");
   if (!target || target.length > 200) return { error: failureMessage("invalid-request", SEND_FILE_USAGE) };
   if (path.length > 1024 || /[\u0000-\u001f]/.test(path)) return { error: failureMessage("invalid-request", "The file path must not contain control characters.") };
-  return { target, path, message: message.join(" "), key };
+  if (body !== void 0 && sawMessage) return { error: failureMessage("invalid-request", "Inline --message cannot be combined with a body source.") };
+  return { target, path, message: body ?? message.join(" "), key };
 }
 function underRoot(path, root) {
   const fold = (value) => {
@@ -1275,8 +1278,8 @@ function probeFile(p, target, rawPath) {
   if (!name) return refuse("invalid-request", "The path does not name a file.");
   return { file: { path, name, size, sha256 } };
 }
-function sendFileCommand(args) {
-  const parsed = parseSendFileArgs(args);
+function sendFileCommand(args, body) {
+  const parsed = parseSendFileArgs(args, body);
   if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
@@ -1622,15 +1625,15 @@ function onAgentCommand(ctx) {
     case "logout":
       return logout();
     case "send":
-      return sendCommand("agent", args);
+      return sendCommand("agent", args, ctx.body);
     case "send-to":
-      return sendToCommand(args);
+      return sendToCommand(args, ctx.body);
     case "send-file":
-      return sendFileCommand(args);
+      return sendFileCommand(args, ctx.body);
     case "search-messages":
       return searchMessagesCommand(args);
     case "preview":
-      return previewCommand(args, "agent");
+      return previewCommand(args, "agent", ctx.body);
     default:
       return { error: `Unknown Teams Client verb: ${ctx.verb}` };
   }

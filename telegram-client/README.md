@@ -2,6 +2,19 @@
 
 Telegram Client connects CodeTerm to the owner’s Telegram account through the pinned [`gotd/cli`](https://github.com/gotd/cli) v0.11.0 release. It supports account selection, chat listing, bounded recent history, message text search, resolved previews, and an owner-gated path for sending messages and files.
 
+## Authored message bodies
+
+Requires Domios 1.15.3 or newer. Write authored text to your AgentPad, then pass its relative path:
+
+```sh
+domios plugin telegram-client send <chat-id> --key <unique-key> --from-pad message.md
+domios plugin telegram-client send-to <chat-id> --from-pad message.md
+domios plugin telegram-client preview <chat-id> --from-pad message.md
+domios plugin telegram-client send-file <chat-id> <absolute-file-path> --from-pad caption.md
+```
+
+All four verbs also accept `--from-file <path>` or `--stdin`. The host resolves the calling tab's pad with the same containment checks as `domios send`; a missing pad file gives an error before the plugin runs. Sources preserve UTF-8 text, quotes, backticks, markdown, newlines and trailing whitespace. Teams applies its normal HTML escaping and encodes line endings as `<br>`; Telegram plain mode keeps markup literal. Inline bodies remain supported, but combining inline text or `--message` with a body source is refused. A body supplied to `send-file` is the caption. Put source flags before a literal `--` separator.
+
 ## Install the pinned helper
 
 The plugin keeps everything in one runtime directory: the host's per-instance plugin data directory, `~/.codeterm/telegram-client` on a production install and `~/.codeterm-dev/telegram-client` (or `~/.codeterm-dev-<name>/telegram-client`) on a dev instance. `codeterm plugin telegram-client health` reports it as `runtimeDir`; while tg is missing it also returns the exact `installCommand`:

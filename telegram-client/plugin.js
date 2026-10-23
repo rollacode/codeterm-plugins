@@ -1933,8 +1933,8 @@ function parentDir(value) {
   if (/^[A-Za-z]:$/.test(parent)) return `${parent}\\`;
   return parent || trimmed.slice(0, 1);
 }
-var SEND_FILE_USAGE = "Usage: send-file <chat-id-or-name> <absolute-file-path> [--message <caption>] [--key <idempotency-key>] [--format plain|html]; quote a caption or path that contains spaces.";
-function parseSendFileArgs(args) {
+var SEND_FILE_USAGE = "Usage: send-file <chat-id-or-name> <absolute-file-path> [--from-pad caption.md] [--key <idempotency-key>] [--format plain|html]; quote a caption or path that contains spaces.";
+function parseSendFileArgs(args, body) {
   if (args.length < 2) return { error: SEND_FILE_USAGE };
   const chat = String(args[0] || "").trim();
   const path = String(args[1] || "");
@@ -1958,7 +1958,8 @@ function parseSendFileArgs(args) {
       format = value;
     } else return { error: `Unexpected argument ${JSON.stringify(flag)}. ${SEND_FILE_USAGE}` };
   }
-  return { chat, path, caption: caption || "", key, format: format || "plain" };
+  if (body !== void 0 && caption !== void 0) return { error: "Inline --message cannot be combined with a body source." };
+  return { chat, path, caption: body ?? caption ?? "", key, format: format || "plain" };
 }
 var SEARCH_USAGE = "Usage: search-messages <query> [--chat <chat-id-or-name>] [--limit 1-50].";
 function parseSearchArgs(args) {
@@ -2508,7 +2509,7 @@ function agentChats(args = []) {
   const query = args.join(" ").trim();
   if (!query) return { result: JSON.stringify({ chats: listed.chats }) };
   const found = matchChats(listed.chats, query);
-  const next = found.match ? `Send with: send ${found.match.id} --key <unique-key> <text>` : found.ambiguous ? "Several chats match. Show the candidates to the owner and ask which one, then use its id." : "No chat in the 100 most recent dialogs matches. Ask the owner for a more exact name or @username.";
+  const next = found.match ? `Send with: send ${found.match.id} --key <unique-key> --from-pad message.md` : found.ambiguous ? "Several chats match. Show the candidates to the owner and ask which one, then use its id." : "No chat in the 100 most recent dialogs matches. Ask the owner for a more exact name or @username.";
   return { result: JSON.stringify({ query, match: found.match, ambiguous: found.ambiguous, candidates: found.candidates, next }) };
 }
 function readSendScope() {
@@ -2569,10 +2570,11 @@ function resolveDestination(id, sender) {
   return { destination };
 }
 var previewSequence = 0;
-function previewCommand(args, origin = "agent") {
-  if (args.length < 2) return { error: "Usage: preview <immutable-chat-id> <text>." };
-  if (!validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> <text>. Display names are not accepted; find the id with `chats <name>`." };
-  const text = args.slice(1).join(" ");
+function previewCommand(args, origin = "agent", body) {
+  if (args.length < (body === void 0 ? 2 : 1)) return { error: "Usage: preview <immutable-chat-id> --from-pad message.md." };
+  if (!validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> --from-pad message.md. Display names are not accepted; find the id with `chats <name>`." };
+  if (body !== void 0 && args.length > 1) return { error: "invalid-request: Inline text cannot be combined with a body source." };
+  const text = body ?? args.slice(1).join(" ");
   if (!text.length) return { error: "Preview text must not be empty." };
   const resolved = resolveSender();
   if ("error" in resolved) return { error: resolved.error };
@@ -2596,7 +2598,7 @@ function failureMessage(kind, detail) {
     case "invalid-markup":
       return `invalid-markup: ${String(detail || "tg rejected the markup")}`;
     case "invalid-request":
-      return `invalid-request: ${String(detail || "Usage: send <immutable-chat-id> [--key <idempotency-key>] [--format plain|html|markdown] [--] <text>.")} Find the chat id with \`chats <name>\`, then send again.`;
+      return `invalid-request: ${String(detail || "Usage: send <immutable-chat-id> [--key <idempotency-key>] [--format plain|html|markdown] --from-pad message.md.")} Find the chat id with \`chats <name>\`, then send again.`;
     case "file-not-found":
       return `file-not-found: ${String(detail || "The file")} does not exist, is not a regular file, or is outside the folders this plugin may read. Check the absolute path; nothing was sent.`;
     case "file-too-large":
@@ -2660,8 +2662,8 @@ function sendFormatArgs(format) {
 function sendPayloadHash(text, format) {
   return sha256Hex(format === "plain" ? text : `${format}\0${text}`);
 }
-function parseSendArgs(args) {
-  if (args.length < 2 || !validChatId(args[0])) return { error: failureMessage("invalid-request", "Usage: send <immutable-chat-id> [--key <idempotency-key>] [--format plain|html|markdown] [--] <text>; display names are not accepted.") };
+function parseSendArgs(args, body) {
+  if (args.length < (body === void 0 ? 2 : 1) || !validChatId(args[0])) return { error: failureMessage("invalid-request", "Usage: send <immutable-chat-id> [--key <idempotency-key>] [--format plain|html|markdown] --from-pad message.md; display names are not accepted.") };
   let start = 1;
   let key;
   let format = "plain";
@@ -2684,7 +2686,8 @@ function parseSendArgs(args) {
     }
     start += 2;
   }
-  const text = args.slice(start).join(" ");
+  if (body !== void 0 && args.length > start) return { error: failureMessage("invalid-request", "Inline text cannot be combined with a body source.") };
+  const text = body ?? args.slice(start).join(" ");
   if (!text.length) return { error: failureMessage("invalid-request", "Message text must not be empty.") };
   if (format === "markdown") return { error: failureMessage("invalid-request", "The pinned tg v0.11.0 client has no native Markdown parse mode. Use --format html or plain; nothing was sent.") };
   return { chatId: args[0], text, key, format };
@@ -2760,8 +2763,8 @@ function serverMessageId(data) {
   }
   return null;
 }
-function sendCommand(origin, args) {
-  const parsed = parseSendArgs(args);
+function sendCommand(origin, args, body) {
+  const parsed = parseSendArgs(args, body);
   if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
   const matchingPreview = parsed.format === "plain" ? Object.values(previewTokens).reverse().find((token) => token.destination.id === parsed.chatId && token.text === parsed.text) : void 0;
   let key = parsed.key || matchingPreview?.previewNonce;
@@ -2954,8 +2957,8 @@ function settleFileJobs() {
     else delete fileJobs[key];
   }
 }
-function sendFileCommand(origin, args) {
-  const parsed = parseSendFileArgs(args);
+function sendFileCommand(origin, args, body) {
+  const parsed = parseSendFileArgs(args, body);
   if ("error" in parsed) return requestFailure(parsed.error);
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
@@ -3505,11 +3508,11 @@ function onAgentCommand(ctx) {
       return logout();
     case "send-to":
     case "send":
-      return sendCommand("agent", args);
+      return sendCommand("agent", args, ctx.body);
     case "preview":
-      return previewCommand(args, "agent");
+      return previewCommand(args, "agent", ctx.body);
     case "send-file":
-      return sendFileCommand("agent", args);
+      return sendFileCommand("agent", args, ctx.body);
     case "send-file-status":
       return sendFileStatus(args);
     default:

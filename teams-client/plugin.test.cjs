@@ -930,6 +930,54 @@ test("the manifest lets agents discover send-file and search-messages, and allow
   assert.match(readme, /search-messages/);
 });
 
+const PAD_BODY = ('  "quoted" `code` $value <tag> & **markdown** cafe\u0301 🚀\r\nsecond line\n\n').repeat(12);
+
+test("host bodies preserve message text through preview, send and send-to", () => {
+  for (const body of [PAD_BODY, "--key", "--message", "--"]) {
+    const env = mockHost();
+    env.install(); env.signIn();
+    const invoke = (verb, args) => plugin.onAgentCommand({ sessionId: "pad", verb, args, body });
+    assert.equal(result(invoke("preview", [ALEX_CHAT])).text, body);
+    for (const [verb, target] of [["send", ALEX_CHAT], ["send-to", "Alexander Kouznetsov"]]) {
+      assert.equal(result(invoke(verb, [target, "--key", `pad-${verb}`])).status, "sent");
+    }
+    const sent = env.exoCalls().filter((call) => call.args[0] === "send");
+    assert.equal(sent.length, 2);
+    for (const call of sent) {
+      assert.equal(call.args[2], parse.htmlMessage(body));
+      const decoded = call.args[2].replaceAll("<br>", "\n").replaceAll("&quot;", '"').replaceAll("&gt;", ">").replaceAll("&lt;", "<").replaceAll("&amp;", "&");
+      assert.equal(decoded, body.replace(/\r\n|\r/g, "\n"));
+    }
+  }
+});
+
+test("host body captions reach file sends without option parsing", () => {
+  for (const body of [PAD_BODY, "--message", "--", ""]) {
+    const env = mockHost({ localFiles: { [REPORT]: { content: REPORT_CONTENT } } });
+    env.install(); env.signIn();
+    const sent = plugin.onAgentCommand({ sessionId: "pad", verb: "send-file", args: [ALEX_CHAT, REPORT, "--key", "pad-file"], body });
+    assert.equal(result(sent).status, "sent");
+    const upload = env.exoCalls().find((call) => call.args[0] === "send-file");
+    const at = upload.args.indexOf("--message");
+    if (body) assert.equal(upload.args[at + 1], parse.htmlMessage(body));
+    else assert.equal(at, -1);
+  }
+});
+
+test("mixed inline and host bodies are refused before any host operation", () => {
+  globalThis.host = new Proxy({}, { get: (_target, key) => { if (key === "path") return { isWindows: true }; throw new Error("host must not be used"); } });
+  for (const [verb, args] of [
+    ["send", [ALEX_CHAT, "--key", "mixed", "inline"]],
+    ["send-to", ["Alexander Kouznetsov", "inline"]],
+    ["preview", [ALEX_CHAT, ""]],
+    ["send-file", [ALEX_CHAT, REPORT, "--message", ""]],
+  ]) {
+    for (const body of [PAD_BODY, ""]) {
+      assert.match(plugin.onAgentCommand({ sessionId: "pad", verb, args, body }).error, /cannot be combined with a body source/);
+    }
+  }
+});
+
 for (const [name, fn] of tests) {
   try {
     fn();
