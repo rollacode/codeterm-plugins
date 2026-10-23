@@ -637,7 +637,31 @@ function isoToMs(s: string | undefined): number | null {
   return isNaN(t) ? null : t;
 }
 
-function toRef(c: CipherItem): unknown {
+interface SecretRefOut {
+  item_id: string;
+  name: string;
+  folder: string | null;
+  organization: string | null;
+  collection: string | null;
+  last_modified: number | null;
+}
+
+// Unwraps nested {success, data: {object: "list", data: [...]}} envelopes and
+// keeps only login-item metadata; login, notes, fields and attachments stay here.
+function metadataRefs(listed: unknown): SecretRefOut[] | null {
+  let v = listed;
+  while (v && typeof v === "object" && !Array.isArray(v) && (v as Record<string, unknown>).data !== undefined) {
+    v = (v as Record<string, unknown>).data;
+  }
+  if (!Array.isArray(v)) return null;
+  return (v as CipherItem[])
+    .filter((c) => c && c.type === 1 && typeof c.id === "string" && typeof c.name === "string")
+    .map(toRef);
+}
+
+const UNEXPECTED_LIST: Envelope = { error: { kind: "backend", message: "bw list returned an unexpected shape" } };
+
+function toRef(c: CipherItem): SecretRefOut {
   return {
     item_id: c.id,
     name: c.name,
@@ -717,15 +741,16 @@ function secretList(filter?: SecretListFilter): Envelope {
   if (filter.collection) args = args.concat(["--collectionid", filter.collection]);
   const r = runWithSession(args);
   if ("error" in r) return r;
-  let items = ((r.ok as CipherItem[]) || []).filter((c) => c.type === 1);
+  let items = metadataRefs(r.ok);
+  if (!items) return UNEXPECTED_LIST;
   if (filter.folder) {
     const fid = resolveFolderId(filter.folder);
     if ("error" in fid) return fid;
-    items = items.filter((c) => (c.folderId || null) === (fid.ok || null));
+    items = items.filter((c) => c.folder === (fid.ok || null));
   }
   items.sort((a, b) => (a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1));
   if (filter.limit) items = items.slice(0, filter.limit);
-  return { ok: items.map(toRef) };
+  return { ok: items };
 }
 
 function secretSearch(query: string): Envelope {
@@ -733,7 +758,8 @@ function secretSearch(query: string): Envelope {
   if (!q) return { error: { kind: "bad_request", message: "query must not be empty" } };
   const r = runWithSession(["list", "items", "--search", q]);
   if ("error" in r) return r;
-  return { ok: ((r.ok as CipherItem[]) || []).filter((c) => c.type === 1).map(toRef) };
+  const items = metadataRefs(r.ok);
+  return items ? { ok: items } : UNEXPECTED_LIST;
 }
 
 function secretDelete(nameOrId: string): Envelope<true> {
@@ -988,6 +1014,7 @@ const plugin: PluginModule = {
   // exported for parity tests (pure logic, no host.exec)
   __test_base64: base64Encode,
   __test_mapError: mapBwError,
+  __test_metadataRefs: metadataRefs,
   __test_parseBwOutput: parseBwOutput,
   __test_statusFromExec: (ex: BwExec) => bwExecToStatusResult(ex),
   __test_unwrap: unwrapData,

@@ -57,6 +57,42 @@ test("bw errors never carry the bw payload", () => {
   }
 });
 
+test("list and search return metadata only from a nested bw list envelope", () => {
+  const SENTINEL = "SENTINEL-VALUE-7f3a";
+  const item = {
+    id: "i1", type: 1, name: "token", revisionDate: "2026-01-01T00:00:00.000Z",
+    login: { username: "u", password: SENTINEL }, notes: SENTINEL,
+    fields: [{ value: SENTINEL }], attachments: [{ fileName: SENTINEL }],
+  };
+  const bodies = [
+    { success: true, data: { object: "list", data: [item] } },
+    { success: true, data: { success: true, data: { object: "list", data: [item] } } },
+  ];
+  const savedHost = globalThis.host;
+  try {
+    for (const body of bodies) {
+      globalThis.host = {
+        secretGet: (k) => (k === "session" ? "s" : null),
+        secretSet: () => {},
+        secretDelete: () => {},
+        settingsJson: () => "{}",
+        manifest: () => ({ permissions: { network: { allow: [] } } }),
+        exec: () => JSON.stringify({ stdout: JSON.stringify(body), stderr: "", code: 0 }),
+      };
+      for (const r of [plugin.secretList({}), plugin.secretSearch("token")]) {
+        assert("ok" in r && r.ok.length === 1, "expected one item, got " + Object.keys(r));
+        assert(!JSON.stringify(r).includes(SENTINEL), "list/search output carries a value");
+        const keys = Object.keys(r.ok[0]).sort().join(",");
+        assert(keys === "collection,folder,item_id,last_modified,name,organization", "unexpected keys " + keys);
+      }
+    }
+    const refused = plugin.__test_metadataRefs({ value: SENTINEL });
+    assert(refused === null, "a non-list shape must be refused");
+  } finally {
+    globalThis.host = savedHost;
+  }
+});
+
 test("list-envelope unwrap", () => {
   const out = plugin.__test_unwrap({ object: "list", data: [1, 2] });
   assert(Array.isArray(out) && out.length === 2 && out[0] === 1 && out[1] === 2, "unwrap data array");
