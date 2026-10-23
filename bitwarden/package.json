@@ -1,6 +1,6 @@
 {
   "name": "@codeterm/plugin-bitwarden",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "license": "PolyForm-Shield-1.0.0",
   "private": true,
   "type": "module",
