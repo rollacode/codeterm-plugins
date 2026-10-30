@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import type { Connection } from "../../src/connection";
 import { mountView } from "./mount";
 
-declare global { interface Window { ct?: { invoke(method: string): Promise<unknown> } } }
+declare global { interface Window { ct?: { invoke(method: string, args?: unknown): Promise<unknown>; close?(): void } } }
 
 function LarkView() {
   const [connection, setConnection] = useState<Connection | null>(null);
