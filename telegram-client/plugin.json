@@ -7,6 +7,7 @@
   "description": "Sign in to Telegram, find chats by name, read bounded history, search message text, send plain or native HTML messages (--format plain|html), and send files for the owner with an idempotent send ledger.",
   "readme": "README.md",
   "icon": "icon.svg",
+  "iconColor": "#2796D8",
   "entry": "plugin.js",
   "capabilities": {
     "view": true,
