@@ -30,7 +30,8 @@ npm run check:icons        # offline icon allowlist + manifest/channel consisten
 ```
 
 Every plugin ships its icon as `<id>/icon.svg`, referenced by `"icon": "icon.svg"` in
-`plugin.json`; inline `iconSvg`, `iconHint` and `iconColor` are not part of the manifest.
+`plugin.json`; inline `iconSvg` and `iconHint` are retired manifest fields.
+The optional `iconColor` field supplies a validated hex color or theme token for the icon.
 The host sanitizes the file and renders it with `currentColor`, so it must stay under
 8 KiB and use only `svg`, `g`, `path`, `circle`, `ellipse`, `rect`, `line`, `polyline`
 and `polygon` with numeric geometry, `fill`/`stroke` of `currentColor` or `none`, and no
@@ -56,7 +57,7 @@ must not be reused.
 
 ### Build troubleshooting
 
-If `npm run check:icons` reports that a manifest still carries `iconColor`, an obsolete inline icon field remains beside the supported SVG `icon` reference. Remove the legacy field, retain the SVG reference, and rerun `npm run check:icons` before publishing.
+If `npm run check:icons` reports that a manifest still carries `iconHint` or `iconSvg`, move its SVG into the bundle and reference it with `icon`. Remove the retired fields, retain any supported `iconColor`, and rerun `npm run check:icons` before publishing.
 
 ## Channel
 
