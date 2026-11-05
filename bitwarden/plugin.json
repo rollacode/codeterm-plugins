@@ -1,7 +1,7 @@
 {
   "id": "bitwarden",
-  "version": "1.0.10",
-  "minCodeterm": "1.0.0",
+  "version": "1.0.11",
+  "minCodeterm": "1.19.0",
   "hostApi": 2,
   "displayName": "Bitwarden",
   "description": "Use a Bitwarden vault as CodeTerm's secret store, via the `bw` CLI. Unlock from the plugin view, then `codeterm mem secret` reads/writes go to your vault.",
@@ -25,7 +25,8 @@
     },
     "network": {
       "allow": [
-        "vault.bitwarden.com"
+        "vault.bitwarden.com",
+        "127.0.0.1"
       ]
     },
     "secrets": true

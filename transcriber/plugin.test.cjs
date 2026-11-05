@@ -1,3 +1,4 @@
+require("../scripts/test-host-io.cjs").installTestHostIo();
 // Plugin-side tests for the one-shot whisper-cli Transcriber, exercised against a
 // FAKE host (exec + an in-memory filesystem). The unit under test is the plugin's
 // pure bootstrap/transcribe logic — no real ffmpeg/whisper-cli/brew/curl runs.

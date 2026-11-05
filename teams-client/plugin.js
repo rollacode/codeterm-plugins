@@ -24,6 +24,23 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
+// ../../codeterm/codeterm/packages/plugin-sdk/src/ioPrograms.ts
+function* ioValue(request) {
+  return yield request;
+}
+function defineProviderIo(source, io) {
+  const exports = { ...source };
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (typeof value !== "function") continue;
+    exports[key] = function(...args) {
+      const result = value.apply(source, args);
+      return result && typeof result.next === "function" ? io().run(result) : result;
+    };
+  }
+  return exports;
+}
+
 // teams-client/src/read-output.ts
 var WINDOWS_READ = [
   '$ErrorActionPreference = "Stop"',
@@ -34,21 +51,21 @@ var WINDOWS_READ = [
   '[IO.File]::WriteAllText($env:CT_EXO_OUTPUT, ($readOutput -join "`n"), [Text.UTF8Encoding]::new($false))',
   "exit $readCode"
 ].join("; ");
-function readOutput(binary, args, env, root, powershell, timeoutMs, run) {
+function* readOutput(binary, args, env, root, powershell, timeoutMs, run) {
   const file = host.path.normalize(`${root}/read-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
   const native = host.path.toNative(file);
   const readEnv = { ...env, CT_EXO_BIN: binary, CT_EXO_OUTPUT: native, CT_EXO_ARGS: JSON.stringify(args) };
   try {
-    const result = powershell ? run(powershell, ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_READ], readEnv, timeoutMs) : run("/bin/sh", ["-c", 'umask 077; exec "$CT_EXO_BIN" "$@" > "$CT_EXO_OUTPUT"', "teams-read", ...args], readEnv, timeoutMs);
+    const result = powershell ? yield* run(powershell, ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_READ], readEnv, timeoutMs) : yield* run("/bin/sh", ["-c", 'umask 077; exec "$CT_EXO_BIN" "$@" > "$CT_EXO_OUTPUT"', "teams-read", ...args], readEnv, timeoutMs);
     if (!result.ok) return result;
-    const stdout = host.fs.readFile(file);
+    const stdout = yield* host.io.fs.readFile(file);
     if (stdout === null) return { ok: false, error: "Could not read the complete Teams response from private storage.", stdout: "", stderr: result.stderr };
     return { ok: true, stdout, stderr: result.stderr };
   } catch {
     return { ok: false, error: "Could not capture the complete Teams response in private storage.", stdout: "", stderr: "" };
   } finally {
     try {
-      host.fs.removeFile(file);
+      yield* host.io.fs.removeFile(file);
     } catch {
     }
   }
@@ -532,7 +549,7 @@ function windowsRoot() {
   }
 }
 var cachedTarget = null;
-function detectTarget(p) {
+function* detectTarget(p) {
   if (cachedTarget) return cachedTarget;
   const platform = hostPlatform();
   let arch = "";
@@ -542,16 +559,16 @@ function detectTarget(p) {
     } catch {
     }
   } else {
-    const probe = runProcess("uname", ["-m"], {}, TIMEOUTS.probe);
+    const probe = yield* runProcess("uname", ["-m"], {}, TIMEOUTS.probe);
     arch = probe.ok ? normalizeArch(probe.stdout) : "";
   }
   cachedTarget = resolveTarget(platform, arch, windowsRoot());
   return cachedTarget;
 }
-function runProcess(bin, args, env, timeoutMs) {
+function* runProcess(bin, args, env, timeoutMs) {
   let result;
   try {
-    result = parseJson(host.exec(JSON.stringify({ bin, args, env, timeoutMs })));
+    result = parseJson(JSON.stringify(yield* host.io.exec({ bin, args, env, timeoutMs })));
   } catch (error) {
     return { ok: false, error: String(error), stdout: "", stderr: "" };
   }
@@ -592,52 +609,52 @@ function windowsAclCommands(root, principal) {
   return [[root, "/inheritance:r", "/grant:r", `${principal}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "/C"]];
 }
 var ACL_MARKER = ".acl-restricted";
-function protectStorage(p) {
+function* protectStorage(p) {
   if (storageProtectionCache[p.root]) return storageProtectionCache[p.root];
-  const result = applyStorageProtection(p);
+  const result = yield* applyStorageProtection(p);
   if (!result.error) storageProtectionCache[p.root] = result;
   return result;
 }
-function applyStorageProtection(p) {
-  if (!host.fs.makeDirs(p.root)) {
-    const created = host.path.isWindows ? runProcess(
+function* applyStorageProtection(p) {
+  if (!(yield* host.io.fs.makeDirs(p.root))) {
+    const created = host.path.isWindows ? yield* runProcess(
       toolsFor("win32", windowsRoot()).powershell,
       ["-NoProfile", "-NonInteractive", "-Command", "[IO.Directory]::CreateDirectory($env:CT_PLUGIN_ROOT) | Out-Null"],
       { CT_PLUGIN_ROOT: nativePath(p.root) },
       TIMEOUTS.probe
-    ) : runProcess("mkdir", ["-p", "-m", "700", nativePath(p.root)], {}, TIMEOUTS.probe);
+    ) : yield* runProcess("mkdir", ["-p", "-m", "700", nativePath(p.root)], {}, TIMEOUTS.probe);
     if (!created.ok) return { error: "storage-protection-failed", message: "Could not create the plugin-owned private directory. Nothing was started." };
   }
   for (const dir of [p.root, p.home, p.tokenDir, p.runtime, p.noPath]) {
     try {
-      if (!host.fs.makeDirs(dir)) return { error: "storage-protection-failed", message: "Could not create the plugin-owned private directory." };
+      if (!(yield* host.io.fs.makeDirs(dir))) return { error: "storage-protection-failed", message: "Could not create the plugin-owned private directory." };
     } catch {
       return { error: "storage-protection-failed", message: "Could not create the plugin-owned private directory." };
     }
   }
   if (host.path.isWindows) {
     const marker = joinPath(p.root, ACL_MARKER);
-    if (host.fs.fileExists(marker)) return {};
+    if (yield* host.io.fs.fileExists(marker)) return {};
     const tools = toolsFor("win32", windowsRoot());
-    const who = runProcess(tools.whoami, [], {}, TIMEOUTS.probe);
+    const who = yield* runProcess(tools.whoami, [], {}, TIMEOUTS.probe);
     const principal = who.ok ? who.stdout.trim() : "";
     if (!principal || /[\r\n]/.test(principal)) return { error: "storage-protection-failed", message: "Could not identify the Windows account for the plugin storage ACL." };
     for (const args of windowsAclCommands(nativePath(p.root), principal)) {
-      const acl = runProcess(tools.icacls, args, {}, TIMEOUTS.probe);
+      const acl = yield* runProcess(tools.icacls, args, {}, TIMEOUTS.probe);
       if (!acl.ok) return { error: "storage-protection-failed", message: "Could not restrict the plugin storage with a Windows ACL. Nothing was started." };
     }
-    host.fs.writeFile(marker, "1");
+    yield* host.io.fs.writeFile(marker, "1");
     return {};
   }
   for (const dir of [p.root, p.home, p.tokenDir]) {
-    const chmod = runProcess("chmod", ["700", nativePath(dir)], {}, TIMEOUTS.probe);
+    const chmod = yield* runProcess("chmod", ["700", nativePath(dir)], {}, TIMEOUTS.probe);
     if (!chmod.ok) return { error: "storage-protection-failed", message: "Could not restrict the plugin storage permissions. Nothing was started." };
   }
   return {};
 }
-function installedMarker(p) {
-  const marker = host.fs.readJson(p.marker);
-  return !!marker && marker.module === EXO_MODULE && marker.version === EXO_VERSION && marker.sum === EXO_MODULE_SUM && host.fs.fileExists(p.binary);
+function* installedMarker(p) {
+  const marker = yield* host.io.fs.readJson(p.marker);
+  return !!marker && marker.module === EXO_MODULE && marker.version === EXO_VERSION && marker.sum === EXO_MODULE_SUM && (yield* host.io.fs.fileExists(p.binary));
 }
 function lifecycleMessage(state, detail) {
   const messages = {
@@ -651,44 +668,44 @@ function lifecycleMessage(state, detail) {
   };
   return messages[state] || detail || "Teams Client could not determine its current state.";
 }
-function readLoginRecord(p) {
-  const value = host.fs.readJson(p.loginState);
+function* readLoginRecord(p) {
+  const value = yield* host.io.fs.readJson(p.loginState);
   return value && Number.isFinite(Number(value.startedAt)) ? value : null;
 }
-function readSignInLog(p) {
-  if (!host.fs.fileExists(p.loginLog)) return { state: "starting" };
-  return parseSignInLog(String(host.fs.readFileTail(p.loginLog, 16384) || ""));
+function* readSignInLog(p) {
+  if (!(yield* host.io.fs.fileExists(p.loginLog))) return { state: "starting" };
+  return parseSignInLog(String((yield* host.io.fs.readFileTail(p.loginLog, 16384)) || ""));
 }
-function pendingSignIn(p) {
-  const record = readLoginRecord(p);
+function* pendingSignIn(p) {
+  const record = yield* readLoginRecord(p);
   if (!record) return null;
-  const log = readSignInLog(p);
+  const log = yield* readSignInLog(p);
   if (log.state === "signed-in" || log.state === "failed") return null;
   if (now() - record.startedAt > SIGN_IN_TTL_MS + 3e4) return null;
   return { record, log };
 }
-function endSignIn(p, kill) {
-  const record = readLoginRecord(p);
+function* endSignIn(p, kill) {
+  const record = yield* readLoginRecord(p);
   if (kill && record && Number.isInteger(record.pid) && Number(record.pid) > 0) {
-    const target = detectTarget(p);
+    const target = yield* detectTarget(p);
     if (!("state" in target)) {
       const [bin, ...args] = target.tools.kill.map((part) => part === "{pid}" ? String(record.pid) : part);
-      runProcess(bin, args, {}, TIMEOUTS.probe);
+      yield* runProcess(bin, args, {}, TIMEOUTS.probe);
     }
   }
   try {
-    host.fs.removeFile(p.loginState);
+    yield* host.io.fs.removeFile(p.loginState);
   } catch {
   }
 }
-function runExo(p, args, timeoutMs) {
-  const target = detectTarget(p);
+function* runExo(p, args, timeoutMs) {
+  const target = yield* detectTarget(p);
   if ("state" in target) return { ok: false, error: target.message, stdout: "", stderr: "" };
-  if (!installedMarker(p)) return { ok: false, error: lifecycleMessage("not-installed"), stdout: "", stderr: "" };
-  const secured = protectStorage(p);
+  if (!(yield* installedMarker(p))) return { ok: false, error: lifecycleMessage("not-installed"), stdout: "", stderr: "" };
+  const secured = yield* protectStorage(p);
   if (secured.error) return { ok: false, error: secured.message || "Could not secure plugin storage.", stdout: "", stderr: "" };
   if (args[0] === "list-chats" || args[0] === "get-chat") {
-    return readOutput(
+    return yield* readOutput(
       nativePath(p.binary),
       args,
       exoEnv(p),
@@ -698,15 +715,15 @@ function runExo(p, args, timeoutMs) {
       runProcess
     );
   }
-  return runProcess(nativePath(p.binary), args, exoEnv(p), timeoutMs);
+  return yield* runProcess(nativePath(p.binary), args, exoEnv(p), timeoutMs);
 }
 function failureText(run) {
   return run.ok ? "" : `${run.error}
 ${run.stderr}
 ${run.stdout}`;
 }
-function whoami(p) {
-  const run = runExo(p, ["whoami", "--json"], TIMEOUTS.whoami);
+function* whoami(p) {
+  const run = yield* runExo(p, ["whoami", "--json"], TIMEOUTS.whoami);
   if (!run.ok) return { error: failureText(run) };
   const who = parseWhoami(run.stdout);
   return who ? { who } : { error: "exo-teams whoami returned unreadable output." };
@@ -725,35 +742,35 @@ function loggedIn(who) {
     accounts: [{ id: upn || "teams-account", accountId: upn || "teams-account", tenantId: null, upn, active: true, expiresOn }]
   };
 }
-function status() {
-  const value = computeStatus();
+function* status() {
+  const value = yield* computeStatus();
   lastStatus = value;
   return value;
 }
-function computeStatus() {
+function* computeStatus() {
   const p = paths();
   if (!p) return { state: "unsupported-platform", message: "The host home directory is unavailable.", accounts: [] };
-  const target = detectTarget(p);
+  const target = yield* detectTarget(p);
   if ("state" in target) return { state: target.state, message: target.message, accounts: [] };
   if (activeInstallJobId) return { state: "install-in-progress", message: lifecycleMessage("install-in-progress"), accounts: [] };
-  if (!installedMarker(p)) return { state: "not-installed", message: lifecycleMessage("not-installed"), accounts: [] };
-  const pending = pendingSignIn(p);
+  if (!(yield* installedMarker(p))) return { state: "not-installed", message: lifecycleMessage("not-installed"), accounts: [] };
+  const pending = yield* pendingSignIn(p);
   if (pending && pending.log.state === "awaiting-user") {
     return { state: "awaiting-user", message: `Open ${pending.log.signInUrl} and enter code ${pending.log.deviceCode}.`, signInUrl: pending.log.signInUrl, deviceCode: pending.log.deviceCode, accounts: [] };
   }
-  const first = whoami(p);
+  const first = yield* whoami(p);
   if ("who" in first && sessionUsable(first.who)) return loggedIn(first.who);
   if ("error" in first) {
     const known = classifyAuthFailure(first.error);
     if (known && known.state !== "expired") return { state: known.state, message: known.message, accounts: [] };
   }
-  const refreshed = runExo(p, ["auth", "--refresh"], TIMEOUTS.refresh);
+  const refreshed = yield* runExo(p, ["auth", "--refresh"], TIMEOUTS.refresh);
   if (!refreshed.ok) {
     const known = classifyAuthFailure(failureText(refreshed));
     if (known && known.state !== "logged-out") return { state: known.state, message: known.message, accounts: [] };
     return { state: "expired", message: `The Teams session could not be renewed silently. Microsoft said: "${microsoftMessage(failureText(refreshed))}" Run login to sign in again.`, accounts: [] };
   }
-  const second = whoami(p);
+  const second = yield* whoami(p);
   if ("who" in second && sessionUsable(second.who)) return loggedIn(second.who);
   const detail = "error" in second ? ` ${microsoftMessage(second.error)}` : "";
   return { state: "expired", message: `The Teams session is not usable after a refresh.${detail} Run login to sign in again.`, accounts: [] };
@@ -763,59 +780,59 @@ function senderFrom(value) {
   if (value.state !== "logged-in" || !upn) return null;
   return { id: upn, accountId: upn, tenantId: String(value.tenantId || ""), upn, user: String(value.user || ""), identityKey: JSON.stringify([upn.toLowerCase()]) };
 }
-function liveSender() {
-  const current = status();
+function* liveSender() {
+  const current = yield* status();
   if (current.state === "expired" || current.state === "refused") return { error: `reauth-needed: ${current.state}. ${current.message}` };
   if (["logged-out", "awaiting-user", "not-installed"].includes(current.state)) return { error: failureMessage("not-logged-in") };
   if (current.state !== "logged-in") return { error: `upstream-rejected: ${current.message}` };
   const sender = senderFrom(current);
   return sender ? { sender } : { error: "upstream-rejected: The signed-in Teams account could not be resolved. Refresh Teams Client status." };
 }
-function previewSender() {
+function* previewSender() {
   const sender = lastStatus ? senderFrom(lastStatus) : null;
   if (sender) return { sender };
-  return liveSender();
+  return yield* liveSender();
 }
 function validChatId(value) {
   return /^[A-Za-z0-9:._@-]{1,512}$/.test(value) && value.includes(":");
 }
-function readSendScope() {
+function* readSendScope() {
   const p = paths();
   if (!p) return parseSendScope(null, validChatId);
   let raw = null;
   try {
-    raw = host.fs.fileExists(p.scope) ? host.fs.readFile(p.scope) ?? "" : null;
+    raw = (yield* host.io.fs.fileExists(p.scope)) ? (yield* host.io.fs.readFile(p.scope)) ?? "" : null;
   } catch {
     raw = "";
   }
   return parseSendScope(raw, validChatId);
 }
-function setSendScope(args) {
+function* setSendScope(args) {
   const scope = validateSendScope(args, validChatId);
   if ("error" in scope) return { error: `${scope.error} The restriction was not changed.` };
   const p = paths();
   if (!p) return { error: "The Teams Client data directory is unavailable; the restriction was not changed." };
   try {
-    if (!host.fs.makeDirs(p.root) || host.fs.writeFile(p.scope, JSON.stringify(scope)) !== true) {
+    if (!(yield* host.io.fs.makeDirs(p.root)) || (yield* host.io.fs.writeFile(p.scope, JSON.stringify(scope))) !== true) {
       return { error: "Could not save the restriction; the previous setting still applies." };
     }
   } catch {
     return { error: "Could not save the restriction; the previous setting still applies." };
   }
-  return { result: JSON.stringify(readSendScope()) };
+  return { result: JSON.stringify(yield* readSendScope()) };
 }
-function chatList(sender, refresh = false) {
+function* chatList(sender, refresh = false) {
   const p = paths();
   if (!p) return { error: lifecycleMessage("unsupported-platform") };
   if (!refresh && memoryChats && memoryChats.identityKey === sender.identityKey && now() - memoryChats.at < CHAT_CACHE_TTL_MS) return { chats: memoryChats.chats };
   if (!refresh) {
-    const cached = host.fs.readJson(p.chatCache);
+    const cached = yield* host.io.fs.readJson(p.chatCache);
     if (cached && cached.schema === CHAT_CACHE_SCHEMA && cached.identityKey === sender.identityKey && Array.isArray(cached.chats) && now() - Number(cached.at) < CHAT_CACHE_TTL_MS) {
       memoryChats = { identityKey: sender.identityKey, chats: cached.chats, at: Number(cached.at) };
       return { chats: cached.chats };
     }
   }
-  const run = runExo(p, ["list-chats", "--json"], TIMEOUTS.chats);
+  const run = yield* runExo(p, ["list-chats", "--json"], TIMEOUTS.chats);
   if (!run.ok) {
     const known = classifyAuthFailure(failureText(run));
     return { error: known ? `${known.state === "logged-out" ? "not-logged-in" : "reauth-needed"}: ${known.message}` : `upstream-rejected: exo-teams could not list chats. Microsoft said: "${microsoftMessage(failureText(run))}"` };
@@ -825,7 +842,7 @@ function chatList(sender, refresh = false) {
   const chats = mapChats(source, sender.user);
   memoryChats = { identityKey: sender.identityKey, chats, at: now() };
   try {
-    host.fs.writeFile(p.chatCache, JSON.stringify({ schema: CHAT_CACHE_SCHEMA, identityKey: sender.identityKey, at: memoryChats.at, chats }));
+    yield* host.io.fs.writeFile(p.chatCache, JSON.stringify({ schema: CHAT_CACHE_SCHEMA, identityKey: sender.identityKey, at: memoryChats.at, chats }));
   } catch {
   }
   return { chats };
@@ -838,25 +855,25 @@ function findChats(chats, query, preferDirect) {
   }
   return matchChats(chats, q);
 }
-function agentChats(args, preferDirect = false) {
+function* agentChats(args, preferDirect = false) {
   const refresh = args.includes("--refresh");
   const query = args.filter((arg) => arg !== "--refresh").join(" ").trim();
-  const resolved = liveSender();
+  const resolved = yield* liveSender();
   if ("error" in resolved) return resolved;
-  const listed = chatList(resolved.sender, refresh);
+  const listed = yield* chatList(resolved.sender, refresh);
   if ("error" in listed) return listed;
   if (!query) return { result: JSON.stringify({ chats: listed.chats }) };
   const found = findChats(listed.chats, query, preferDirect);
   const next = found.match ? `Send with: send ${found.match.id} --key <unique-key> --from-pad message.md` : found.ambiguous ? "Several chats match. Show the candidates to the owner and ask which one, then use its id." : "No chat matches. Ask the owner for a more exact name, or use send-to <full name> to start a 1:1 chat.";
   return { result: JSON.stringify({ query, match: found.match, ambiguous: found.ambiguous, candidates: found.candidates, next }) };
 }
-function resolveDestination(id, sender) {
+function* resolveDestination(id, sender) {
   if (!validChatId(id)) return { error: failureMessage("invalid-request", "Use an immutable chat id from `chats <name>`; chat names are not ids.") };
-  let listed = chatList(sender);
+  let listed = yield* chatList(sender);
   if ("error" in listed) return { error: listed.error };
   let chat = listed.chats.find((item) => item.id === id);
   if (!chat) {
-    listed = chatList(sender, true);
+    listed = yield* chatList(sender, true);
     if ("error" in listed) return { error: listed.error };
     chat = listed.chats.find((item) => item.id === id);
   }
@@ -932,13 +949,13 @@ function settings() {
     historyMaxBytes: Number.isInteger(bytes) ? Math.max(1024, Math.min(MAX_BYTES, bytes)) : MAX_BYTES
   };
 }
-function readMessages(p, chatId, count) {
-  const run = runExo(p, ["get-chat", chatId, "--json", "--count", String(Math.max(1, Math.min(200, count)))], TIMEOUTS.history);
+function* readMessages(p, chatId, count) {
+  const run = yield* runExo(p, ["get-chat", chatId, "--json", "--count", String(Math.max(1, Math.min(200, count)))], TIMEOUTS.history);
   if (!run.ok) return { error: failureText(run) };
   const messages = parseJson(run.stdout.trim());
   return Array.isArray(messages) ? { messages } : { error: "exo-teams returned unreadable messages." };
 }
-function agentHistory(args) {
+function* agentHistory(args) {
   if (args.length < 1 || args.length > 2 || !validChatId(args[0])) return { error: "Usage: history <immutable-chat-id> [n]. Select an id from chats; display names are not ids." };
   const configured = settings();
   let count = configured.historyCount;
@@ -946,28 +963,28 @@ function agentHistory(args) {
     if (!/^[0-9]{1,3}$/.test(args[1]) || Number(args[1]) < 1) return { error: "History count must be an integer from 1 to 50." };
     count = Math.min(MAX_COUNT, Number(args[1]));
   }
-  const resolved = liveSender();
+  const resolved = yield* liveSender();
   if ("error" in resolved) return resolved;
-  const found = resolveDestination(args[0], resolved.sender);
+  const found = yield* resolveDestination(args[0], resolved.sender);
   if ("error" in found) return found;
   const p = paths();
-  const read = readMessages(p, args[0], count);
+  const read = yield* readMessages(p, args[0], count);
   if ("error" in read) return { error: `upstream-rejected: exo-teams could not read that chat. Microsoft said: "${microsoftMessage(read.error)}"` };
   return { result: JSON.stringify(boundedHistory(args[0], historyRows(read.messages), count, configured.historyMaxBytes)) };
 }
 var previewSequence = 0;
-function previewCommand(args, origin = "agent", body) {
+function* previewCommand(args, origin = "agent", body) {
   if (args.length < (body === void 0 ? 2 : 1) || !validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> --from-pad message.md. Find the id with `chats <name>`; chat names are not accepted." };
   if (body !== void 0 && args.length > 1) return { error: "invalid-request: Inline text cannot be combined with a body source." };
   const text = body ?? args.slice(1).join(" ");
   if (!text.length) return { error: "invalid-request: Preview text must not be empty." };
-  const resolved = previewSender();
+  const resolved = yield* previewSender();
   if ("error" in resolved) return resolved;
-  const found = resolveDestination(args[0], resolved.sender);
+  const found = yield* resolveDestination(args[0], resolved.sender);
   if ("error" in found) return found;
   const previewId = sha256Hex(`preview\0${now()}\0${++previewSequence}`);
   previewTokens[previewId] = { sender: resolved.sender, destination: found.destination, text, origin, previewNonce: previewId };
-  const decision = decideSend(readSendScope(), found.destination.id, origin);
+  const decision = decideSend(yield* readSendScope(), found.destination.id, origin);
   return { result: JSON.stringify({
     previewId,
     idempotencyKey: previewId,
@@ -1004,10 +1021,10 @@ function failureMessage(kind, detail, cause) {
   const exhaustive = kind;
   return exhaustive;
 }
-function loadOutbox(p) {
+function* loadOutbox(p) {
   try {
-    if (!host.fs.fileExists(p.outbox)) return { ledger: { schema: 2, attempts: [] } };
-    const value = parseJson(host.fs.readFile(p.outbox) || "");
+    if (!(yield* host.io.fs.fileExists(p.outbox))) return { ledger: { schema: 2, attempts: [] } };
+    const value = parseJson((yield* host.io.fs.readFile(p.outbox)) || "");
     if (value && value.schema === 1) return { ledger: { schema: 2, attempts: [] } };
     if (!value || value.schema !== 2 || !Array.isArray(value.attempts)) return { error: "the existing outbox ledger is unreadable" };
     const states = ["pending", "sent", "failed", "unknown"];
@@ -1018,10 +1035,10 @@ function loadOutbox(p) {
     return { error: "the existing outbox ledger could not be read" };
   }
 }
-function persistOutbox(p, ledger) {
+function* persistOutbox(p, ledger) {
   try {
-    if (!host.fs.makeDirs(p.root)) return false;
-    return host.fs.writeFile(p.outbox, JSON.stringify(ledger)) === true;
+    if (!(yield* host.io.fs.makeDirs(p.root))) return false;
+    return (yield* host.io.fs.writeFileAtomic(p.outbox, JSON.stringify(ledger))) === true;
   } catch {
     return false;
   }
@@ -1064,25 +1081,25 @@ function attemptResult(attempt, extra = {}) {
     deliveryGuarantee: "A sent idempotency key is never resent. An unconfirmed send stays unknown. This is not an exactly-once delivery guarantee."
   }) };
 }
-function persistFailure(p, ledger, attempt, kind, detail, cause) {
+function* persistFailure(p, ledger, attempt, kind, detail, cause) {
   attempt.failure = kind;
   attempt.failureCause = cause;
   attempt.failureMessage = failureMessage(kind, detail, cause);
   attempt.updatedAt = now();
   attempt.state = kind === "unknown" ? "unknown" : "failed";
-  if (!persistOutbox(p, ledger)) {
+  if (!(yield* persistOutbox(p, ledger))) {
     attempt.state = "unknown";
     attempt.failure = "unknown";
     attempt.failureCause = void 0;
     attempt.failureMessage = failureMessage("unknown");
-    persistOutbox(p, ledger);
+    yield* persistOutbox(p, ledger);
     return rememberSendFailure("unknown", attempt.failureMessage);
   }
   return rememberSendFailure(kind, attempt.failureMessage);
 }
-function exoFailure(p, ledger, attempt, run, classify = sendFailure) {
+function* exoFailure(p, ledger, attempt, run, classify = sendFailure) {
   const failure = classify(failureText(run));
-  return persistFailure(p, ledger, attempt, failure.kind, failure.detail, failure.cause);
+  return yield* persistFailure(p, ledger, attempt, failure.kind, failure.detail, failure.cause);
 }
 function payloadHash(payload) {
   return payload.kind === "text" ? sha256Hex(payload.text) : sha256Hex(`file\0${payload.file.name}\0${payload.file.sha256}\0${payload.message}`);
@@ -1090,111 +1107,117 @@ function payloadHash(payload) {
 function fileSummary(payload) {
   return payload.kind === "file" ? { file: { name: payload.file.name, bytes: payload.file.size } } : {};
 }
-function deliver(origin, plan, payload, explicitKey) {
+function* deliver(origin, plan, payload, explicitKey) {
   const matchingPreview = plan.kind === "chat" && payload.kind === "text" ? Object.values(previewTokens).reverse().find((token) => token.destination.id === plan.chatId && token.text === payload.text) : null;
   let key = explicitKey || matchingPreview?.previewNonce;
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
-  const loaded = loadOutbox(p);
-  if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error || "the outbox could not be read");
-  const ledger = loaded.ledger;
-  const hash = payloadHash(payload);
-  const destinationKey = plan.kind === "chat" ? plan.chatId : `person:${sha256Hex(personQuery(plan.query).toLowerCase()).slice(0, 24)}`;
-  let attempt = key ? ledger.attempts.find((item) => item.idempotencyKey === key) : void 0;
-  if (attempt && (attempt.payloadHash !== hash || (attempt.target || attempt.destination.id) !== destinationKey)) {
-    return sendFailureResult("invalid-request", "This idempotency key is already bound to a different chat, text or file; choose a new key only for an intentional new send.");
-  }
-  if (attempt && attempt.state === "sent") return attemptResult(attempt, fileSummary(payload));
-  if (attempt && attempt.state === "unknown") return sendFailureResult("unknown");
-  if (attempt && attempt.state === "pending") return persistFailure(p, ledger, attempt, "unknown", "a previous invocation ended before its send result was recorded");
-  const resolved = liveSender();
-  if ("error" in resolved) return rememberPrefixedFailure(resolved.error);
-  if (attempt && attempt.sender.identityKey !== resolved.sender.identityKey) {
-    return sendFailureResult("invalid-request", "This idempotency key belongs to another account; choose a new key only for an intentional new send.");
-  }
-  let destination;
-  let newDm = false;
-  let person = "";
-  if (plan.kind === "chat") {
-    const found = resolveDestination(plan.chatId, resolved.sender);
-    if ("error" in found) return rememberPrefixedFailure(found.error);
-    destination = { id: found.destination.id, label: String(found.destination.label || found.destination.id) };
-  } else {
-    const listed = chatList(resolved.sender);
-    if ("error" in listed) return rememberPrefixedFailure(listed.error);
-    const found = matchChats(listed.chats.filter((chat) => chat.chatType === "oneOnOne"), personQuery(plan.query));
-    if (found.ambiguous) {
-      return sendFailureResult("invalid-request", `Several chats match "${plan.query}": ${found.candidates.slice(0, 8).map((chat) => `${chat.title} (${chat.chatType}, ${chat.id})`).join("; ")}. Ask the owner which one and send to its id.`);
+  const outboxLock = yield* host.io.fs.lockFile(p.outbox);
+  if (!outboxLock) return { error: "busy: another send is updating the outbox; retry after it completes." };
+  try {
+    const loaded = yield* loadOutbox(p);
+    if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error || "the outbox could not be read");
+    const ledger = loaded.ledger;
+    const hash = payloadHash(payload);
+    const destinationKey = plan.kind === "chat" ? plan.chatId : `person:${sha256Hex(personQuery(plan.query).toLowerCase()).slice(0, 24)}`;
+    let attempt = key ? ledger.attempts.find((item) => item.idempotencyKey === key) : void 0;
+    if (attempt && (attempt.payloadHash !== hash || (attempt.target || attempt.destination.id) !== destinationKey)) {
+      return sendFailureResult("invalid-request", "This idempotency key is already bound to a different chat, text or file; choose a new key only for an intentional new send.");
     }
-    if (found.match) destination = { id: found.match.id, label: found.match.title };
-    else if (payload.kind === "file") {
-      return sendFailureResult("invalid-request", `No 1:1 chat with "${plan.query}" exists, and a file can only go to an existing chat. Start the chat with send-to <full name> --from-pad message.md first, or send the file to a chat id.`);
+    if (attempt && attempt.state === "sent") return attemptResult(attempt, fileSummary(payload));
+    if (attempt && attempt.state === "unknown") return sendFailureResult("unknown");
+    if (attempt && attempt.state === "pending") return yield* persistFailure(p, ledger, attempt, "unknown", "a previous invocation ended before its send result was recorded");
+    const resolved = yield* liveSender();
+    if ("error" in resolved) return rememberPrefixedFailure(resolved.error);
+    if (attempt && attempt.sender.identityKey !== resolved.sender.identityKey) {
+      return sendFailureResult("invalid-request", "This idempotency key belongs to another account; choose a new key only for an intentional new send.");
+    }
+    let destination;
+    let newDm = false;
+    let person = "";
+    if (plan.kind === "chat") {
+      const found = yield* resolveDestination(plan.chatId, resolved.sender);
+      if ("error" in found) return rememberPrefixedFailure(found.error);
+      destination = { id: found.destination.id, label: String(found.destination.label || found.destination.id) };
     } else {
-      if (personQuery(plan.query).split(/\s+/).filter(Boolean).length < 2) {
-        return sendFailureResult("invalid-request", `No chat with "${plan.query}" exists. To start a new 1:1 chat, give the person's full name.`);
+      const listed = yield* chatList(resolved.sender);
+      if ("error" in listed) return rememberPrefixedFailure(listed.error);
+      const found = matchChats(listed.chats.filter((chat) => chat.chatType === "oneOnOne"), personQuery(plan.query));
+      if (found.ambiguous) {
+        return sendFailureResult("invalid-request", `Several chats match "${plan.query}": ${found.candidates.slice(0, 8).map((chat) => `${chat.title} (${chat.chatType}, ${chat.id})`).join("; ")}. Ask the owner which one and send to its id.`);
       }
-      newDm = true;
-      person = personQuery(plan.query);
-      destination = { id: destinationKey, label: destinationKey };
+      if (found.match) destination = { id: found.match.id, label: found.match.title };
+      else if (payload.kind === "file") {
+        return sendFailureResult("invalid-request", `No 1:1 chat with "${plan.query}" exists, and a file can only go to an existing chat. Start the chat with send-to <full name> --from-pad message.md first, or send the file to a chat id.`);
+      } else {
+        if (personQuery(plan.query).split(/\s+/).filter(Boolean).length < 2) {
+          return sendFailureResult("invalid-request", `No chat with "${plan.query}" exists. To start a new 1:1 chat, give the person's full name.`);
+        }
+        newDm = true;
+        person = personQuery(plan.query);
+        destination = { id: destinationKey, label: destinationKey };
+      }
     }
+    const decision = decideSend(yield* readSendScope(), destination.id, origin);
+    if (!decision.allow) return sendFailureResult("chat-not-allowed", decision.message);
+    if (!key) key = sha256Hex(`send\0${now()}\0${++previewSequence}\0${destination.id}`).slice(0, 32);
+    if (!attempt) {
+      attempt = { idempotencyKey: key, sender: resolved.sender, target: destinationKey, destination, payloadHash: hash, state: "pending", createdAt: now(), updatedAt: now(), sendCount: 0 };
+      ledger.attempts.push(attempt);
+    }
+    attempt.destination = destination;
+    attempt.state = "pending";
+    attempt.updatedAt = now();
+    attempt.sendCount += 1;
+    delete attempt.failure;
+    delete attempt.failureCause;
+    delete attempt.failureMessage;
+    if (!(yield* persistOutbox(p, ledger))) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; Teams was not contacted");
+    const sentAfter = now() - 12e4;
+    let chatId = destination.id;
+    if (payload.kind === "file") {
+      const message = payload.message ? ["--message", htmlMessage(payload.message)] : [];
+      const run = yield* runExo(p, ["send-file", chatId, "--file", nativePath(payload.file.path), ...message, "--json"], TIMEOUTS.sendFile);
+      if (!run.ok) return yield* exoFailure(p, ledger, attempt, run, fileSendFailure);
+      const ok = parseJson(run.stdout.trim());
+      if (!ok || ok.ok !== true) return yield* persistFailure(p, ledger, attempt, "unknown", "exo-teams exited cleanly but did not report the file as sent.");
+    } else if (newDm) {
+      const run = yield* runExo(p, ["new-dm", person, htmlMessage(payload.text), "--json"], TIMEOUTS.send);
+      if (!run.ok) return yield* exoFailure(p, ledger, attempt, run);
+      const created = parseJson(run.stdout.trim());
+      const createdId = created && typeof created.id === "string" ? created.id : "";
+      const resolvedName = run.stderr.match(/found user:\s*(.+?)\s*(?:\(|$)/m)?.[1] || person;
+      if (!validChatId(createdId)) return yield* persistFailure(p, ledger, attempt, "unknown", "exo-teams reported the new chat as sent but returned no chat id.");
+      chatId = createdId;
+      attempt.destination = { id: createdId, label: resolvedName };
+      memoryChats = null;
+    } else {
+      const run = yield* runExo(p, ["send", chatId, htmlMessage(payload.text), "--json"], TIMEOUTS.send);
+      if (!run.ok) return yield* exoFailure(p, ledger, attempt, run);
+      const ok = parseJson(run.stdout.trim());
+      if (!ok || ok.ok !== true) return yield* persistFailure(p, ledger, attempt, "unknown", "exo-teams exited cleanly but did not report the send as accepted.");
+    }
+    attempt.state = "sent";
+    attempt.updatedAt = now();
+    const read = yield* readMessages(p, chatId, 20);
+    attempt.messageId = !("messages" in read) ? null : payload.kind === "file" ? findSentFileMessageId(read.messages, payload.file.name, resolved.sender.user, sentAfter) : findSentMessageId(read.messages, payload.text, resolved.sender.user, sentAfter);
+    if (!(yield* persistOutbox(p, ledger))) return yield* persistFailure(p, ledger, attempt, "unknown", "Teams accepted the message but the sent result could not be recorded.");
+    return attemptResult(attempt, fileSummary(payload));
+  } finally {
+    yield* host.io.fs.unlockFile(outboxLock);
   }
-  const decision = decideSend(readSendScope(), destination.id, origin);
-  if (!decision.allow) return sendFailureResult("chat-not-allowed", decision.message);
-  if (!key) key = sha256Hex(`send\0${now()}\0${++previewSequence}\0${destination.id}`).slice(0, 32);
-  if (!attempt) {
-    attempt = { idempotencyKey: key, sender: resolved.sender, target: destinationKey, destination, payloadHash: hash, state: "pending", createdAt: now(), updatedAt: now(), sendCount: 0 };
-    ledger.attempts.push(attempt);
-  }
-  attempt.destination = destination;
-  attempt.state = "pending";
-  attempt.updatedAt = now();
-  attempt.sendCount += 1;
-  delete attempt.failure;
-  delete attempt.failureCause;
-  delete attempt.failureMessage;
-  if (!persistOutbox(p, ledger)) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; Teams was not contacted");
-  const sentAfter = now() - 12e4;
-  let chatId = destination.id;
-  if (payload.kind === "file") {
-    const message = payload.message ? ["--message", htmlMessage(payload.message)] : [];
-    const run = runExo(p, ["send-file", chatId, "--file", nativePath(payload.file.path), ...message, "--json"], TIMEOUTS.sendFile);
-    if (!run.ok) return exoFailure(p, ledger, attempt, run, fileSendFailure);
-    const ok = parseJson(run.stdout.trim());
-    if (!ok || ok.ok !== true) return persistFailure(p, ledger, attempt, "unknown", "exo-teams exited cleanly but did not report the file as sent.");
-  } else if (newDm) {
-    const run = runExo(p, ["new-dm", person, htmlMessage(payload.text), "--json"], TIMEOUTS.send);
-    if (!run.ok) return exoFailure(p, ledger, attempt, run);
-    const created = parseJson(run.stdout.trim());
-    const createdId = created && typeof created.id === "string" ? created.id : "";
-    const resolvedName = run.stderr.match(/found user:\s*(.+?)\s*(?:\(|$)/m)?.[1] || person;
-    if (!validChatId(createdId)) return persistFailure(p, ledger, attempt, "unknown", "exo-teams reported the new chat as sent but returned no chat id.");
-    chatId = createdId;
-    attempt.destination = { id: createdId, label: resolvedName };
-    memoryChats = null;
-  } else {
-    const run = runExo(p, ["send", chatId, htmlMessage(payload.text), "--json"], TIMEOUTS.send);
-    if (!run.ok) return exoFailure(p, ledger, attempt, run);
-    const ok = parseJson(run.stdout.trim());
-    if (!ok || ok.ok !== true) return persistFailure(p, ledger, attempt, "unknown", "exo-teams exited cleanly but did not report the send as accepted.");
-  }
-  attempt.state = "sent";
-  attempt.updatedAt = now();
-  const read = readMessages(p, chatId, 20);
-  attempt.messageId = !("messages" in read) ? null : payload.kind === "file" ? findSentFileMessageId(read.messages, payload.file.name, resolved.sender.user, sentAfter) : findSentMessageId(read.messages, payload.text, resolved.sender.user, sentAfter);
-  if (!persistOutbox(p, ledger)) return persistFailure(p, ledger, attempt, "unknown", "Teams accepted the message but the sent result could not be recorded.");
-  return attemptResult(attempt, fileSummary(payload));
 }
-function sendCommand(origin, args, body) {
+function* sendCommand(origin, args, body) {
   const parsed = parseSendArgs(args, validChatId, "Usage: send <immutable-chat-id> [--key <idempotency-key>] --from-pad message.md; chat names are not ids. Use send-to <person> for a person.", body);
   if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
-  return deliver(origin, { kind: "chat", chatId: parsed.target }, { kind: "text", text: parsed.text }, parsed.key);
+  return yield* deliver(origin, { kind: "chat", chatId: parsed.target }, { kind: "text", text: parsed.text }, parsed.key);
 }
-function sendToCommand(args, body) {
+function* sendToCommand(args, body) {
   const separator = args.indexOf("--");
   const rest = separator > 0 ? [args.slice(0, separator).join(" "), ...args.slice(separator + 1)] : args;
   const parsed = parseSendArgs(rest, (value) => !!value.trim() && value.length <= 200, "Usage: send-to <person name or email> [--key <idempotency-key>] --from-pad message.md. Quote a multi-word name, or put -- after it.", body);
   if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
-  return deliver("agent", { kind: "person", query: parsed.target.trim() }, { kind: "text", text: parsed.text }, parsed.key);
+  return yield* deliver("agent", { kind: "person", query: parsed.target.trim() }, { kind: "text", text: parsed.text }, parsed.key);
 }
 var SEND_FILE_USAGE = "Usage: send-file <chat-id | person> <absolute path> [--from-pad caption.md] [--key <idempotency-key>]. Quote a multi-word name or a path with spaces.";
 function absolutePath(value) {
@@ -1237,7 +1260,7 @@ function underRoot(path, root) {
   return child === parent || child.startsWith(`${parent}/`);
 }
 var WINDOWS_FILE_PROBE = "$ErrorActionPreference='Stop'; try { $f = Get-Item -LiteralPath $env:CT_FILE -Force; if ($f.PSIsContainer) { 'kind=dir'; exit 0 }; 'size=' + $f.Length; 'link=' + [bool]($f.Attributes -band [IO.FileAttributes]::ReparsePoint); if ($f.Length -le [long]$env:CT_MAX_BYTES) { $s = [IO.File]::OpenRead($f.FullName); $s.Close(); 'sha256=' + (Get-FileHash -Algorithm SHA256 -LiteralPath $f.FullName).Hash } } catch { 'error=' + $_.Exception.GetType().Name }";
-function probeFile(p, target, rawPath) {
+function* probeFile(p, target, rawPath) {
   let path = host.path.normalize(rawPath);
   const refuse = (kind, detail) => ({ error: failureMessage(kind, detail) });
   const ownData = "Files inside the Teams Client data directory are never sent.";
@@ -1246,7 +1269,7 @@ function probeFile(p, target, rawPath) {
   let size;
   let sha256 = null;
   if (target.platform === "win32") {
-    const run = runProcess(target.tools.powershell, ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_FILE_PROBE], { CT_FILE: nativePath(path), CT_MAX_BYTES: String(MAX_FILE_BYTES) }, TIMEOUTS.fileProbe);
+    const run = yield* runProcess(target.tools.powershell, ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_FILE_PROBE], { CT_FILE: nativePath(path), CT_MAX_BYTES: String(MAX_FILE_BYTES) }, TIMEOUTS.fileProbe);
     const probe = parseFileProbe(run.stdout);
     if (probe.state === "missing") return refuse("file-unreadable", "No file exists at that path.");
     if (probe.state === "directory") return refuse("file-unreadable", "That path is a directory.");
@@ -1256,13 +1279,13 @@ function probeFile(p, target, rawPath) {
     size = probe.size;
     sha256 = probe.sha256;
   } else {
-    const real = runProcess(target.tools.realpath, [nativePath(path)], {}, TIMEOUTS.probe);
+    const real = yield* runProcess(target.tools.realpath, [nativePath(path)], {}, TIMEOUTS.probe);
     const resolved = real.ok ? real.stdout.trim() : "";
     if (!resolved.startsWith("/") || /[\r\n]/.test(resolved)) return refuse("file-unreadable", "No readable file exists at that path.");
     path = host.path.normalize(resolved);
-    const realRoot = runProcess(target.tools.realpath, [nativePath(p.root)], {}, TIMEOUTS.probe);
+    const realRoot = yield* runProcess(target.tools.realpath, [nativePath(p.root)], {}, TIMEOUTS.probe);
     if (underRoot(path, p.root) || realRoot.ok && underRoot(path, realRoot.stdout.trim())) return refuse("invalid-request", ownData);
-    const count = runProcess(target.tools.wc, ["-c", nativePath(path)], {}, TIMEOUTS.fileProbe);
+    const count = yield* runProcess(target.tools.wc, ["-c", nativePath(path)], {}, TIMEOUTS.fileProbe);
     const bytes = count.ok ? parseByteCount(count.stdout) : null;
     if (bytes === null) return refuse("file-unreadable", "The path is not a readable regular file.");
     size = bytes;
@@ -1270,7 +1293,7 @@ function probeFile(p, target, rawPath) {
   if (size > MAX_FILE_BYTES) return refuse("file-too-large", `The file is ${size} bytes.`);
   if (target.platform !== "win32") {
     const [bin, ...args] = target.tools.hash.map((part) => part === "{file}" ? nativePath(path) : part);
-    const hashed = runProcess(bin, args, {}, TIMEOUTS.fileProbe);
+    const hashed = yield* runProcess(bin, args, {}, TIMEOUTS.fileProbe);
     sha256 = hashed.ok ? parseSha256(hashed.stdout) : null;
   }
   if (!sha256) return refuse("file-unreadable", "The file could not be read to the end.");
@@ -1278,17 +1301,17 @@ function probeFile(p, target, rawPath) {
   if (!name) return refuse("invalid-request", "The path does not name a file.");
   return { file: { path, name, size, sha256 } };
 }
-function sendFileCommand(args, body) {
+function* sendFileCommand(args, body) {
   const parsed = parseSendFileArgs(args, body);
   if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
-  const target = detectTarget(p);
+  const target = yield* detectTarget(p);
   if ("state" in target) return sendFailureResult("upstream-rejected", target.message);
-  const probed = probeFile(p, target, parsed.path);
+  const probed = yield* probeFile(p, target, parsed.path);
   if ("error" in probed) return rememberPrefixedFailure(probed.error);
   const plan = validChatId(parsed.target) ? { kind: "chat", chatId: parsed.target } : { kind: "person", query: parsed.target };
-  return deliver("agent", plan, { kind: "file", file: probed.file, message: parsed.message }, parsed.key);
+  return yield* deliver("agent", plan, { kind: "file", file: probed.file, message: parsed.message }, parsed.key);
 }
 var SEARCH_USAGE = "Usage: search-messages <query> [--chat <chat-id | name>] [--limit <1-50>]. Quote a multi-word chat name.";
 function parseSearchArgs(args) {
@@ -1313,11 +1336,11 @@ function parseSearchArgs(args) {
   if (query.length < 2 || query.length > 200) return { error: `invalid-request: ${SEARCH_USAGE} The query needs 2 to 200 characters.` };
   return { query, chat, limit };
 }
-function searchScope(sender, chats, wanted) {
+function* searchScope(sender, chats, wanted) {
   const exact = chats.find((item) => item.id === wanted);
   if (exact) return { chat: exact };
   if (validChatId(wanted)) {
-    const fresh = chatList(sender, true);
+    const fresh = yield* chatList(sender, true);
     if ("error" in fresh) return fresh;
     const found2 = fresh.chats.find((item) => item.id === wanted);
     return found2 ? { chat: found2 } : { error: failureMessage("chat-not-found", wanted) };
@@ -1326,17 +1349,17 @@ function searchScope(sender, chats, wanted) {
   if (found.ambiguous) return { error: `invalid-request: Several chats match "${wanted}": ${found.candidates.slice(0, 8).map((item) => `${item.title} (${item.chatType}, ${item.id})`).join("; ")}. Ask the owner which one and pass its id to --chat.` };
   return found.match ? { chat: found.match } : { error: `chat-not-found: No chat matches "${wanted}". Look it up with \`search <name>\` or \`chats <name>\`.` };
 }
-function searchMessagesCommand(args) {
+function* searchMessagesCommand(args) {
   const parsed = parseSearchArgs(args);
   if ("error" in parsed) return parsed;
-  const resolved = liveSender();
+  const resolved = yield* liveSender();
   if ("error" in resolved) return resolved;
-  const listed = chatList(resolved.sender);
+  const listed = yield* chatList(resolved.sender);
   if ("error" in listed) return listed;
   let scope = listed.chats.slice(0, SEARCH_MAX_CHATS);
   let perChat = SEARCH_RECENT_MESSAGES;
   if (parsed.chat !== void 0) {
-    const one = searchScope(resolved.sender, listed.chats, parsed.chat);
+    const one = yield* searchScope(resolved.sender, listed.chats, parsed.chat);
     if ("error" in one) return one;
     scope = [one.chat];
     perChat = SEARCH_CHAT_MESSAGES;
@@ -1349,7 +1372,7 @@ function searchMessagesCommand(args) {
   let scanned = 0;
   for (const chat of scope) {
     if (scanned > 0 && now() - started > SEARCH_BUDGET_MS) break;
-    const read = readMessages(p, chat.id, perChat);
+    const read = yield* readMessages(p, chat.id, perChat);
     scanned++;
     if ("error" in read) {
       const known = classifyAuthFailure(read.error);
@@ -1377,30 +1400,30 @@ function searchMessagesCommand(args) {
   }
   return { result: JSON.stringify(out) };
 }
-function logout() {
+function* logout() {
   const p = paths();
   if (!p) return { error: lifecycleMessage("unsupported-platform") };
-  endSignIn(p, true);
+  yield* endSignIn(p, true);
   for (const name of EXO_TOKEN_FILES) {
     const file = joinPath(p.tokenDir, name);
     try {
-      host.fs.removeFile(file);
+      yield* host.io.fs.removeFile(file);
     } catch {
     }
   }
   try {
-    host.fs.removeFile(p.chatCache);
+    yield* host.io.fs.removeFile(p.chatCache);
   } catch {
   }
   try {
-    host.fs.removeFile(p.loginLog);
+    yield* host.io.fs.removeFile(p.loginLog);
   } catch {
   }
   memoryChats = null;
   lastStatus = null;
   clearPreviewTokens();
-  if (installedMarker(p)) {
-    const after = whoami(p);
+  if (yield* installedMarker(p)) {
+    const after = yield* whoami(p);
     if ("who" in after && sessionUsable(after.who)) return { error: "A plugin-owned Teams token file could not be removed. Retry logout." };
   }
   return { result: "Logged out. The plugin-owned Teams token files were removed." };
@@ -1408,7 +1431,7 @@ function logout() {
 function clearPreviewTokens() {
   for (const id of Object.keys(previewTokens)) delete previewTokens[id];
 }
-function startInstallStage(stage, p, target) {
+function* startInstallStage(stage, p, target) {
   const goBin = nativePath(p.goBinary);
   const specs = {
     download: { bin: target.tools.curl, args: ["-fsSL", "--proto", "=https", "--retry", "2", "-o", nativePath(joinPath(p.runtime, target.archive.file)), `${GO_DOWNLOAD_BASE}${target.archive.file}`], env: {}, timeoutMs: TIMEOUTS.download },
@@ -1417,10 +1440,10 @@ function startInstallStage(stage, p, target) {
     build: { bin: goBin, args: ["install", `${EXO_PACKAGE}@${EXO_VERSION}`], env: goEnv(p), timeoutMs: TIMEOUTS.goBuild }
   };
   const spec = specs[stage];
-  if (stage === "extract" && !host.fs.makeDirs(p.toolchain)) return { error: "Could not create the private toolchain directory." };
+  if (stage === "extract" && !(yield* host.io.fs.makeDirs(p.toolchain))) return { error: "Could not create the private toolchain directory." };
   let started;
   try {
-    started = host.exec.start({ bin: spec.bin, args: spec.args, env: spec.env, timeoutMs: spec.timeoutMs });
+    started = yield* ioValue({ op: "execStart", options: { bin: spec.bin, args: spec.args, env: spec.env, timeoutMs: spec.timeoutMs } });
   } catch {
     return { error: `Could not start the ${stage} step.` };
   }
@@ -1435,30 +1458,30 @@ var STAGE_MESSAGES = {
   module: "Fetching exo-teams at its pinned commit through the Go module proxy.",
   build: "The exo-teams module matched its pinned checksum; building it."
 };
-function nextInstallStage(p, target, from) {
+function* nextInstallStage(p, target, from) {
   const order = ["download", "extract", "module", "build"];
   let index = from ? order.indexOf(from) + 1 : 0;
-  if (!from && host.fs.fileExists(p.goBinary)) index = 2;
+  if (!from && (yield* host.io.fs.fileExists(p.goBinary))) index = 2;
   if (index >= order.length) return null;
   const stage = order[index];
-  const started = startInstallStage(stage, p, target);
+  const started = yield* startInstallStage(stage, p, target);
   if (!started.jobId) return { done: true, state: "install-failed", error: lifecycleMessage("install-failed", started.error) };
   return { done: false, jobId: started.jobId, state: "install-in-progress", message: STAGE_MESSAGES[stage] };
 }
-function verifyArchive(p, target) {
+function* verifyArchive(p, target) {
   const file = nativePath(joinPath(p.runtime, target.archive.file));
   const [bin, ...args] = target.tools.hash.map((part) => part === "{file}" ? file : part);
-  const run = runProcess(bin, args, { CT_HASH_FILE: file }, TIMEOUTS.hash);
+  const run = yield* runProcess(bin, args, { CT_HASH_FILE: file }, TIMEOUTS.hash);
   const digest = run.ok ? parseSha256(run.stdout) : null;
   if (digest === target.archive.sha256) return null;
   try {
-    host.fs.removeFile(joinPath(p.runtime, target.archive.file));
+    yield* host.io.fs.removeFile(joinPath(p.runtime, target.archive.file));
   } catch {
   }
   const observed = digest ? `got ${digest}` : `${bin} gave no digest: ${redact(run.ok ? run.stdout : `${run.error} ${run.stderr}`).trim().slice(0, 300)}`;
   return `The downloaded Go toolchain ${target.archive.file} did not match its pinned SHA-256 ${target.archive.sha256} (${observed}), so it was deleted and nothing was built.`;
 }
-function finishInstallStage(jobId, job, poll) {
+function* finishInstallStage(jobId, job, poll) {
   delete installJobs[jobId];
   if (activeInstallJobId === jobId) activeInstallJobId = null;
   const { paths: p, target, stage } = job;
@@ -1467,15 +1490,15 @@ function finishInstallStage(jobId, job, poll) {
     return { done: true, state: "install-failed", error: lifecycleMessage("install-failed", `The ${stage} step failed${detail ? `: ${detail}` : "."} Retry Sign in.`) };
   }
   if (stage === "download") {
-    const mismatch = verifyArchive(p, target);
+    const mismatch = yield* verifyArchive(p, target);
     if (mismatch) return { done: true, state: "install-failed", error: mismatch };
   }
   if (stage === "extract") {
     try {
-      host.fs.removeFile(joinPath(p.runtime, target.archive.file));
+      yield* host.io.fs.removeFile(joinPath(p.runtime, target.archive.file));
     } catch {
     }
-    if (!host.fs.fileExists(p.goBinary)) return { done: true, state: "install-failed", error: lifecycleMessage("install-failed", "The Go toolchain archive did not contain the expected go binary.") };
+    if (!(yield* host.io.fs.fileExists(p.goBinary))) return { done: true, state: "install-failed", error: lifecycleMessage("install-failed", "The Go toolchain archive did not contain the expected go binary.") };
   }
   if (stage === "module") {
     const module2 = parseGoModDownload(String(poll.stdout || ""));
@@ -1484,23 +1507,23 @@ function finishInstallStage(jobId, job, poll) {
     }
   }
   if (stage === "build") {
-    if (!host.fs.fileExists(p.binary)) return { done: true, state: "install-failed", error: lifecycleMessage("install-failed", "go install finished without producing the exo-teams binary.") };
-    host.fs.writeFile(p.marker, JSON.stringify({ module: EXO_MODULE, version: EXO_VERSION, sum: EXO_MODULE_SUM, go: GO_VERSION }));
-    return startSignIn(p);
+    if (!(yield* host.io.fs.fileExists(p.binary))) return { done: true, state: "install-failed", error: lifecycleMessage("install-failed", "go install finished without producing the exo-teams binary.") };
+    yield* host.io.fs.writeFile(p.marker, JSON.stringify({ module: EXO_MODULE, version: EXO_VERSION, sum: EXO_MODULE_SUM, go: GO_VERSION }));
+    return yield* startSignIn(p);
   }
-  return nextInstallStage(p, target, stage);
+  return yield* nextInstallStage(p, target, stage);
 }
-function startSignIn(p) {
-  const pending = pendingSignIn(p);
+function* startSignIn(p) {
+  const pending = yield* pendingSignIn(p);
   if (pending) return signInView(pending.log);
-  endSignIn(p, true);
+  yield* endSignIn(p, true);
   try {
-    host.fs.removeFile(p.loginLog);
+    yield* host.io.fs.removeFile(p.loginLog);
   } catch {
   }
   let started;
   try {
-    started = host.exec.start({ bin: nativePath(p.binary), args: ["auth"], env: exoEnv(p), timeoutMs: SIGN_IN_TTL_MS + 6e4, detach: true, logFile: p.loginLog });
+    started = yield* ioValue({ op: "execStart", options: { bin: nativePath(p.binary), args: ["auth"], env: exoEnv(p), timeoutMs: SIGN_IN_TTL_MS + 6e4, detach: true, logFile: p.loginLog } });
   } catch {
     return { done: true, state: "sign-in-failed", error: "Could not start exo-teams sign-in." };
   }
@@ -1513,9 +1536,9 @@ function startSignIn(p) {
     if (poll && poll.done) host.exec.close(started.jobId);
   } catch {
   }
-  host.fs.writeFile(p.loginState, JSON.stringify({ startedAt: now(), pid }));
+  yield* host.io.fs.writeFile(p.loginState, JSON.stringify({ startedAt: now(), pid }));
   lastStatus = null;
-  return signInView(readSignInLog(p));
+  return signInView(yield* readSignInLog(p));
 }
 function signInView(log) {
   if (log.state === "awaiting-user") {
@@ -1523,18 +1546,18 @@ function signInView(log) {
   }
   return { done: false, state: "awaiting-user", message: "Microsoft is issuing a sign-in code. Poll login-status until it returns signInUrl and deviceCode." };
 }
-function loginStart() {
+function* loginStart() {
   const p = paths();
   if (!p) return { done: true, state: "unsupported-platform", error: lifecycleMessage("unsupported-platform") };
-  if (activeInstallJobId) return loginPoll();
-  const target = detectTarget(p);
+  if (activeInstallJobId) return yield* loginPoll();
+  const target = yield* detectTarget(p);
   if ("state" in target) return { done: true, state: target.state, error: target.message };
-  const secured = protectStorage(p);
+  const secured = yield* protectStorage(p);
   if (secured.error) return { done: true, state: secured.error, error: secured.message };
-  if (!installedMarker(p)) return nextInstallStage(p, target);
-  return startSignIn(p);
+  if (!(yield* installedMarker(p))) return yield* nextInstallStage(p, target);
+  return yield* startSignIn(p);
 }
-function loginPoll() {
+function* loginPoll() {
   const p = paths();
   if (!p) return { done: true, state: "unsupported-platform", error: lifecycleMessage("unsupported-platform") };
   if (activeInstallJobId) {
@@ -1552,26 +1575,26 @@ function loginPoll() {
       host.exec.close(jobId);
     } catch {
     }
-    return finishInstallStage(jobId, job, poll);
+    return yield* finishInstallStage(jobId, job, poll);
   }
-  const record = readLoginRecord(p);
+  const record = yield* readLoginRecord(p);
   if (!record) {
-    const current = status();
+    const current = yield* status();
     return { done: true, state: current.state, message: current.message };
   }
-  const log = readSignInLog(p);
+  const log = yield* readSignInLog(p);
   if (log.state === "failed") {
-    endSignIn(p, false);
+    yield* endSignIn(p, false);
     return { done: true, state: log.failure.state, error: log.failure.message };
   }
   if (log.state === "signed-in") {
-    endSignIn(p, false);
+    yield* endSignIn(p, false);
     memoryChats = null;
-    const current = status();
+    const current = yield* status();
     return current.state === "logged-in" ? { done: true, state: "logged-in", message: current.message } : { done: true, state: current.state, error: current.message };
   }
   if (now() - record.startedAt > SIGN_IN_TTL_MS + 3e4) {
-    endSignIn(p, true);
+    yield* endSignIn(p, true);
     return { done: true, state: "expired", error: "The sign-in code expired before the sign-in finished. Run login again for a fresh code." };
   }
   return signInView(log);
@@ -1587,83 +1610,83 @@ function agentLoginView(current) {
     ...current.error ? { error: current.error } : {}
   };
 }
-function health() {
+function* health() {
   return {
-    ...status(),
+    ...yield* status(),
     cli: { module: EXO_MODULE, version: EXO_VERSION, commit: "b9ebbf5", go: GO_VERSION },
-    sendScope: readSendScope(),
+    sendScope: yield* readSendScope(),
     lastSend: lastSendState
   };
 }
-function onAgentCommand(ctx) {
+function* onAgentCommand(ctx) {
   const args = Array.isArray(ctx.args) ? ctx.args : [];
   switch (ctx.verb) {
     case "login": {
       if (args.length) return { error: "Usage: login." };
-      const current = loginStart();
+      const current = yield* loginStart();
       if (current.error && current.done) return { error: current.error };
       return { result: JSON.stringify(agentLoginView(current)) };
     }
     case "login-status": {
       if (args.length) return { error: "Usage: login-status." };
-      return { result: JSON.stringify(agentLoginView(loginPoll())) };
+      return { result: JSON.stringify(agentLoginView(yield* loginPoll())) };
     }
     case "accounts": {
-      const current = status();
+      const current = yield* status();
       return { result: JSON.stringify({ state: current.state, accounts: current.accounts || [] }) };
     }
     case "use":
       return { error: "exo-teams keeps one signed-in Teams account. Run logout, then login with the other account." };
     case "chats":
-      return agentChats(args);
+      return yield* agentChats(args);
     case "search":
-      return args.length ? agentChats(args, true) : { error: "Usage: search <person name or email>." };
+      return args.length ? yield* agentChats(args, true) : { error: "Usage: search <person name or email>." };
     case "history":
-      return agentHistory(args);
+      return yield* agentHistory(args);
     case "health":
-      return { result: JSON.stringify(health()) };
+      return { result: JSON.stringify(yield* health()) };
     case "logout":
-      return logout();
+      return yield* logout();
     case "send":
-      return sendCommand("agent", args, ctx.body);
+      return yield* sendCommand("agent", args, ctx.body);
     case "send-to":
-      return sendToCommand(args, ctx.body);
+      return yield* sendToCommand(args, ctx.body);
     case "send-file":
-      return sendFileCommand(args, ctx.body);
+      return yield* sendFileCommand(args, ctx.body);
     case "search-messages":
-      return searchMessagesCommand(args);
+      return yield* searchMessagesCommand(args);
     case "preview":
-      return previewCommand(args, "agent", ctx.body);
+      return yield* previewCommand(args, "agent", ctx.body);
     default:
       return { error: `Unknown Teams Client verb: ${ctx.verb}` };
   }
 }
-function viewCall(method, args) {
+function* viewCall(method, args) {
   const value = args || {};
   if (method === "status") {
-    const current = status();
+    const current = yield* status();
     return { ...current, loginJobId: current.state === "awaiting-user" || activeInstallJobId ? "sign-in" : null };
   }
-  if (method === "accounts") return { accounts: (lastStatus || status()).accounts || [] };
-  if (method === "loginStart") return loginStart();
-  if (method === "loginPoll") return loginPoll();
+  if (method === "accounts") return { accounts: (lastStatus || (yield* status())).accounts || [] };
+  if (method === "loginStart") return yield* loginStart();
+  if (method === "loginPoll") return yield* loginPoll();
   if (method === "useAccount") return { error: "exo-teams keeps one signed-in Teams account. Sign out, then sign in with the other account." };
-  if (method === "logout") return logout();
-  if (method === "chats") return agentChats(String(value.query || "").trim() ? [String(value.query)] : []);
-  if (method === "sendScope") return readSendScope();
-  if (method === "setSendScope") return setSendScope(value);
-  if (method === "preview") return previewCommand([String(value.chatId || ""), String(value.text || "")], "view");
-  if (method === "send") return sendCommand("view", [String(value.chatId || ""), "--key", String(value.idempotencyKey || ""), String(value.text || "")]);
+  if (method === "logout") return yield* logout();
+  if (method === "chats") return yield* agentChats(String(value.query || "").trim() ? [String(value.query)] : []);
+  if (method === "sendScope") return yield* readSendScope();
+  if (method === "setSendScope") return yield* setSendScope(value);
+  if (method === "preview") return yield* previewCommand([String(value.chatId || ""), String(value.text || "")], "view");
+  if (method === "send") return yield* sendCommand("view", [String(value.chatId || ""), "--key", String(value.idempotencyKey || ""), String(value.text || "")]);
   return { error: `Unknown Teams Client view method: ${method}` };
 }
-function renderGlance() {
+function* renderGlance() {
   const p = paths();
-  const installed = !!(p && installedMarker(p));
+  const installed = !!(p && (yield* installedMarker(p)));
   const current = lastStatus;
   const connected = current?.state === "logged-in";
   const nodes = [{ kind: "badge", label: connected ? "Connected" : installed ? "Sign-in needed" : "exo-teams not installed", tone: connected ? "ok" : installed ? "warn" : "muted" }];
   nodes.push({ kind: "text", text: connected ? `${current?.upn || "Account resolved"}` : "Open Teams Client to check status or sign in.", style: { tone: "muted" } });
-  const scope = readSendScope();
+  const scope = yield* readSendScope();
   nodes.push({ kind: "text", text: scope.mode === "all" ? "Agent sends: any chat" : `Agent sends: ${scope.chats.length} allowed chat${scope.chats.length === 1 ? "" : "s"}`, style: { tone: scope.mode === "all" ? "muted" : "warn" } });
   if (lastSendState) nodes.push({ kind: "text", text: `Last send: ${lastSendState.state} \xB7 ${lastSendState.message}`, style: { tone: lastSendState.state === "sent" ? "ok" : "warn" } });
   return { title: "Teams Client", nodes };
@@ -1800,7 +1823,7 @@ function sha256Hex(text) {
   }
   return state.map((value) => value.toString(16).padStart(8, "0")).join("");
 }
-var plugin = {
+var plugin = defineProviderIo({
   onAgentCommand,
   renderGlance,
   viewCall,
@@ -1823,5 +1846,5 @@ var plugin = {
   __test_sha256Hex: sha256Hex,
   __test_boundedHistory: boundedHistory,
   __test_failureMessage: failureMessage
-};
+}, () => host.io);
 var plugin_default = plugin;

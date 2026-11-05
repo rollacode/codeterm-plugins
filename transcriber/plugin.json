@@ -1,7 +1,7 @@
 {
   "id": "transcriber",
-  "version": "0.4.4",
-  "minCodeterm": "1.15.1",
+  "version": "0.4.5",
+  "minCodeterm": "1.19.0",
   "hostApi": 2,
   "displayName": "Transcriber",
   "description": "Offline speech-to-text for voice notes. A one-shot whisper.cpp engine that bootstraps its own ffmpeg + whisper-cli + model on first use; audio never leaves your machine.",

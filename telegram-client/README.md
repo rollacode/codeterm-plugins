@@ -120,3 +120,7 @@ codeterm plugin get telegram-client
 ```
 
 The Orchestrator runs the source-only gates above after merging. The Worker does not run a real send. The owner authorizes the specific live test and verifies the one live message and one `sent` ledger record from the owner's own account.
+
+## Asynchronous host I/O
+
+Subprocess, filesystem and credential waits yield through `host.io` on Domios 1.19.0. `login-status` reads the active login log or recorded session state without launching `tg`; `health` explicitly checks existing authorization and updates that state. If no state is known after upgrading, run `health` once. Successful login is recognized from the login process’s own JSON result, without a new MTProto connection on each poll. Outbox file locks span suspended operations and writes are atomic.

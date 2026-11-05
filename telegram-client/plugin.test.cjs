@@ -1,3 +1,4 @@
+require("../scripts/test-host-io.cjs").installTestHostIo();
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -180,6 +181,7 @@ function mockHost(options = {}) {
 
   function exec(optsOrJson) {
     const opts = typeof optsOrJson === "string" ? JSON.parse(optsOrJson) : optsOrJson;
+    if (commandArgs(opts.args || [])[0] === "send" && options.onSendStart) options.onSendStart(join(root, "outbox.json"));
     return JSON.stringify(responseFor(opts));
   }
   exec.start = (opts) => {
@@ -1825,7 +1827,7 @@ test("host body captions reach file uploads unchanged including option-looking t
 });
 
 test("mixed inline and host bodies are refused before any host operation", () => {
-  globalThis.host = new Proxy({}, { get: () => { throw new Error("host must not be used"); } });
+  globalThis.host = new Proxy({}, { get: (target, key) => { if (key === "io") return target.io; throw new Error("host must not be used"); } });
   for (const [verb, args] of [
     ["send", ["id:4242", "--key", "mixed", "inline"]],
     ["send-to", ["id:4242", "inline"]],
@@ -1836,6 +1838,49 @@ test("mixed inline and host bodies are refused before any host operation", () =>
       assert.match(plugin.onAgentCommand({ sessionId: "pad", verb, args, body }).error, /cannot be combined with a body source/);
     }
   }
+});
+
+test("login-status reads session state and pending logs without starting tg", () => {
+  const env=mockHost();
+  try {
+    configureLoggedInFixture(env);
+    env.secrets.login_state=JSON.stringify({state:"logged-in",currentAccount:"default"});
+    const before=env.calls.length;
+    for(let i=0;i<3;i++)assert.equal(JSON.parse(plugin.onAgentCommand({sessionId:"poll",verb:"login-status",args:[]}).result).state,"logged-in");
+    assert.equal(env.calls.length,before);
+    assert.equal(plugin.__test_loginIdentity(envelope({id:777})+"QR log").id,777);
+    assert.equal(plugin.__test_loginIdentity("QR only"),null);
+  } finally {env.cleanup();}
+});
+
+test("an outbox lock spans yielded reads and refuses a concurrent send before a process starts", () => {
+  const env=mockHost();
+  try {
+    configureLoggedInFixture(env);
+    const locks=new Set();
+    const resolve=r=> {
+      if(r.op==="lockFile"){if(locks.has(r.path))return null;locks.add(r.path);return r.path;}
+      if(r.op==="unlockFile"){locks.delete(r.path);return true;}
+      if(r.op==="exec")return JSON.parse(host.exec(JSON.stringify(r.options)));
+      if(r.op==="secretGet")return host.secretGet(r.name);
+      if(r.op==="secretSet")return host.secretSet(r.name,r.value);
+      const op=r.op==="writeFileAtomic"?"writeFile":r.op;
+      return host.fs[op](r.path,...(r.args||[]));
+    };
+    const advance=(steps,next)=>{while(!next.done)next=steps.next(resolve(next.value));return next.value;};
+    host.io.run=steps=>steps;
+    const ctx={sessionId:"race",verb:"send",args:["id:4242","--key","concurrent","hello"]};
+    const first=plugin.onAgentCommand(ctx);let pending=first.next();
+    while(!pending.done && locks.size===0)pending=first.next(resolve(pending.value));
+    assert.equal(locks.size,1);
+    const before=env.calls.length;
+    const second=plugin.onAgentCommand(ctx);
+    assert.match(advance(second,second.next()).error,/busy:/);
+    assert.equal(env.calls.length,before);
+    assert.equal(JSON.parse(advance(first,pending).result).status,"sent");
+    assert.equal(locks.size,0);
+    assert.equal(env.calls.filter(call=>call.words[0]==="send").length,1);
+  } finally {env.cleanup();}
 });
 
 async function main() {

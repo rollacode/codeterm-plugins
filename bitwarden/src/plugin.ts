@@ -1,10 +1,12 @@
+import { SERVE_PROCESS } from "./serve-process";
+import { defineProviderIo, ioValue, type HostIoSteps } from "@codeterm/plugin-sdk";
 import { METADATA_PROCESS } from "./metadata-process";
 // Bitwarden secret-backend plugin (capability: secret_backend).
 // Authored in TypeScript against @codeterm/plugin-sdk and compiled to a
 // QuickJS-compatible plugin.js by scripts/build-plugin.mjs.
 //
 // Ports the native `secrets/bitwarden/` Rust impl to TS-on-QuickJS. Talks to the
-// `bw` CLI via host.exec (always --nointeraction --response; secrets via env/stdin,
+// `bw` CLI via host.io.exec (always --nointeraction --response; secrets via env/stdin,
 // never argv). Session/master-password persist in the per-plugin secret bucket
 // (host.secret*). Returns {ok}/{error:{kind,...}} envelopes the JsSecretBackend
 // adapter maps onto the core SecretStore trait; secretStatus returns a bare
@@ -36,16 +38,16 @@ const BW_STATUS_TIMEOUT_MS = 8_000;
 
 // The credential auto-unlock uses, or null. Signing in always stores it, so the
 // only reason this is empty is that the user has never signed in or has locked.
-function rememberedMasterPassword(): string | null {
-  const master = host.secretGet(K_MASTER);
+function* rememberedMasterPassword(): HostIoSteps<string | null> {
+  const master = (yield* ioValue<string | null>({ op: "secretGet", name: K_MASTER }));
   return master && master.length ? master : null;
 }
 
 // A locked vault with nothing remembered can never be opened headlessly. Saying
 // so costs one local secret read; discovering it by running bw costs the budget
 // above, twice, for an answer that was already knowable.
-function canUnlockHeadlessly(): boolean {
-  return !!rememberedMasterPassword();
+function* canUnlockHeadlessly(): HostIoSteps<boolean> {
+  return !!(yield* rememberedMasterPassword());
 }
 
 // bw's wording for "these credentials are wrong", as opposed to a network or
@@ -186,7 +188,7 @@ function serverHostAllowed(url: string, allow: string[]): boolean {
 // host so the out-of-the-box server keeps working even if the manifest read
 // fails. To use a self-hosted server, add its host to the plugin's network
 // permissions (the explicit host-permission step for a new origin).
-function effectiveAllow(): string[] {
+function* effectiveAllow(): HostIoSteps<string[]> {
   let allow: string[] = [];
   try {
     const m = host.manifest() as { permissions?: { network?: { allow?: unknown } } } | null;
@@ -197,7 +199,7 @@ function effectiveAllow(): string[] {
   }
   const def = hostOf(DEFAULT_SERVER);
   if (def && allow.indexOf(def) < 0) allow.push(def);
-  const configured = hostOf(serverUrl());
+  const configured = hostOf((yield* serverUrl()));
   if (configured && allow.indexOf(configured) < 0) allow.push(configured);
   return allow;
 }
@@ -285,9 +287,88 @@ function bwExecOpts(args: string[], opts: BwOpts): string {
   return JSON.stringify({ bin: bin, args: commandArgs, env: env, stdin: opts.stdin || null, timeoutMs: opts.timeoutMs || BW_TIMEOUT_MS });
 }
 
-function bw(args: string[], opts?: BwOpts): BwResponse {
+// No item values live in this state. The marker contains only the bound port.
+let serve: { job: string; marker: string; port?: number; session: string; epoch: number } | null = null;
+let serveEpoch = 0;
+let vaultRevision = 0;
+let serveDisabledUntil = 0;
+
+function* stopServe(): HostIoSteps<void> {
+  ++serveEpoch;
+  const previous = serve;
+  serve = null;
+  if (!previous) return;
+  try { if (previous.job) host.exec.close(previous.job); } catch { }
+  try { yield* host.io.fs.removeFile(previous.marker); } catch { }
+}
+
+function* startServe(session: string): HostIoSteps<void> {
+  if (Date.now() < serveDisabledUntil || typeof host.dataDir !== "function") return;
+  if (serve && serve.session !== session) yield* stopServe();
+  if (!serve) {
+    const epoch = serveEpoch;
+    const root = host.dataDir() + "/bitwarden";
+    const marker = root + "/bw-serve-" + Date.now() + "-" + Math.random().toString(16).slice(2) + ".json";
+    // Reserve before yielding: concurrent reads use the CLI until this startup completes.
+    const pending = { job: "", marker, session, epoch, port: undefined as number | undefined };
+    serve = pending;
+    try {
+      if (!(yield* host.io.fs.makeDirs(root))) throw new Error("serve storage unavailable");
+      const env: Record<string, string> = { BW_SESSION: session, CT_BW_READY: marker };
+      const path = expandedBwPath();
+      if (path) env.PATH = path;
+      if (serve !== pending || serveEpoch !== epoch) return;
+      const started = (yield { op: "execStart", options: { bin: "node", args: ["-e", SERVE_PROCESS], env, timeoutMs: 24 * 60 * 60 * 1000 } }) as { jobId?: string };
+      if (!started.jobId) throw new Error("serve start failed");
+      pending.job = started.jobId;
+      if (serve !== pending || serveEpoch !== epoch) { host.exec.close(pending.job); return; }
+    } catch {
+      try { if (pending.job) host.exec.close(pending.job); } catch { }
+      try { yield* host.io.fs.removeFile(marker); } catch { }
+      if (serve === pending) { serve = null; serveDisabledUntil = Date.now() + 30000; }
+      return;
+    }
+  }
+}
+
+function* serveGet(name: string, session: string): HostIoSteps<BwResponse | null> {
+  yield* startServe(session);
+  const current = serve;
+  if (!current || !current.job) return null;
+  const job = host.exec.poll(current.job);
+  if (job.done) { yield* stopServe(); return null; }
+  if (!current.port) {
+    const ready = yield* host.io.fs.readJson<{ port?: number }>(current.marker);
+    if (ready && Number.isInteger(ready.port) && ready.port! > 0 && ready.port! <= 65535) current.port = ready.port;
+    else return null;
+  }
+  try {
+    // Refresh the idle lease. No values, names or session tokens are written.
+    yield* host.io.fs.writeFile(current.marker, JSON.stringify({ port: current.port }));
+    const response = yield* host.io.fetch({ url: "http://127.0.0.1:" + current.port + "/object/item/" + encodeURIComponent(name), timeoutMs: 2000 });
+    if (serve !== current || serveEpoch !== current.epoch) return { success: false, message: "Vault is locked." };
+    if (response.error) throw new Error("serve unavailable");
+    const body = JSON.parse(response.body || "{}");
+    if (typeof body.success !== "boolean") throw new Error("invalid serve response");
+    if (!body.success && mapBwError(body.message).kind === "backend") throw new Error("serve unavailable");
+    return body;
+  } catch {
+    if (serve === current) yield* stopServe();
+    serveDisabledUntil = Date.now() + 30000;
+    return null;
+  }
+}
+
+function* bw(args: string[], opts?: BwOpts): HostIoSteps<BwResponse> {
   opts = opts || {};
-  const raw = host.exec(bwExecOpts(args, opts));
+  if (args[0] === "get" && args[1] === "item" && opts.session) {
+    const served = yield* serveGet(args[2], opts.session);
+    if (served) return served;
+  } else if (args[0] !== "status" && args[0] !== "list") {
+    yield* stopServe();
+    serveDisabledUntil = 0;
+  }
+  const raw = JSON.stringify(yield* host.io.exec(JSON.parse(bwExecOpts(args, opts))));
   let ex: BwExec;
   try { ex = JSON.parse(raw); } catch (e) { return { success: false, message: "bw exec result was not valid JSON" }; }
   return parseBwOutput(ex);
@@ -305,22 +386,22 @@ function extractSessionToken(data: unknown): string {
 let autoUnlocking = false;
 let lastRecoveryError: SecretError | null = null;
 
-function tryAutoLogin(master: string): boolean {
-  const clientId = host.secretGet(K_CLIENT_ID);
-  const clientSecret = host.secretGet(K_CLIENT_SECRET);
-  const email = host.secretGet(K_EMAIL);
+function* tryAutoLogin(master: string): HostIoSteps<boolean> {
+  const clientId = (yield* ioValue<string | null>({ op: "secretGet", name: K_CLIENT_ID }));
+  const clientSecret = (yield* ioValue<string | null>({ op: "secretGet", name: K_CLIENT_SECRET }));
+  const email = (yield* ioValue<string | null>({ op: "secretGet", name: K_EMAIL }));
   let login: BwResponse;
   let usedApiKey = false;
 
   if (clientId && clientSecret) {
     usedApiKey = true;
-    login = bw(["login", "--apikey"], {
+    login = (yield* bw(["login", "--apikey"], {
       env: { BW_CLIENTID: clientId, BW_CLIENTSECRET: clientSecret },
-    });
+    }));
   } else if (email) {
-    login = bw(["login", email, "--passwordenv", "BW_PASSWORD"], {
+    login = (yield* bw(["login", email, "--passwordenv", "BW_PASSWORD"], {
       env: { BW_PASSWORD: master },
-    });
+    }));
   } else {
     lastRecoveryError = { kind: "logged_out", message: "stored Bitwarden login identity is missing" };
     return false;
@@ -333,10 +414,10 @@ function tryAutoLogin(master: string): boolean {
   lastRecoveryError = mapBwError(login.message);
   if (isRejectedCredential(login.message)) {
     if (usedApiKey) {
-      host.secretDelete(K_CLIENT_ID);
-      host.secretDelete(K_CLIENT_SECRET);
+      (yield* ioValue<boolean>({ op: "secretDelete", name: K_CLIENT_ID }));
+      (yield* ioValue<boolean>({ op: "secretDelete", name: K_CLIENT_SECRET }));
     } else {
-      host.secretDelete(K_MASTER);
+      (yield* ioValue<boolean>({ op: "secretDelete", name: K_MASTER }));
     }
   }
   return false;
@@ -344,29 +425,29 @@ function tryAutoLogin(master: string): boolean {
 
 // Re-establish login and BW_SESSION from the local file-backed credential bucket.
 // Secrets pass through the environment only and are never logged.
-function tryAutoUnlock(): boolean {
+function* tryAutoUnlock(): HostIoSteps<boolean> {
   if (autoUnlocking) return false;
   autoUnlocking = true;
   try {
-    const master = rememberedMasterPassword();
+    const master = (yield* rememberedMasterPassword());
     if (master && master.length) {
-      const status = bwStatus();
+      const status = (yield* bwStatus());
       if (status.failure) {
         lastRecoveryError = { kind: "backend", message: status.failure.message };
         return false;
       }
-      rememberLoginIdentity(status);
-      if (status.status && status.status.status === "unauthenticated" && !tryAutoLogin(master)) {
+      (yield* rememberLoginIdentity(status));
+      if (status.status && status.status.status === "unauthenticated" && !(yield* tryAutoLogin(master))) {
         return false;
       }
-      const unlocked = bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: master } });
+      const unlocked = (yield* bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: master } }));
       if (!unlocked.success) {
         // A rejected password never starts working. Kept, it makes every later
         // call pay a doomed unlock before failing; forgotten, the next call
         // fails immediately and says to unlock interactively. A transient
         // failure is left alone so a flaky network does not wipe the credential.
         if (isRejectedCredential(unlocked.message)) {
-          host.secretDelete(K_MASTER);
+          (yield* ioValue<boolean>({ op: "secretDelete", name: K_MASTER }));
           lastRecoveryError = { kind: "locked", message: "stored Bitwarden master password was rejected" };
         } else {
           lastRecoveryError = mapBwError(unlocked.message);
@@ -378,7 +459,8 @@ function tryAutoUnlock(): boolean {
         lastRecoveryError = { kind: "backend", message: "bw unlock returned no session token" };
         return false;
       }
-      host.secretSet(K_SESSION, token);
+      (yield* ioValue<boolean>({ op: "secretSet", name: K_SESSION, value: token }));
+      yield* startServe(token);
       lastRecoveryError = null;
       return true;
     }
@@ -394,25 +476,25 @@ function tryAutoUnlock(): boolean {
 // master password is remembered, perform ONE JIT auto-unlock then retry ONCE.
 // A local guard bounds it to a single auto-unlock+retry so a persistent lock
 // cannot loop.
-function runWithSession(args: string[], stdin?: string): Envelope {
-  let session = host.secretGet(K_SESSION);
+function* runWithSession(args: string[], stdin?: string): HostIoSteps<Envelope> {
+  let session = (yield* ioValue<string | null>({ op: "secretGet", name: K_SESSION }));
   let triedUnlock = false;
   if (!session) {
-    if (!canUnlockHeadlessly()) return { error: { kind: "locked", message: LOCKED_HINT } };
-    if (!tryAutoUnlock()) return { error: lastRecoveryError || { kind: "locked", message: LOCKED_HINT } };
+    if (!(yield* canUnlockHeadlessly())) return { error: { kind: "locked", message: LOCKED_HINT } };
+    if (!(yield* tryAutoUnlock())) return { error: lastRecoveryError || { kind: "locked", message: LOCKED_HINT } };
     triedUnlock = true;
-    session = host.secretGet(K_SESSION);
+    session = (yield* ioValue<string | null>({ op: "secretGet", name: K_SESSION }));
     if (!session) return { error: { kind: "locked", message: LOCKED_HINT } };
   }
-  let r = bw(args, { session: session, stdin: stdin });
+  let r = (yield* bw(args, { session: session, stdin: stdin }));
   if (!r.success) {
     const err = mapBwError(r.message);
-    if ((err.kind === "locked" || err.kind === "logged_out") && !triedUnlock && canUnlockHeadlessly()) {
-      host.secretDelete(K_SESSION);
-      if (!tryAutoUnlock()) return { error: lastRecoveryError || err };
-      const fresh = host.secretGet(K_SESSION);
+    if ((err.kind === "locked" || err.kind === "logged_out") && !triedUnlock && (yield* canUnlockHeadlessly())) {
+      (yield* ioValue<boolean>({ op: "secretDelete", name: K_SESSION }));
+      if (!(yield* tryAutoUnlock())) return { error: lastRecoveryError || err };
+      const fresh = (yield* ioValue<string | null>({ op: "secretGet", name: K_SESSION }));
       if (fresh) {
-        r = bw(args, { session: fresh, stdin: stdin });
+        r = (yield* bw(args, { session: fresh, stdin: stdin }));
         if (!r.success) return { error: mapBwError(r.message) };
         return { ok: unwrapData(r.data) };
       }
@@ -434,10 +516,10 @@ function settings(): BitwardenSettings {
   }
 }
 
-function serverUrl(): string {
+function* serverUrl(): HostIoSteps<string> {
   const s = settings();
   if (s.serverUrl && s.serverUrl.length) return s.serverUrl;
-  const u = host.secretGet("server_url");
+  const u = (yield* ioValue<string | null>({ op: "secretGet", name: "server_url" }));
   return u && u.length ? u : DEFAULT_SERVER;
 }
 
@@ -473,32 +555,30 @@ function bwExecToStatusResult(ex: BwExec): StatusResult {
   return { status: unwrapData(resp.data) as BwStatus };
 }
 
-function bwStatus(): StatusResult {
-  const session = host.secretGet(K_SESSION);
-  const raw = host.exec(
-    bwExecOpts(["status"], { session: session || undefined, timeoutMs: BW_STATUS_TIMEOUT_MS }),
-  );
+function* bwStatus(): HostIoSteps<StatusResult> {
+  const session = (yield* ioValue<string | null>({ op: "secretGet", name: K_SESSION }));
+  const raw = JSON.stringify(yield* host.io.exec(JSON.parse(bwExecOpts(["status"], { session: session || undefined, timeoutMs: BW_STATUS_TIMEOUT_MS }))));
   let ex: BwExec;
   try { ex = JSON.parse(raw); } catch (e) { return { failure: { kind: "exec_error", message: "bw exec result was not valid JSON" } }; }
   return bwExecToStatusResult(ex);
 }
 
-function rememberLoginIdentity(res: StatusResult): void {
+function* rememberLoginIdentity(res: StatusResult): HostIoSteps<void> {
   const email = res.status && res.status.userEmail;
-  if (email) host.secretSet(K_EMAIL, email);
+  if (email) (yield* ioValue<boolean>({ op: "secretSet", name: K_EMAIL, value: email }));
 }
 
 // --- SecretStore trait surface (called by JsSecretBackend) ---
 
 // Map a raw bw status result into the host's StoreStatus shape. Shared by the
-// sync secretStatus and the async statusStart/statusPoll path. On failure the
+// secretStatus and the statusStart/statusPoll path. On failure the
 // real cause (R3) is surfaced in `reason` rather than a generic string.
-function statusFromBw(res: StatusResult): SecretStatus {
-  const endpoint = serverUrl();
+function* statusFromBw(res: StatusResult): HostIoSteps<SecretStatus> {
+  const endpoint = (yield* serverUrl());
   if (res.failure) return { status: "unavailable", reason: res.failure.message };
   const s = res.status;
   if (!s) return { status: "unavailable", reason: "bw status returned no data" };
-  rememberLoginIdentity(res);
+  (yield* rememberLoginIdentity(res));
   if (s.status === "unlocked") {
     return { status: "unlocked", user: s.userEmail || null, transient: false, endpoint: s.serverUrl || endpoint };
   }
@@ -506,18 +586,18 @@ function statusFromBw(res: StatusResult): SecretStatus {
   return { status: "logged_out", endpoint: endpoint };
 }
 
-// Sync status probe. If the vault reports locked but a master password is
+// Yielding status probe. If the vault reports locked but a master password is
 // remembered, attempt one JIT auto-unlock so status reflects the truly-reachable
 // state. Loop-guarded (tryAutoUnlock is single-flight; unlocked is terminal).
-function secretStatus(): SecretStatus {
-  let st = statusFromBw(bwStatus());
+function* secretStatus(): HostIoSteps<SecretStatus> {
+  let st = (yield* statusFromBw((yield* bwStatus())));
   // Locked with nothing to unlock from is a terminal answer, not a reason to
   // spend two more bw invocations arriving at the same place.
-  if (st.status === "locked" && !canUnlockHeadlessly()) {
+  if (st.status === "locked" && !(yield* canUnlockHeadlessly())) {
     return { status: "locked", endpoint: st.endpoint, reason: LOCKED_HINT };
   }
-  if ((st.status === "locked" || st.status === "logged_out") && canUnlockHeadlessly()) {
-    if (tryAutoUnlock()) st = statusFromBw(bwStatus());
+  if ((st.status === "locked" || st.status === "logged_out") && (yield* canUnlockHeadlessly())) {
+    if ((yield* tryAutoUnlock())) st = (yield* statusFromBw((yield* bwStatus())));
     else if (lastRecoveryError) {
       st = { status: "unavailable", endpoint: st.endpoint, reason: lastRecoveryError.message || lastRecoveryError.kind };
     }
@@ -525,13 +605,14 @@ function secretStatus(): SecretStatus {
   return st;
 }
 
-function secretUnlock(creds: SecretCreds): Envelope<true> {
+function* secretUnlock(creds: SecretCreds): HostIoSteps<Envelope<true>> {
+  ++vaultRevision;
   creds = creds || {};
   const hasPw = creds.masterPassword && creds.masterPassword.length;
   if (!hasPw && !creds.apiKeyClientId) {
     // No input: honour the `mem secret unlock` no-arg contract by re-unlocking
     // from persisted creds. Only when nothing is persisted is it a bad request.
-    if (canUnlockHeadlessly() && tryAutoUnlock()) return { ok: true };
+    if ((yield* canUnlockHeadlessly()) && (yield* tryAutoUnlock())) return { ok: true };
     if (lastRecoveryError) return { error: lastRecoveryError };
     return { error: { kind: "bad_request", message: "master password (or API-key creds) required" } };
   }
@@ -540,48 +621,48 @@ function secretUnlock(creds: SecretCreds): Envelope<true> {
     // password — saying so beats a confusing backend error from bw.
     return { error: { kind: "bad_request", message: "master password is required to unlock, even with API-key credentials" } };
   }
-  const server = serverUrl();
+  const server = (yield* serverUrl());
   if (!isValidHttpUrl(server)) {
     return { error: { kind: "bad_request", message: "invalid bitwarden server URL: " + server } };
   }
-  if (!serverHostAllowed(server, effectiveAllow())) {
+  if (!serverHostAllowed(server, (yield* effectiveAllow()))) {
     return { error: { kind: "bad_request", message: "server host not permitted by plugin network permissions: " + hostOf(server) } };
   }
 
-  let statusResult = bwStatus();
-  rememberLoginIdentity(statusResult);
+  let statusResult = (yield* bwStatus());
+  (yield* rememberLoginIdentity(statusResult));
   let st = statusResult.status;
   let loggedIn = !!st && st.status !== "unauthenticated";
   const currentServer = (st && st.serverUrl) || "";
   if (loggedIn && currentServer && currentServer !== server) {
-    bw(["logout"]);
-    host.secretDelete(K_SESSION);
+    (yield* bw(["logout"]));
+    (yield* ioValue<boolean>({ op: "secretDelete", name: K_SESSION }));
     loggedIn = false;
   }
   const serverChanged = currentServer !== server;
   if (serverChanged) {
-    const cfg = bw(["config", "server", server]);
+    const cfg = (yield* bw(["config", "server", server]));
     if (!cfg.success) return { error: { kind: "backend", message: "could not point bw at " + server } };
   }
 
   if (serverChanged) {
-    statusResult = bwStatus();
-    rememberLoginIdentity(statusResult);
+    statusResult = (yield* bwStatus());
+    (yield* rememberLoginIdentity(statusResult));
     st = statusResult.status;
     loggedIn = !!st && st.status !== "unauthenticated";
   }
   if (!loggedIn) {
     let login: BwResponse;
     if (creds.apiKeyClientId && creds.apiKeyClientSecret) {
-      login = bw(["login", "--apikey"], { env: { BW_CLIENTID: creds.apiKeyClientId as string, BW_CLIENTSECRET: creds.apiKeyClientSecret as string } });
+      login = (yield* bw(["login", "--apikey"], { env: { BW_CLIENTID: creds.apiKeyClientId as string, BW_CLIENTSECRET: creds.apiKeyClientSecret as string } }));
       if (login.success) {
-        host.secretSet(K_CLIENT_ID, creds.apiKeyClientId as string);
-        host.secretSet(K_CLIENT_SECRET, creds.apiKeyClientSecret as string);
+        (yield* ioValue<boolean>({ op: "secretSet", name: K_CLIENT_ID, value: creds.apiKeyClientId as string }));
+        (yield* ioValue<boolean>({ op: "secretSet", name: K_CLIENT_SECRET, value: creds.apiKeyClientSecret as string }));
       }
     } else if (creds.email) {
       let args = ["login", creds.email, "--passwordenv", "BW_PASSWORD"];
       if (creds.twoFactorToken) args = args.concat(["--method", "0", "--code", creds.twoFactorToken as string]);
-      login = bw(args, { env: { BW_PASSWORD: creds.masterPassword as string } });
+      login = (yield* bw(args, { env: { BW_PASSWORD: creds.masterPassword as string } }));
     } else {
       return { error: { kind: "bad_request", message: "either email + master_password or api_key_* required" } };
     }
@@ -590,49 +671,53 @@ function secretUnlock(creds: SecretCreds): Envelope<true> {
     }
   }
 
-  const unlocked = bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: creds.masterPassword as string } });
+  const unlocked = (yield* bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: creds.masterPassword as string } }));
   if (!unlocked.success) return { error: mapBwError(unlocked.message) };
   const token = extractSessionToken(unlocked.data);
   if (!token) return { error: { kind: "backend", message: "bw unlock returned empty session" } };
 
-  host.secretSet(K_SESSION, token);
-  host.secretSet(K_MASTER, creds.masterPassword as string);
-  if (!creds.apiKeyClientId && creds.email) host.secretSet(K_EMAIL, creds.email);
+  (yield* ioValue<boolean>({ op: "secretSet", name: K_SESSION, value: token }));
+  yield* startServe(token);
+  (yield* ioValue<boolean>({ op: "secretSet", name: K_MASTER, value: creds.masterPassword as string }));
+  if (!creds.apiKeyClientId && creds.email) (yield* ioValue<boolean>({ op: "secretSet", name: K_EMAIL, value: creds.email }));
   return { ok: true };
 }
 
-function secretLock(): Envelope<true> {
-  bw(["lock"]);
-  host.secretDelete(K_SESSION);
+function* secretLock(): HostIoSteps<Envelope<true>> {
+  ++vaultRevision;
+  (yield* bw(["lock"]));
+  (yield* ioValue<boolean>({ op: "secretDelete", name: K_SESSION }));
   return { ok: true };
 }
 
-function secretLogout(): Envelope<true> {
-  bw(["logout"]);
-  clearStoredCredentials();
+function* secretLogout(): HostIoSteps<Envelope<true>> {
+  ++vaultRevision;
+  (yield* bw(["logout"]));
+  (yield* clearStoredCredentials());
   return { ok: true };
 }
 
-function clearStoredCredentials(): void {
-  host.secretDelete(K_SESSION);
-  host.secretDelete(K_MASTER);
-  host.secretDelete(K_EMAIL);
-  host.secretDelete(K_CLIENT_ID);
-  host.secretDelete(K_CLIENT_SECRET);
+function* clearStoredCredentials(): HostIoSteps<void> {
+  (yield* ioValue<boolean>({ op: "secretDelete", name: K_SESSION }));
+  (yield* ioValue<boolean>({ op: "secretDelete", name: K_MASTER }));
+  (yield* ioValue<boolean>({ op: "secretDelete", name: K_EMAIL }));
+  (yield* ioValue<boolean>({ op: "secretDelete", name: K_CLIENT_ID }));
+  (yield* ioValue<boolean>({ op: "secretDelete", name: K_CLIENT_SECRET }));
 }
 
-function resetConnection(): Envelope<true> {
-  const server = serverUrl();
+function* resetConnection(): HostIoSteps<Envelope<true>> {
+  ++vaultRevision;
+  const server = (yield* serverUrl());
   if (!isValidHttpUrl(server)) {
     return { error: { kind: "bad_request", message: "invalid bitwarden server URL: " + server } };
   }
-  if (!serverHostAllowed(server, effectiveAllow())) {
+  if (!serverHostAllowed(server, (yield* effectiveAllow()))) {
     return { error: { kind: "bad_request", message: "server host not permitted by plugin network permissions: " + hostOf(server) } };
   }
 
-  bw(["logout"]);
-  clearStoredCredentials();
-  const configured = bw(["config", "server", server]);
+  (yield* bw(["logout"]));
+  (yield* clearStoredCredentials());
+  const configured = (yield* bw(["config", "server", server]));
   if (!configured.success) {
     return { error: { kind: "backend", message: "could not point bw at " + server } };
   }
@@ -689,8 +774,8 @@ function toRef(c: CipherItem): SecretRefOut {
   };
 }
 
-function findByName(name: string): Envelope<CipherItem> {
-  const r = runWithSession(["list", "items", "--search", name]);
+function* findByName(name: string): HostIoSteps<Envelope<CipherItem>> {
+  const r = (yield* runWithSession(["list", "items", "--search", name]));
   if ("error" in r) return r;
   const exact = ((r.ok as CipherItem[]) || []).filter((c) => c.type === 1 && c.name.toLowerCase() === name.toLowerCase());
   if (exact.length === 0) return { error: { kind: "not_found" } };
@@ -700,68 +785,70 @@ function findByName(name: string): Envelope<CipherItem> {
 
 interface FolderItem { id: string; name: string }
 
-function resolveFolderId(name: string | null | undefined): Envelope<string | null> {
+function* resolveFolderId(name: string | null | undefined): HostIoSteps<Envelope<string | null>> {
   if (!name) return { ok: null };
-  const r = runWithSession(["list", "folders"]);
+  const r = (yield* runWithSession(["list", "folders"]));
   if ("error" in r) return r;
   const f = ((r.ok as FolderItem[]) || []).find((x) => x.name && x.name.toLowerCase() === name.toLowerCase());
   return { ok: f ? f.id : null };
 }
 
-function resolveOrCreateFolder(name: string): Envelope<string | null> {
-  const existing = resolveFolderId(name);
+function* resolveOrCreateFolder(name: string): HostIoSteps<Envelope<string | null>> {
+  const existing = (yield* resolveFolderId(name));
   if ("error" in existing) return existing;
   if (existing.ok) return existing;
   const encoded = base64Encode(JSON.stringify({ name: name }));
-  const r = runWithSession(["create", "folder", encoded]);
+  const r = (yield* runWithSession(["create", "folder", encoded]));
   if ("error" in r) return r;
   const created = r.ok as FolderItem | null;
   return { ok: (created && created.id) || null };
 }
 
-function secretSave(req: SecretSaveRequest): Envelope {
+function* secretSave(req: SecretSaveRequest): HostIoSteps<Envelope> {
   if (!req.name) return { error: { kind: "bad_request", message: "name required" } };
   if (!req.value) return { error: { kind: "bad_request", message: "value must not be empty" } };
-  const existing = findByName(req.name);
+  const existing = (yield* findByName(req.name));
   const existingItem = ("ok" in existing && existing.ok) || null;
   if (existingItem && !req.overwrite) return { error: { kind: "already_exists" } };
 
   let folderId: string | null = null;
   if (req.folder) {
-    const f = resolveOrCreateFolder(req.folder);
+    const f = (yield* resolveOrCreateFolder(req.folder));
     if ("error" in f) return f;
     folderId = f.ok;
   }
   const cipher = buildLoginCipher(req, existingItem ? existingItem.id : null, folderId);
   const encoded = base64Encode(JSON.stringify(cipher));
   const r = existingItem
-    ? runWithSession(["edit", "item", existingItem.id, encoded])
-    : runWithSession(["create", "item", encoded]);
+    ? (yield* runWithSession(["edit", "item", existingItem.id, encoded]))
+    : (yield* runWithSession(["create", "item", encoded]));
   if ("error" in r) return r;
-  runWithSession(["sync"]);
+  (yield* runWithSession(["sync"]));
   return { ok: toRef(r.ok as CipherItem) };
 }
 
-function secretGetItem(nameOrId: string): Envelope {
-  const r = runWithSession(["get", "item", nameOrId]);
+function* secretGetItem(nameOrId: string): HostIoSteps<Envelope> {
+  const revision = vaultRevision;
+  const r = (yield* runWithSession(["get", "item", nameOrId]));
   if ("error" in r) return r;
+  if (revision !== vaultRevision) return { error: { kind: "locked" } };
   const item = r.ok as CipherItem;
   const value = item.login && item.login.password;
   if (value === undefined || value === null) return { error: { kind: "backend", message: "item has no login.password field" } };
   return { ok: { item_id: item.id, name: item.name, value: value, notes: item.notes || null } };
 }
 
-function listMetadata(filter?: SecretListFilter): Envelope {
+function* listMetadata(filter?: SecretListFilter): HostIoSteps<Envelope> {
   filter = filter || {};
   let args = ["list", "items"];
   if (filter.organization) args = args.concat(["--organizationid", filter.organization]);
   if (filter.collection) args = args.concat(["--collectionid", filter.collection]);
-  const r = runWithSession(args);
+  const r = (yield* runWithSession(args));
   if ("error" in r) return r;
   let items = metadataRefs(r.ok);
   if (!items) return UNEXPECTED_LIST;
   if (filter.folder) {
-    const fid = resolveFolderId(filter.folder);
+    const fid = (yield* resolveFolderId(filter.folder));
     if ("error" in fid) return fid;
     items = items.filter((c) => c.folder === (fid.ok || null));
   }
@@ -770,10 +857,10 @@ function listMetadata(filter?: SecretListFilter): Envelope {
   return { ok: items };
 }
 
-function searchMetadata(query: string): Envelope {
+function* searchMetadata(query: string): HostIoSteps<Envelope> {
   const q = (query || "").trim();
   if (!q) return { error: { kind: "bad_request", message: "query must not be empty" } };
-  const r = runWithSession(["list", "items", "--search", q]);
+  const r = (yield* runWithSession(["list", "items", "--search", q]));
   if ("error" in r) return r;
   const items = metadataRefs(r.ok);
   return items ? { ok: items } : UNEXPECTED_LIST;
@@ -787,41 +874,41 @@ function metadataCall(run: () => Envelope): Envelope {
   }
 }
 
-function secretList(filter?: SecretListFilter): Envelope {
-  return metadataCall(() => listMetadata(filter));
+function* secretList(filter?: SecretListFilter): HostIoSteps<Envelope> {
+  try { return (yield* listMetadata(filter)); } catch { return { error: { kind: "backend", message: "bw metadata request failed" } }; }
 }
 
-function secretSearch(query: string): Envelope {
-  return metadataCall(() => searchMetadata(query));
+function* secretSearch(query: string): HostIoSteps<Envelope> {
+  try { return (yield* searchMetadata(query)); } catch { return { error: { kind: "backend", message: "bw metadata request failed" } }; }
 }
 
-function secretDelete(nameOrId: string): Envelope<true> {
-  const item = runWithSession(["get", "item", nameOrId]);
+function* secretDelete(nameOrId: string): HostIoSteps<Envelope<true>> {
+  const item = (yield* runWithSession(["get", "item", nameOrId]));
   if ("error" in item) return item;
-  const r = runWithSession(["delete", "item", (item.ok as CipherItem).id, "--permanent"]);
+  const r = (yield* runWithSession(["delete", "item", (item.ok as CipherItem).id, "--permanent"]));
   if ("error" in r) return r;
-  runWithSession(["sync"]);
+  (yield* runWithSession(["sync"]));
   return { ok: true };
 }
 
 interface OrgItem { id: string; name: string; organizationId?: string | null }
 
-function secretOrganizations(): Envelope {
-  const r = runWithSession(["list", "organizations"]);
+function* secretOrganizations(): HostIoSteps<Envelope> {
+  const r = (yield* runWithSession(["list", "organizations"]));
   if ("error" in r) return r;
   return { ok: ((r.ok as OrgItem[]) || []).map((v) => ({ id: v.id, name: v.name })) };
 }
 
-function secretCollections(orgId?: string): Envelope {
+function* secretCollections(orgId?: string): HostIoSteps<Envelope> {
   let args = ["list", "collections"];
   if (orgId) args = args.concat(["--organizationid", orgId]);
-  const r = runWithSession(args);
+  const r = (yield* runWithSession(args));
   if ("error" in r) return r;
   return { ok: ((r.ok as OrgItem[]) || []).map((v) => ({ id: v.id, name: v.name, organization_id: v.organizationId || null })) };
 }
 
-function secretSync(): Envelope<true> {
-  const r = runWithSession(["sync"]);
+function* secretSync(): HostIoSteps<Envelope<true>> {
+  const r = (yield* runWithSession(["sync"]));
   if ("error" in r) return r;
   return { ok: true };
 }
@@ -834,16 +921,16 @@ function secretInit(): Envelope<true> {
 }
 
 // --- async status (non-blocking; for the iframe load path) ---
-// `bw status` can take up to 30s (self-hosted). The synchronous secretStatus
-// holds the plugin VM for that whole time, which blocks the iframe on mount.
+// All process waits yield through host.io. The existing UI job/poll protocol
+// remains compatible with the iframe.
 // statusStart/statusPoll move it onto the host's exec job queue: each call is
 // sub-millisecond, the iframe polls, and the panel stays responsive.
 
-function statusStart(): { jobId?: string; error?: string } {
-  const session = host.secretGet(K_SESSION);
+function* statusStart(): HostIoSteps<{ jobId?: string; error?: string }> {
+  const session = (yield* ioValue<string | null>({ op: "secretGet", name: K_SESSION }));
   const optsJson = bwExecOpts(["status"], { session: session || undefined });
   let res: { jobId?: string; error?: string };
-  try { res = JSON.parse(host.execStart(optsJson)); } catch (e) { return { error: "exec start: " + e }; }
+  try { res = JSON.parse(JSON.stringify((yield* ioValue<{ jobId?: string; error?: string }>({ op: "execStart", options: JSON.parse(optsJson) })))); } catch (e) { return { error: "exec start: " + e }; }
   if (res.error) return { error: res.error };
   if (res.jobId) statusFlows[res.jobId] = { hostJobId: res.jobId, phase: "status" };
   return { jobId: res.jobId };
@@ -857,9 +944,9 @@ interface StatusFlow {
 
 const statusFlows: Record<string, StatusFlow> = {};
 
-function startFlowJob(flowId: string, phase: StatusFlow["phase"], args: string[], opts: BwOpts, usedApiKey?: boolean): string | null {
+function* startFlowJob(flowId: string, phase: StatusFlow["phase"], args: string[], opts: BwOpts, usedApiKey?: boolean): HostIoSteps<string | null> {
   let started: { jobId?: string; error?: string };
-  try { started = JSON.parse(host.execStart(bwExecOpts(args, opts))); } catch (e) {
+  try { started = JSON.parse(JSON.stringify((yield* ioValue<{ jobId?: string; error?: string }>({ op: "execStart", options: JSON.parse(bwExecOpts(args, opts)) })))); } catch (e) {
     lastRecoveryError = { kind: "backend", message: "exec start: " + e };
     return null;
   }
@@ -871,42 +958,42 @@ function startFlowJob(flowId: string, phase: StatusFlow["phase"], args: string[]
   return started.jobId;
 }
 
-function startFlowLogin(flowId: string, master: string): boolean {
-  const clientId = host.secretGet(K_CLIENT_ID);
-  const clientSecret = host.secretGet(K_CLIENT_SECRET);
-  const email = host.secretGet(K_EMAIL);
+function* startFlowLogin(flowId: string, master: string): HostIoSteps<boolean> {
+  const clientId = (yield* ioValue<string | null>({ op: "secretGet", name: K_CLIENT_ID }));
+  const clientSecret = (yield* ioValue<string | null>({ op: "secretGet", name: K_CLIENT_SECRET }));
+  const email = (yield* ioValue<string | null>({ op: "secretGet", name: K_EMAIL }));
   if (clientId && clientSecret) {
-    return !!startFlowJob(flowId, "login", ["login", "--apikey"], {
+    return !!(yield* startFlowJob(flowId, "login", ["login", "--apikey"], {
       env: { BW_CLIENTID: clientId, BW_CLIENTSECRET: clientSecret },
-    }, true);
+    }, true));
   }
   if (email) {
-    return !!startFlowJob(flowId, "login", ["login", email, "--passwordenv", "BW_PASSWORD"], {
+    return !!(yield* startFlowJob(flowId, "login", ["login", email, "--passwordenv", "BW_PASSWORD"], {
       env: { BW_PASSWORD: master },
-    }, false);
+    }, false));
   }
   lastRecoveryError = { kind: "logged_out", message: "stored Bitwarden login identity is missing" };
   return false;
 }
 
-function flowFailure(flowId: string, message: string | undefined, usedApiKey?: boolean): { done: true; status: SecretStatus } {
+function* flowFailure(flowId: string, message: string | undefined, usedApiKey?: boolean): HostIoSteps<{ done: true; status: SecretStatus }> {
   lastRecoveryError = mapBwError(message);
   if (isRejectedCredential(message)) {
     if (usedApiKey) {
-      host.secretDelete(K_CLIENT_ID);
-      host.secretDelete(K_CLIENT_SECRET);
+      (yield* ioValue<boolean>({ op: "secretDelete", name: K_CLIENT_ID }));
+      (yield* ioValue<boolean>({ op: "secretDelete", name: K_CLIENT_SECRET }));
     } else {
-      host.secretDelete(K_MASTER);
+      (yield* ioValue<boolean>({ op: "secretDelete", name: K_MASTER }));
     }
   }
   delete statusFlows[flowId];
   return {
     done: true,
-    status: { status: "unavailable", endpoint: serverUrl(), reason: lastRecoveryError.message || lastRecoveryError.kind },
+    status: { status: "unavailable", endpoint: (yield* serverUrl()), reason: lastRecoveryError.message || lastRecoveryError.kind },
   };
 }
 
-function statusPoll(jobId: string): { done: boolean; status?: SecretStatus; error?: string } {
+function* statusPoll(jobId: string): HostIoSteps<{ done: boolean; status?: SecretStatus; error?: string }> {
   if (!jobId) return { done: true, error: "no jobId" };
   const flow = statusFlows[jobId] || { hostJobId: jobId, phase: "status" as const };
   let p: BwExec & { done?: boolean };
@@ -918,36 +1005,37 @@ function statusPoll(jobId: string): { done: boolean; status?: SecretStatus; erro
   const response = parseBwOutput(p);
   if (flow.phase === "login") {
     if (!response.success && (response.message || "").toLowerCase().indexOf("already logged in") < 0) {
-      return flowFailure(jobId, response.message, flow.usedApiKey);
+      return (yield* flowFailure(jobId, response.message, flow.usedApiKey));
     }
-    const master = rememberedMasterPassword();
-    if (!master || !startFlowJob(jobId, "unlock", ["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], {
+    const master = (yield* rememberedMasterPassword());
+    if (!master || !(yield* startFlowJob(jobId, "unlock", ["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], {
       env: { BW_PASSWORD: master || "" },
-    })) {
+    }))) {
       delete statusFlows[jobId];
-      return { done: true, status: { status: "unavailable", endpoint: serverUrl(), reason: (lastRecoveryError && (lastRecoveryError.message || lastRecoveryError.kind)) || LOCKED_HINT } };
+      return { done: true, status: { status: "unavailable", endpoint: (yield* serverUrl()), reason: (lastRecoveryError && (lastRecoveryError.message || lastRecoveryError.kind)) || LOCKED_HINT } };
     }
     return { done: false };
   }
   if (flow.phase === "unlock") {
-    if (!response.success) return flowFailure(jobId, response.message);
+    if (!response.success) return (yield* flowFailure(jobId, response.message));
     const token = extractSessionToken(response.data);
-    if (!token) return flowFailure(jobId, "bw unlock returned no session token");
-    host.secretSet(K_SESSION, token);
+    if (!token) return (yield* flowFailure(jobId, "bw unlock returned no session token"));
+    (yield* ioValue<boolean>({ op: "secretSet", name: K_SESSION, value: token }));
+    yield* startServe(token);
     lastRecoveryError = null;
     delete statusFlows[jobId];
-    return { done: true, status: { status: "unlocked", user: host.secretGet(K_EMAIL), transient: false, endpoint: serverUrl() } };
+    return { done: true, status: { status: "unlocked", user: (yield* ioValue<string | null>({ op: "secretGet", name: K_EMAIL })), transient: false, endpoint: (yield* serverUrl()) } };
   }
   const statusResult = bwExecToStatusResult(p);
-  const status = statusFromBw(statusResult);
-  if ((status.status !== "locked" && status.status !== "logged_out") || !canUnlockHeadlessly()) {
+  const status = (yield* statusFromBw(statusResult));
+  if ((status.status !== "locked" && status.status !== "logged_out") || !(yield* canUnlockHeadlessly())) {
     delete statusFlows[jobId];
     return { done: true, status };
   }
-  const master = rememberedMasterPassword() || "";
+  const master = (yield* rememberedMasterPassword()) || "";
   const started = status.status === "logged_out"
-    ? startFlowLogin(jobId, master)
-    : !!startFlowJob(jobId, "unlock", ["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: master } });
+    ? (yield* startFlowLogin(jobId, master))
+    : !!(yield* startFlowJob(jobId, "unlock", ["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: master } }));
   if (!started) {
     delete statusFlows[jobId];
     return { done: true, status: { status: "unavailable", endpoint: status.endpoint, reason: (lastRecoveryError && (lastRecoveryError.message || lastRecoveryError.kind)) || LOCKED_HINT } };
@@ -956,8 +1044,8 @@ function statusPoll(jobId: string): { done: boolean; status?: SecretStatus; erro
 }
 
 // Glance: a quick peek at the vault connection — not the unlock form.
-function renderGlance(): GlanceView {
-  const s = secretStatus();
+function* renderGlance(): HostIoSteps<GlanceView> {
+  const s = (yield* secretStatus());
   const nodes: ViewNode[] = [];
   if (s.status === "unlocked") {
     nodes.push({ kind: "badge", label: "Unlocked", tone: "ok" });
@@ -993,42 +1081,42 @@ interface ViewArgs {
 // Bridge entry for the plugin's iframe UI (capability: view). The iframe owns the
 // connection panel (status / unlock / server URL); each call lands here and is
 // routed to the plugin's own secret methods — never to arbitrary exports.
-function viewCall(method: string, args: ViewArgs): unknown {
+function* viewCall(method: string, args: ViewArgs): HostIoSteps<unknown> {
   args = args || {};
-  if (method === "status") return secretStatus();
+  if (method === "status") return (yield* secretStatus());
   // Async, non-blocking status for the iframe load path.
-  if (method === "statusStart") return statusStart();
-  if (method === "statusPoll") return statusPoll(args.jobId || "");
-  if (method === "serverUrl") return { url: serverUrl() };
+  if (method === "statusStart") return (yield* statusStart());
+  if (method === "statusPoll") return (yield* statusPoll(args.jobId || ""));
+  if (method === "serverUrl") return { url: (yield* serverUrl()) };
   if (method === "setServerUrl") {
     const url = (args.url || "").trim();
     if (url && !isValidHttpUrl(url)) return { error: "invalid server URL" };
-    host.secretSet("server_url", url);
+    (yield* ioValue<boolean>({ op: "secretSet", name: "server_url", value: url }));
     return { ok: true };
   }
   if (method === "unlock") {
-    return secretUnlock({
+    return (yield* secretUnlock({
       masterPassword: args.masterPassword,
       email: args.email,
       twoFactorToken: args.twoFactorToken,
       apiKeyClientId: args.apiKeyClientId,
       apiKeyClientSecret: args.apiKeyClientSecret,
-    } as SecretCreds);
+    } as SecretCreds));
   }
-  if (method === "resetConnection") return resetConnection();
-  if (method === "signout") return secretLogout();
+  if (method === "resetConnection") return (yield* resetConnection());
+  if (method === "signout") return (yield* secretLogout());
   if (method === "organizations") {
-    const o = secretOrganizations();
+    const o = (yield* secretOrganizations());
     return { organizations: ("ok" in o && o.ok) || [] };
   }
   if (method === "collections") {
-    const c = secretCollections(args.organization);
+    const c = (yield* secretCollections(args.organization));
     return { collections: ("ok" in c && c.ok) || [] };
   }
   return { error: "unknown view method: " + method };
 }
 
-const plugin: PluginModule = {
+const plugin = defineProviderIo({
   secretStatus,
   renderGlance,
   viewCall: viewCall as PluginModule["viewCall"],
@@ -1044,6 +1132,7 @@ const plugin: PluginModule = {
   secretCollections,
   secretSync,
   secretInit,
+  __test_stopServe: stopServe,
   // exported for parity tests (pure logic, no host.exec)
   __test_base64: base64Encode,
   __test_mapError: mapBwError,
@@ -1056,6 +1145,6 @@ const plugin: PluginModule = {
   __test_hostOf: hostOf,
   __test_serverHostAllowed: serverHostAllowed,
   __test_bwExecOpts: bwExecOpts,
-};
+}, () => host.io) satisfies PluginModule;
 
 export default plugin;

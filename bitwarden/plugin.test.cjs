@@ -1,3 +1,4 @@
+require("../scripts/test-host-io.cjs").installTestHostIo();
 // Plugin-side tests for the Bitwarden secret-backend plugin.
 // Run: npx tsx plugins/bitwarden/plugin.test.cjs
 //
