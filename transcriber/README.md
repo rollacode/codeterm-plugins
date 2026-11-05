@@ -53,3 +53,7 @@ are no credentials to store.
 Just record a voice note. On the first one the plugin installs whatever is missing
 (this can take a while for the model download) and transcribes; subsequent notes are
 fast. The glance view's "Set up engine + model" button pre-warms everything ahead of time.
+
+## Asynchronous host I/O
+
+Process and filesystem waits yield through `host.io` on Domios 1.19.0, including ffmpeg, whisper-cli, model/dependency downloads and remote uploads. Existing progress and job-control handles remain short synchronous host operations. A shared bootstrap lock protects dependency/model installation across suspended calls; transcription jobs use unique temporary paths.

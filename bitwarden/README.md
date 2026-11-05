@@ -87,3 +87,7 @@ CLI envelope and must never be returned as that host envelope. Metadata keys
 are `item_id`, `name`, `folder`, `organization`, `collection`, and `last_modified`
 (Unix milliseconds). `bitwarden/tests/host-1.15.2.test.cjs` executes the pinned
 host invocation helper against the shipped bundle and checks this decode shape.
+
+## Asynchronous host I/O
+
+Reads reuse a plugin-owned `bw serve` process on a random `127.0.0.1` port. The process receives the unlocked session through its environment; no secret item values are cached or written to the lifecycle marker. Cold startup runs in the background and reads use the async CLI fallback until ready. Lock, logout, unlock, sync and mutations invalidate the old server. A five-minute idle lease and a host-owned process job bound leftovers after unload. Origin protection remains enabled. Requires Domios 1.19.0.

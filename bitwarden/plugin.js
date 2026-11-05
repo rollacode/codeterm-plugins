@@ -95,6 +95,68 @@ function run() {
 try { run(); } catch { fail('bw metadata process failed'); }
 `;
 
+// bitwarden/src/serve-process.ts
+var SERVE_PROCESS = String.raw`
+const { spawn } = require('node:child_process');
+const { writeFileSync, unlinkSync, existsSync, statSync, readFileSync } = require('node:fs');
+const net = require('node:net');
+const { join, delimiter } = require('node:path');
+${METADATA_PROCESS.slice(METADATA_PROCESS.indexOf("function executable()"), METADATA_PROCESS.indexOf("function run()"))}
+const marker = process.env.CT_BW_READY;
+const probe = net.createServer();
+let child;
+let ready = false;
+const finish = () => { try { unlinkSync(marker); } catch {} if (child) child.kill(); process.exit(0); };
+process.on('SIGTERM', finish);
+process.on('SIGINT', finish);
+probe.listen(0, '127.0.0.1', () => {
+  const port = probe.address().port;
+  probe.close(() => {
+    const [bin, prefix] = executable();
+    child = spawn(bin, prefix.concat(['serve', '--hostname', '127.0.0.1', '--port', String(port)]), { env: process.env, windowsHide: true, stdio: 'ignore' });
+    delete process.env.BW_SESSION;
+    // CLI releases differ in whether informational startup logs are enabled.
+    // Probe the random port allocated for this child without capturing its output.
+    const check = () => {
+      if (!child || child.exitCode !== null) return;
+      const socket = net.connect({host: '127.0.0.1', port});
+      socket.once('connect', () => {
+        socket.destroy(); ready = true;
+        writeFileSync(marker, JSON.stringify({port}), {mode: 0o600});
+      });
+      socket.once('error', () => { socket.destroy(); if (!ready) setTimeout(check, 50); });
+    };
+    check();
+    child.on('error', finish); child.on('exit', finish);
+  });
+});
+// Startup and idle leases also bound leftovers after plugin replacement/unload.
+const started = Date.now();
+setInterval(() => {
+  try {
+    if (!ready && Date.now() - started > 20000) return finish();
+    if (ready && (!existsSync(marker) || Date.now() - statSync(marker).mtimeMs > 300000)) finish();
+  } catch { finish(); }
+}, 1000);
+`;
+
+// ../../codeterm/codeterm/packages/plugin-sdk/src/ioPrograms.ts
+function* ioValue(request) {
+  return yield request;
+}
+function defineProviderIo(source, io) {
+  const exports = { ...source };
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (typeof value !== "function") continue;
+    exports[key] = function(...args) {
+      const result = value.apply(source, args);
+      return result && typeof result.next === "function" ? io().run(result) : result;
+    };
+  }
+  return exports;
+}
+
 // bitwarden/src/plugin.ts
 var DEFAULT_SERVER = "https://vault.bitwarden.com";
 var K_SESSION = "session";
@@ -104,12 +166,12 @@ var K_CLIENT_ID = "api_client_id";
 var K_CLIENT_SECRET = "api_client_secret";
 var BW_TIMEOUT_MS = 3e4;
 var BW_STATUS_TIMEOUT_MS = 8e3;
-function rememberedMasterPassword() {
-  const master = host.secretGet(K_MASTER);
+function* rememberedMasterPassword() {
+  const master = yield* ioValue({ op: "secretGet", name: K_MASTER });
   return master && master.length ? master : null;
 }
-function canUnlockHeadlessly() {
-  return !!rememberedMasterPassword();
+function* canUnlockHeadlessly() {
+  return !!(yield* rememberedMasterPassword());
 }
 function isRejectedCredential(msg) {
   const m = (typeof msg === "string" ? msg : "").toLowerCase();
@@ -198,7 +260,7 @@ function serverHostAllowed(url, allow) {
     return !!e && (h === e || h.lastIndexOf("." + e) === h.length - e.length - 1);
   });
 }
-function effectiveAllow() {
+function* effectiveAllow() {
   let allow = [];
   try {
     const m = host.manifest();
@@ -209,7 +271,7 @@ function effectiveAllow() {
   }
   const def = hostOf(DEFAULT_SERVER);
   if (def && allow.indexOf(def) < 0) allow.push(def);
-  const configured = hostOf(serverUrl());
+  const configured = hostOf(yield* serverUrl());
   if (configured && allow.indexOf(configured) < 0) allow.push(configured);
   return allow;
 }
@@ -274,9 +336,102 @@ function bwExecOpts(args, opts) {
   }
   return JSON.stringify({ bin, args: commandArgs, env, stdin: opts.stdin || null, timeoutMs: opts.timeoutMs || BW_TIMEOUT_MS });
 }
-function bw(args, opts) {
+var serve = null;
+var serveEpoch = 0;
+var vaultRevision = 0;
+var serveDisabledUntil = 0;
+function* stopServe() {
+  ++serveEpoch;
+  const previous = serve;
+  serve = null;
+  if (!previous) return;
+  try {
+    if (previous.job) host.exec.close(previous.job);
+  } catch {
+  }
+  try {
+    yield* host.io.fs.removeFile(previous.marker);
+  } catch {
+  }
+}
+function* startServe(session) {
+  if (Date.now() < serveDisabledUntil || typeof host.dataDir !== "function") return;
+  if (serve && serve.session !== session) yield* stopServe();
+  if (!serve) {
+    const epoch = serveEpoch;
+    const root = host.dataDir() + "/bitwarden";
+    const marker = root + "/bw-serve-" + Date.now() + "-" + Math.random().toString(16).slice(2) + ".json";
+    const pending = { job: "", marker, session, epoch, port: void 0 };
+    serve = pending;
+    try {
+      if (!(yield* host.io.fs.makeDirs(root))) throw new Error("serve storage unavailable");
+      const env = { BW_SESSION: session, CT_BW_READY: marker };
+      const path = expandedBwPath();
+      if (path) env.PATH = path;
+      if (serve !== pending || serveEpoch !== epoch) return;
+      const started = yield { op: "execStart", options: { bin: "node", args: ["-e", SERVE_PROCESS], env, timeoutMs: 24 * 60 * 60 * 1e3 } };
+      if (!started.jobId) throw new Error("serve start failed");
+      pending.job = started.jobId;
+      if (serve !== pending || serveEpoch !== epoch) {
+        host.exec.close(pending.job);
+        return;
+      }
+    } catch {
+      try {
+        if (pending.job) host.exec.close(pending.job);
+      } catch {
+      }
+      try {
+        yield* host.io.fs.removeFile(marker);
+      } catch {
+      }
+      if (serve === pending) {
+        serve = null;
+        serveDisabledUntil = Date.now() + 3e4;
+      }
+      return;
+    }
+  }
+}
+function* serveGet(name, session) {
+  yield* startServe(session);
+  const current = serve;
+  if (!current || !current.job) return null;
+  const job = host.exec.poll(current.job);
+  if (job.done) {
+    yield* stopServe();
+    return null;
+  }
+  if (!current.port) {
+    const ready = yield* host.io.fs.readJson(current.marker);
+    if (ready && Number.isInteger(ready.port) && ready.port > 0 && ready.port <= 65535) current.port = ready.port;
+    else return null;
+  }
+  try {
+    yield* host.io.fs.writeFile(current.marker, JSON.stringify({ port: current.port }));
+    const response = yield* host.io.fetch({ url: "http://127.0.0.1:" + current.port + "/object/item/" + encodeURIComponent(name), timeoutMs: 2e3 });
+    if (serve !== current || serveEpoch !== current.epoch) return { success: false, message: "Vault is locked." };
+    if (response.error) throw new Error("serve unavailable");
+    const body = JSON.parse(response.body || "{}");
+    if (typeof body.success !== "boolean") throw new Error("invalid serve response");
+    if (!body.success && mapBwError(body.message).kind === "backend") throw new Error("serve unavailable");
+    return body;
+  } catch {
+    if (serve === current) yield* stopServe();
+    serveDisabledUntil = Date.now() + 3e4;
+    return null;
+  }
+}
+function* bw(args, opts) {
   opts = opts || {};
-  const raw = host.exec(bwExecOpts(args, opts));
+  if (args[0] === "get" && args[1] === "item" && opts.session) {
+    const served = yield* serveGet(args[2], opts.session);
+    if (served) return served;
+  } else if (args[0] !== "status" && args[0] !== "list") {
+    yield* stopServe();
+    serveDisabledUntil = 0;
+  }
+  const raw = JSON.stringify(yield* host.io.exec(JSON.parse(bwExecOpts(args, opts))));
   let ex;
   try {
     ex = JSON.parse(raw);
@@ -292,19 +447,19 @@ function extractSessionToken(data) {
 }
 var autoUnlocking = false;
 var lastRecoveryError = null;
-function tryAutoLogin(master) {
-  const clientId = host.secretGet(K_CLIENT_ID);
-  const clientSecret = host.secretGet(K_CLIENT_SECRET);
-  const email = host.secretGet(K_EMAIL);
+function* tryAutoLogin(master) {
+  const clientId = yield* ioValue({ op: "secretGet", name: K_CLIENT_ID });
+  const clientSecret = yield* ioValue({ op: "secretGet", name: K_CLIENT_SECRET });
+  const email = yield* ioValue({ op: "secretGet", name: K_EMAIL });
   let login;
   let usedApiKey = false;
   if (clientId && clientSecret) {
     usedApiKey = true;
-    login = bw(["login", "--apikey"], {
+    login = yield* bw(["login", "--apikey"], {
       env: { BW_CLIENTID: clientId, BW_CLIENTSECRET: clientSecret }
     });
   } else if (email) {
-    login = bw(["login", email, "--passwordenv", "BW_PASSWORD"], {
+    login = yield* bw(["login", email, "--passwordenv", "BW_PASSWORD"], {
       env: { BW_PASSWORD: master }
     });
   } else {
@@ -318,33 +473,33 @@ function tryAutoLogin(master) {
   lastRecoveryError = mapBwError(login.message);
   if (isRejectedCredential(login.message)) {
     if (usedApiKey) {
-      host.secretDelete(K_CLIENT_ID);
-      host.secretDelete(K_CLIENT_SECRET);
+      yield* ioValue({ op: "secretDelete", name: K_CLIENT_ID });
+      yield* ioValue({ op: "secretDelete", name: K_CLIENT_SECRET });
     } else {
-      host.secretDelete(K_MASTER);
+      yield* ioValue({ op: "secretDelete", name: K_MASTER });
     }
   }
   return false;
 }
-function tryAutoUnlock() {
+function* tryAutoUnlock() {
   if (autoUnlocking) return false;
   autoUnlocking = true;
   try {
-    const master = rememberedMasterPassword();
+    const master = yield* rememberedMasterPassword();
     if (master && master.length) {
-      const status = bwStatus();
+      const status = yield* bwStatus();
       if (status.failure) {
         lastRecoveryError = { kind: "backend", message: status.failure.message };
         return false;
       }
-      rememberLoginIdentity(status);
-      if (status.status && status.status.status === "unauthenticated" && !tryAutoLogin(master)) {
+      yield* rememberLoginIdentity(status);
+      if (status.status && status.status.status === "unauthenticated" && !(yield* tryAutoLogin(master))) {
         return false;
       }
-      const unlocked = bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: master } });
+      const unlocked = yield* bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: master } });
       if (!unlocked.success) {
         if (isRejectedCredential(unlocked.message)) {
-          host.secretDelete(K_MASTER);
+          yield* ioValue({ op: "secretDelete", name: K_MASTER });
           lastRecoveryError = { kind: "locked", message: "stored Bitwarden master password was rejected" };
         } else {
           lastRecoveryError = mapBwError(unlocked.message);
@@ -356,7 +511,8 @@ function tryAutoUnlock() {
         lastRecoveryError = { kind: "backend", message: "bw unlock returned no session token" };
         return false;
       }
-      host.secretSet(K_SESSION, token);
+      yield* ioValue({ op: "secretSet", name: K_SESSION, value: token });
+      yield* startServe(token);
       lastRecoveryError = null;
       return true;
     }
@@ -366,25 +522,25 @@ function tryAutoUnlock() {
     autoUnlocking = false;
   }
 }
-function runWithSession(args, stdin) {
-  let session = host.secretGet(K_SESSION);
+function* runWithSession(args, stdin) {
+  let session = yield* ioValue({ op: "secretGet", name: K_SESSION });
   let triedUnlock = false;
   if (!session) {
-    if (!canUnlockHeadlessly()) return { error: { kind: "locked", message: LOCKED_HINT } };
-    if (!tryAutoUnlock()) return { error: lastRecoveryError || { kind: "locked", message: LOCKED_HINT } };
+    if (!(yield* canUnlockHeadlessly())) return { error: { kind: "locked", message: LOCKED_HINT } };
+    if (!(yield* tryAutoUnlock())) return { error: lastRecoveryError || { kind: "locked", message: LOCKED_HINT } };
     triedUnlock = true;
-    session = host.secretGet(K_SESSION);
+    session = yield* ioValue({ op: "secretGet", name: K_SESSION });
     if (!session) return { error: { kind: "locked", message: LOCKED_HINT } };
   }
-  let r = bw(args, { session, stdin });
+  let r = yield* bw(args, { session, stdin });
   if (!r.success) {
     const err = mapBwError(r.message);
-    if ((err.kind === "locked" || err.kind === "logged_out") && !triedUnlock && canUnlockHeadlessly()) {
-      host.secretDelete(K_SESSION);
-      if (!tryAutoUnlock()) return { error: lastRecoveryError || err };
-      const fresh = host.secretGet(K_SESSION);
+    if ((err.kind === "locked" || err.kind === "logged_out") && !triedUnlock && (yield* canUnlockHeadlessly())) {
+      yield* ioValue({ op: "secretDelete", name: K_SESSION });
+      if (!(yield* tryAutoUnlock())) return { error: lastRecoveryError || err };
+      const fresh = yield* ioValue({ op: "secretGet", name: K_SESSION });
       if (fresh) {
-        r = bw(args, { session: fresh, stdin });
+        r = yield* bw(args, { session: fresh, stdin });
         if (!r.success) return { error: mapBwError(r.message) };
         return { ok: unwrapData(r.data) };
       }
@@ -400,10 +556,10 @@ function settings() {
     return {};
   }
 }
-function serverUrl() {
+function* serverUrl() {
   const s = settings();
   if (s.serverUrl && s.serverUrl.length) return s.serverUrl;
-  const u = host.secretGet("server_url");
+  const u = yield* ioValue({ op: "secretGet", name: "server_url" });
   return u && u.length ? u : DEFAULT_SERVER;
 }
 function isBinaryMissing(msg) {
@@ -421,11 +577,9 @@ function bwExecToStatusResult(ex) {
   if (!resp.success) return { failure: { kind: "bw_error", message: mapBwError(resp.message).message || "bw status failed" } };
   return { status: unwrapData(resp.data) };
 }
-function bwStatus() {
-  const session = host.secretGet(K_SESSION);
-  const raw = host.exec(
-    bwExecOpts(["status"], { session: session || void 0, timeoutMs: BW_STATUS_TIMEOUT_MS })
-  );
+function* bwStatus() {
+  const session = yield* ioValue({ op: "secretGet", name: K_SESSION });
+  const raw = JSON.stringify(yield* host.io.exec(JSON.parse(bwExecOpts(["status"], { session: session || void 0, timeoutMs: BW_STATUS_TIMEOUT_MS }))));
   let ex;
   try {
     ex = JSON.parse(raw);
@@ -434,86 +588,87 @@ function bwStatus() {
   }
   return bwExecToStatusResult(ex);
 }
-function rememberLoginIdentity(res) {
+function* rememberLoginIdentity(res) {
   const email = res.status && res.status.userEmail;
-  if (email) host.secretSet(K_EMAIL, email);
+  if (email) yield* ioValue({ op: "secretSet", name: K_EMAIL, value: email });
 }
-function statusFromBw(res) {
-  const endpoint = serverUrl();
+function* statusFromBw(res) {
+  const endpoint = yield* serverUrl();
   if (res.failure) return { status: "unavailable", reason: res.failure.message };
   const s = res.status;
   if (!s) return { status: "unavailable", reason: "bw status returned no data" };
-  rememberLoginIdentity(res);
+  yield* rememberLoginIdentity(res);
   if (s.status === "unlocked") {
     return { status: "unlocked", user: s.userEmail || null, transient: false, endpoint: s.serverUrl || endpoint };
   }
   if (s.status === "locked") return { status: "locked", endpoint };
   return { status: "logged_out", endpoint };
 }
-function secretStatus() {
-  let st = statusFromBw(bwStatus());
-  if (st.status === "locked" && !canUnlockHeadlessly()) {
+function* secretStatus() {
+  let st = yield* statusFromBw(yield* bwStatus());
+  if (st.status === "locked" && !(yield* canUnlockHeadlessly())) {
     return { status: "locked", endpoint: st.endpoint, reason: LOCKED_HINT };
   }
-  if ((st.status === "locked" || st.status === "logged_out") && canUnlockHeadlessly()) {
-    if (tryAutoUnlock()) st = statusFromBw(bwStatus());
+  if ((st.status === "locked" || st.status === "logged_out") && (yield* canUnlockHeadlessly())) {
+    if (yield* tryAutoUnlock()) st = yield* statusFromBw(yield* bwStatus());
     else if (lastRecoveryError) {
       st = { status: "unavailable", endpoint: st.endpoint, reason: lastRecoveryError.message || lastRecoveryError.kind };
     }
   }
   return st;
 }
-function secretUnlock(creds) {
+function* secretUnlock(creds) {
+  ++vaultRevision;
   creds = creds || {};
   const hasPw = creds.masterPassword && creds.masterPassword.length;
   if (!hasPw && !creds.apiKeyClientId) {
-    if (canUnlockHeadlessly() && tryAutoUnlock()) return { ok: true };
+    if ((yield* canUnlockHeadlessly()) && (yield* tryAutoUnlock())) return { ok: true };
     if (lastRecoveryError) return { error: lastRecoveryError };
     return { error: { kind: "bad_request", message: "master password (or API-key creds) required" } };
   }
   if (!hasPw) {
     return { error: { kind: "bad_request", message: "master password is required to unlock, even with API-key credentials" } };
   }
-  const server = serverUrl();
+  const server = yield* serverUrl();
   if (!isValidHttpUrl(server)) {
     return { error: { kind: "bad_request", message: "invalid bitwarden server URL: " + server } };
   }
-  if (!serverHostAllowed(server, effectiveAllow())) {
+  if (!serverHostAllowed(server, yield* effectiveAllow())) {
     return { error: { kind: "bad_request", message: "server host not permitted by plugin network permissions: " + hostOf(server) } };
   }
-  let statusResult = bwStatus();
-  rememberLoginIdentity(statusResult);
+  let statusResult = yield* bwStatus();
+  yield* rememberLoginIdentity(statusResult);
   let st = statusResult.status;
   let loggedIn = !!st && st.status !== "unauthenticated";
   const currentServer = st && st.serverUrl || "";
   if (loggedIn && currentServer && currentServer !== server) {
-    bw(["logout"]);
-    host.secretDelete(K_SESSION);
+    yield* bw(["logout"]);
+    yield* ioValue({ op: "secretDelete", name: K_SESSION });
     loggedIn = false;
   }
   const serverChanged = currentServer !== server;
   if (serverChanged) {
-    const cfg = bw(["config", "server", server]);
+    const cfg = yield* bw(["config", "server", server]);
     if (!cfg.success) return { error: { kind: "backend", message: "could not point bw at " + server } };
   }
   if (serverChanged) {
-    statusResult = bwStatus();
-    rememberLoginIdentity(statusResult);
+    statusResult = yield* bwStatus();
+    yield* rememberLoginIdentity(statusResult);
     st = statusResult.status;
     loggedIn = !!st && st.status !== "unauthenticated";
   }
   if (!loggedIn) {
     let login;
     if (creds.apiKeyClientId && creds.apiKeyClientSecret) {
-      login = bw(["login", "--apikey"], { env: { BW_CLIENTID: creds.apiKeyClientId, BW_CLIENTSECRET: creds.apiKeyClientSecret } });
+      login = yield* bw(["login", "--apikey"], { env: { BW_CLIENTID: creds.apiKeyClientId, BW_CLIENTSECRET: creds.apiKeyClientSecret } });
       if (login.success) {
-        host.secretSet(K_CLIENT_ID, creds.apiKeyClientId);
-        host.secretSet(K_CLIENT_SECRET, creds.apiKeyClientSecret);
+        yield* ioValue({ op: "secretSet", name: K_CLIENT_ID, value: creds.apiKeyClientId });
+        yield* ioValue({ op: "secretSet", name: K_CLIENT_SECRET, value: creds.apiKeyClientSecret });
       }
     } else if (creds.email) {
       let args = ["login", creds.email, "--passwordenv", "BW_PASSWORD"];
       if (creds.twoFactorToken) args = args.concat(["--method", "0", "--code", creds.twoFactorToken]);
-      login = bw(args, { env: { BW_PASSWORD: creds.masterPassword } });
+      login = yield* bw(args, { env: { BW_PASSWORD: creds.masterPassword } });
     } else {
       return { error: { kind: "bad_request", message: "either email + master_password or api_key_* required" } };
     }
@@ -521,43 +676,47 @@ function secretUnlock(creds) {
       return { error: mapBwError(login.message) };
     }
   }
-  const unlocked = bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: creds.masterPassword } });
+  const unlocked = yield* bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: creds.masterPassword } });
   if (!unlocked.success) return { error: mapBwError(unlocked.message) };
   const token = extractSessionToken(unlocked.data);
   if (!token) return { error: { kind: "backend", message: "bw unlock returned empty session" } };
-  host.secretSet(K_SESSION, token);
-  host.secretSet(K_MASTER, creds.masterPassword);
-  if (!creds.apiKeyClientId && creds.email) host.secretSet(K_EMAIL, creds.email);
+  yield* ioValue({ op: "secretSet", name: K_SESSION, value: token });
+  yield* startServe(token);
+  yield* ioValue({ op: "secretSet", name: K_MASTER, value: creds.masterPassword });
+  if (!creds.apiKeyClientId && creds.email) yield* ioValue({ op: "secretSet", name: K_EMAIL, value: creds.email });
   return { ok: true };
 }
-function secretLock() {
-  bw(["lock"]);
-  host.secretDelete(K_SESSION);
+function* secretLock() {
+  ++vaultRevision;
+  yield* bw(["lock"]);
+  yield* ioValue({ op: "secretDelete", name: K_SESSION });
   return { ok: true };
 }
-function secretLogout() {
-  bw(["logout"]);
-  clearStoredCredentials();
+function* secretLogout() {
+  ++vaultRevision;
+  yield* bw(["logout"]);
+  yield* clearStoredCredentials();
   return { ok: true };
 }
-function clearStoredCredentials() {
-  host.secretDelete(K_SESSION);
-  host.secretDelete(K_MASTER);
-  host.secretDelete(K_EMAIL);
-  host.secretDelete(K_CLIENT_ID);
-  host.secretDelete(K_CLIENT_SECRET);
+function* clearStoredCredentials() {
+  yield* ioValue({ op: "secretDelete", name: K_SESSION });
+  yield* ioValue({ op: "secretDelete", name: K_MASTER });
+  yield* ioValue({ op: "secretDelete", name: K_EMAIL });
+  yield* ioValue({ op: "secretDelete", name: K_CLIENT_ID });
+  yield* ioValue({ op: "secretDelete", name: K_CLIENT_SECRET });
 }
-function resetConnection() {
-  const server = serverUrl();
+function* resetConnection() {
+  ++vaultRevision;
+  const server = yield* serverUrl();
   if (!isValidHttpUrl(server)) {
     return { error: { kind: "bad_request", message: "invalid bitwarden server URL: " + server } };
   }
-  if (!serverHostAllowed(server, effectiveAllow())) {
+  if (!serverHostAllowed(server, yield* effectiveAllow())) {
     return { error: { kind: "bad_request", message: "server host not permitted by plugin network permissions: " + hostOf(server) } };
   }
-  bw(["logout"]);
-  clearStoredCredentials();
-  const configured = bw(["config", "server", server]);
+  yield* bw(["logout"]);
+  yield* clearStoredCredentials();
+  const configured = yield* bw(["config", "server", server]);
   if (!configured.success) {
     return { error: { kind: "backend", message: "could not point bw at " + server } };
   }
@@ -595,69 +754,71 @@ function toRef(c) {
     last_modified: isoToMs(c.revisionDate)
   };
 }
-function findByName(name) {
-  const r = runWithSession(["list", "items", "--search", name]);
+function* findByName(name) {
+  const r = yield* runWithSession(["list", "items", "--search", name]);
   if ("error" in r) return r;
   const exact = (r.ok || []).filter((c) => c.type === 1 && c.name.toLowerCase() === name.toLowerCase());
   if (exact.length === 0) return { error: { kind: "not_found" } };
   if (exact.length > 1) return { error: { kind: "ambiguous", candidates: exact.map((c) => c.id) } };
   return { ok: exact[0] };
 }
-function resolveFolderId(name) {
+function* resolveFolderId(name) {
   if (!name) return { ok: null };
-  const r = runWithSession(["list", "folders"]);
+  const r = yield* runWithSession(["list", "folders"]);
   if ("error" in r) return r;
   const f = (r.ok || []).find((x) => x.name && x.name.toLowerCase() === name.toLowerCase());
   return { ok: f ? f.id : null };
 }
-function resolveOrCreateFolder(name) {
-  const existing = resolveFolderId(name);
+function* resolveOrCreateFolder(name) {
+  const existing = yield* resolveFolderId(name);
   if ("error" in existing) return existing;
   if (existing.ok) return existing;
   const encoded = base64Encode(JSON.stringify({ name }));
-  const r = runWithSession(["create", "folder", encoded]);
+  const r = yield* runWithSession(["create", "folder", encoded]);
   if ("error" in r) return r;
   const created = r.ok;
   return { ok: created && created.id || null };
 }
-function secretSave(req) {
+function* secretSave(req) {
   if (!req.name) return { error: { kind: "bad_request", message: "name required" } };
   if (!req.value) return { error: { kind: "bad_request", message: "value must not be empty" } };
-  const existing = findByName(req.name);
+  const existing = yield* findByName(req.name);
   const existingItem = "ok" in existing && existing.ok || null;
   if (existingItem && !req.overwrite) return { error: { kind: "already_exists" } };
   let folderId = null;
   if (req.folder) {
-    const f = resolveOrCreateFolder(req.folder);
+    const f = yield* resolveOrCreateFolder(req.folder);
     if ("error" in f) return f;
     folderId = f.ok;
   }
   const cipher = buildLoginCipher(req, existingItem ? existingItem.id : null, folderId);
   const encoded = base64Encode(JSON.stringify(cipher));
-  const r = existingItem ? runWithSession(["edit", "item", existingItem.id, encoded]) : runWithSession(["create", "item", encoded]);
+  const r = existingItem ? yield* runWithSession(["edit", "item", existingItem.id, encoded]) : yield* runWithSession(["create", "item", encoded]);
   if ("error" in r) return r;
-  runWithSession(["sync"]);
+  yield* runWithSession(["sync"]);
   return { ok: toRef(r.ok) };
 }
-function secretGetItem(nameOrId) {
-  const r = runWithSession(["get", "item", nameOrId]);
+function* secretGetItem(nameOrId) {
+  const revision = vaultRevision;
+  const r = yield* runWithSession(["get", "item", nameOrId]);
   if ("error" in r) return r;
+  if (revision !== vaultRevision) return { error: { kind: "locked" } };
   const item = r.ok;
   const value = item.login && item.login.password;
   if (value === void 0 || value === null) return { error: { kind: "backend", message: "item has no login.password field" } };
   return { ok: { item_id: item.id, name: item.name, value, notes: item.notes || null } };
 }
-function listMetadata(filter) {
+function* listMetadata(filter) {
   filter = filter || {};
   let args = ["list", "items"];
   if (filter.organization) args = args.concat(["--organizationid", filter.organization]);
   if (filter.collection) args = args.concat(["--collectionid", filter.collection]);
-  const r = runWithSession(args);
+  const r = yield* runWithSession(args);
   if ("error" in r) return r;
   let items = metadataRefs(r.ok);
   if (!items) return UNEXPECTED_LIST;
   if (filter.folder) {
-    const fid = resolveFolderId(filter.folder);
+    const fid = yield* resolveFolderId(filter.folder);
     if ("error" in fid) return fid;
     items = items.filter((c) => c.folder === (fid.ok || null));
   }
@@ -665,61 +826,62 @@ function listMetadata(filter) {
   if (filter.limit) items = items.slice(0, filter.limit);
   return { ok: items };
 }
-function searchMetadata(query) {
+function* searchMetadata(query) {
   const q = (query || "").trim();
   if (!q) return { error: { kind: "bad_request", message: "query must not be empty" } };
-  const r = runWithSession(["list", "items", "--search", q]);
+  const r = yield* runWithSession(["list", "items", "--search", q]);
   if ("error" in r) return r;
   const items = metadataRefs(r.ok);
   return items ? { ok: items } : UNEXPECTED_LIST;
 }
-function metadataCall(run) {
+function* secretList(filter) {
   try {
-    return run();
+    return yield* listMetadata(filter);
   } catch {
     return { error: { kind: "backend", message: "bw metadata request failed" } };
   }
 }
-function secretList(filter) {
-  return metadataCall(() => listMetadata(filter));
+function* secretSearch(query) {
+  try {
+    return yield* searchMetadata(query);
+  } catch {
+    return { error: { kind: "backend", message: "bw metadata request failed" } };
+  }
 }
-function secretSearch(query) {
-  return metadataCall(() => searchMetadata(query));
-}
-function secretDelete(nameOrId) {
-  const item = runWithSession(["get", "item", nameOrId]);
+function* secretDelete(nameOrId) {
+  const item = yield* runWithSession(["get", "item", nameOrId]);
   if ("error" in item) return item;
-  const r = runWithSession(["delete", "item", item.ok.id, "--permanent"]);
+  const r = yield* runWithSession(["delete", "item", item.ok.id, "--permanent"]);
   if ("error" in r) return r;
-  runWithSession(["sync"]);
+  yield* runWithSession(["sync"]);
   return { ok: true };
 }
-function secretOrganizations() {
-  const r = runWithSession(["list", "organizations"]);
+function* secretOrganizations() {
+  const r = yield* runWithSession(["list", "organizations"]);
   if ("error" in r) return r;
   return { ok: (r.ok || []).map((v) => ({ id: v.id, name: v.name })) };
 }
-function secretCollections(orgId) {
+function* secretCollections(orgId) {
   let args = ["list", "collections"];
   if (orgId) args = args.concat(["--organizationid", orgId]);
-  const r = runWithSession(args);
+  const r = yield* runWithSession(args);
   if ("error" in r) return r;
   return { ok: (r.ok || []).map((v) => ({ id: v.id, name: v.name, organization_id: v.organizationId || null })) };
 }
-function secretSync() {
-  const r = runWithSession(["sync"]);
+function* secretSync() {
+  const r = yield* runWithSession(["sync"]);
   if ("error" in r) return r;
   return { ok: true };
 }
 function secretInit() {
   return { ok: true };
 }
-function statusStart() {
-  const session = host.secretGet(K_SESSION);
+function* statusStart() {
+  const session = yield* ioValue({ op: "secretGet", name: K_SESSION });
   const optsJson = bwExecOpts(["status"], { session: session || void 0 });
   let res;
   try {
-    res = JSON.parse(host.execStart(optsJson));
+    res = JSON.parse(JSON.stringify(yield* ioValue({ op: "execStart", options: JSON.parse(optsJson) })));
   } catch (e) {
     return { error: "exec start: " + e };
   }
@@ -728,10 +890,10 @@ function statusStart() {
   return { jobId: res.jobId };
 }
 var statusFlows = {};
-function startFlowJob(flowId, phase, args, opts, usedApiKey) {
+function* startFlowJob(flowId, phase, args, opts, usedApiKey) {
   let started;
   try {
-    started = JSON.parse(host.execStart(bwExecOpts(args, opts)));
+    started = JSON.parse(JSON.stringify(yield* ioValue({ op: "execStart", options: JSON.parse(bwExecOpts(args, opts)) })));
   } catch (e) {
     lastRecoveryError = { kind: "backend", message: "exec start: " + e };
     return null;
@@ -743,40 +905,40 @@ function startFlowJob(flowId, phase, args, opts, usedApiKey) {
   statusFlows[flowId] = { hostJobId: started.jobId, phase, usedApiKey };
   return started.jobId;
 }
-function startFlowLogin(flowId, master) {
-  const clientId = host.secretGet(K_CLIENT_ID);
-  const clientSecret = host.secretGet(K_CLIENT_SECRET);
-  const email = host.secretGet(K_EMAIL);
+function* startFlowLogin(flowId, master) {
+  const clientId = yield* ioValue({ op: "secretGet", name: K_CLIENT_ID });
+  const clientSecret = yield* ioValue({ op: "secretGet", name: K_CLIENT_SECRET });
+  const email = yield* ioValue({ op: "secretGet", name: K_EMAIL });
   if (clientId && clientSecret) {
-    return !!startFlowJob(flowId, "login", ["login", "--apikey"], {
+    return !!(yield* startFlowJob(flowId, "login", ["login", "--apikey"], {
       env: { BW_CLIENTID: clientId, BW_CLIENTSECRET: clientSecret }
-    }, true);
+    }, true));
   }
   if (email) {
-    return !!startFlowJob(flowId, "login", ["login", email, "--passwordenv", "BW_PASSWORD"], {
+    return !!(yield* startFlowJob(flowId, "login", ["login", email, "--passwordenv", "BW_PASSWORD"], {
       env: { BW_PASSWORD: master }
-    }, false);
+    }, false));
   }
   lastRecoveryError = { kind: "logged_out", message: "stored Bitwarden login identity is missing" };
   return false;
 }
-function flowFailure(flowId, message, usedApiKey) {
+function* flowFailure(flowId, message, usedApiKey) {
   lastRecoveryError = mapBwError(message);
   if (isRejectedCredential(message)) {
     if (usedApiKey) {
-      host.secretDelete(K_CLIENT_ID);
-      host.secretDelete(K_CLIENT_SECRET);
+      yield* ioValue({ op: "secretDelete", name: K_CLIENT_ID });
+      yield* ioValue({ op: "secretDelete", name: K_CLIENT_SECRET });
     } else {
-      host.secretDelete(K_MASTER);
+      yield* ioValue({ op: "secretDelete", name: K_MASTER });
     }
   }
   delete statusFlows[flowId];
   return {
     done: true,
-    status: { status: "unavailable", endpoint: serverUrl(), reason: lastRecoveryError.message || lastRecoveryError.kind }
+    status: { status: "unavailable", endpoint: yield* serverUrl(), reason: lastRecoveryError.message || lastRecoveryError.kind }
   };
 }
-function statusPoll(jobId) {
+function* statusPoll(jobId) {
   if (!jobId) return { done: true, error: "no jobId" };
   const flow = statusFlows[jobId] || { hostJobId: jobId, phase: "status" };
   let p;
@@ -790,42 +952,43 @@ function statusPoll(jobId) {
   const response = parseBwOutput(p);
   if (flow.phase === "login") {
     if (!response.success && (response.message || "").toLowerCase().indexOf("already logged in") < 0) {
-      return flowFailure(jobId, response.message, flow.usedApiKey);
+      return yield* flowFailure(jobId, response.message, flow.usedApiKey);
     }
-    const master2 = rememberedMasterPassword();
-    if (!master2 || !startFlowJob(jobId, "unlock", ["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], {
+    const master2 = yield* rememberedMasterPassword();
+    if (!master2 || !(yield* startFlowJob(jobId, "unlock", ["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], {
       env: { BW_PASSWORD: master2 || "" }
-    })) {
+    }))) {
       delete statusFlows[jobId];
-      return { done: true, status: { status: "unavailable", endpoint: serverUrl(), reason: lastRecoveryError && (lastRecoveryError.message || lastRecoveryError.kind) || LOCKED_HINT } };
+      return { done: true, status: { status: "unavailable", endpoint: yield* serverUrl(), reason: lastRecoveryError && (lastRecoveryError.message || lastRecoveryError.kind) || LOCKED_HINT } };
     }
     return { done: false };
   }
   if (flow.phase === "unlock") {
-    if (!response.success) return flowFailure(jobId, response.message);
+    if (!response.success) return yield* flowFailure(jobId, response.message);
     const token = extractSessionToken(response.data);
-    if (!token) return flowFailure(jobId, "bw unlock returned no session token");
-    host.secretSet(K_SESSION, token);
+    if (!token) return yield* flowFailure(jobId, "bw unlock returned no session token");
+    yield* ioValue({ op: "secretSet", name: K_SESSION, value: token });
+    yield* startServe(token);
     lastRecoveryError = null;
     delete statusFlows[jobId];
-    return { done: true, status: { status: "unlocked", user: host.secretGet(K_EMAIL), transient: false, endpoint: serverUrl() } };
+    return { done: true, status: { status: "unlocked", user: yield* ioValue({ op: "secretGet", name: K_EMAIL }), transient: false, endpoint: yield* serverUrl() } };
   }
   const statusResult = bwExecToStatusResult(p);
-  const status = statusFromBw(statusResult);
-  if (status.status !== "locked" && status.status !== "logged_out" || !canUnlockHeadlessly()) {
+  const status = yield* statusFromBw(statusResult);
+  if (status.status !== "locked" && status.status !== "logged_out" || !(yield* canUnlockHeadlessly())) {
     delete statusFlows[jobId];
     return { done: true, status };
   }
-  const master = rememberedMasterPassword() || "";
-  const started = status.status === "logged_out" ? startFlowLogin(jobId, master) : !!startFlowJob(jobId, "unlock", ["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: master } });
+  const master = (yield* rememberedMasterPassword()) || "";
+  const started = status.status === "logged_out" ? yield* startFlowLogin(jobId, master) : !!(yield* startFlowJob(jobId, "unlock", ["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], { env: { BW_PASSWORD: master } }));
   if (!started) {
     delete statusFlows[jobId];
     return { done: true, status: { status: "unavailable", endpoint: status.endpoint, reason: lastRecoveryError && (lastRecoveryError.message || lastRecoveryError.kind) || LOCKED_HINT } };
   }
   return { done: false };
 }
-function renderGlance() {
-  const s = secretStatus();
+function* renderGlance() {
+  const s = yield* secretStatus();
   const nodes = [];
   if (s.status === "unlocked") {
     nodes.push({ kind: "badge", label: "Unlocked", tone: "ok" });
@@ -845,20 +1008,20 @@ function renderGlance() {
   nodes.push({ kind: "button", label: "Open settings", action: "settings" });
   return { title: "Bitwarden", nodes };
 }
-function viewCall(method, args) {
+function* viewCall(method, args) {
   args = args || {};
-  if (method === "status") return secretStatus();
-  if (method === "statusStart") return statusStart();
-  if (method === "statusPoll") return statusPoll(args.jobId || "");
-  if (method === "serverUrl") return { url: serverUrl() };
+  if (method === "status") return yield* secretStatus();
+  if (method === "statusStart") return yield* statusStart();
+  if (method === "statusPoll") return yield* statusPoll(args.jobId || "");
+  if (method === "serverUrl") return { url: yield* serverUrl() };
   if (method === "setServerUrl") {
     const url = (args.url || "").trim();
     if (url && !isValidHttpUrl(url)) return { error: "invalid server URL" };
-    host.secretSet("server_url", url);
+    yield* ioValue({ op: "secretSet", name: "server_url", value: url });
     return { ok: true };
   }
   if (method === "unlock") {
-    return secretUnlock({
+    return yield* secretUnlock({
       masterPassword: args.masterPassword,
       email: args.email,
       twoFactorToken: args.twoFactorToken,
@@ -866,19 +1029,19 @@ function viewCall(method, args) {
       apiKeyClientSecret: args.apiKeyClientSecret
     });
   }
-  if (method === "resetConnection") return resetConnection();
-  if (method === "signout") return secretLogout();
+  if (method === "resetConnection") return yield* resetConnection();
+  if (method === "signout") return yield* secretLogout();
   if (method === "organizations") {
-    const o = secretOrganizations();
+    const o = yield* secretOrganizations();
     return { organizations: "ok" in o && o.ok || [] };
   }
   if (method === "collections") {
-    const c = secretCollections(args.organization);
+    const c = yield* secretCollections(args.organization);
     return { collections: "ok" in c && c.ok || [] };
   }
   return { error: "unknown view method: " + method };
 }
-var plugin = {
+var plugin = defineProviderIo({
   secretStatus,
   renderGlance,
   viewCall,
@@ -894,6 +1057,7 @@ var plugin = {
   secretCollections,
   secretSync,
   secretInit,
+  __test_stopServe: stopServe,
   // exported for parity tests (pure logic, no host.exec)
   __test_base64: base64Encode,
   __test_mapError: mapBwError,
@@ -906,5 +1070,5 @@ var plugin = {
   __test_hostOf: hostOf,
   __test_serverHostAllowed: serverHostAllowed,
   __test_bwExecOpts: bwExecOpts
-};
+}, () => host.io);
 var plugin_default = plugin;

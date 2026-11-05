@@ -27,6 +27,7 @@ function replay(method, args, exec) {
     secretGet: (key) => key === 'session' ? 'mock-session' : null,
     exec: (raw) => { commands.push(JSON.parse(raw)); return exec(JSON.parse(raw)); },
   } };
+  require("../../scripts/test-host-io.cjs").installTestHostIo(sandbox);
   vm.createContext(sandbox);
   vm.runInContext(bundle, sandbox);
   sandbox.__plugin__ = sandbox.module.exports.default;

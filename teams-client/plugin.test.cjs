@@ -1,3 +1,4 @@
+require("../scripts/test-host-io.cjs").installTestHostIo();
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -965,7 +966,7 @@ test("host body captions reach file sends without option parsing", () => {
 });
 
 test("mixed inline and host bodies are refused before any host operation", () => {
-  globalThis.host = new Proxy({}, { get: (_target, key) => { if (key === "path") return { isWindows: true }; throw new Error("host must not be used"); } });
+  globalThis.host = new Proxy({}, { get: (_target, key) => { if (key === "io") return _target.io; if (key === "path") return { isWindows: true }; throw new Error("host must not be used"); } });
   for (const [verb, args] of [
     ["send", [ALEX_CHAT, "--key", "mixed", "inline"]],
     ["send-to", ["Alexander Kouznetsov", "inline"]],

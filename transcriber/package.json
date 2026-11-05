@@ -1,11 +1,11 @@
 {
   "name": "@codeterm/plugin-transcriber",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "license": "PolyForm-Shield-1.0.0",
   "private": true,
   "type": "module",
   "description": "CodeTerm Transcriber plugin: speech-to-text backend (local Whisper server or mesh peer).",
   "devDependencies": {
-    "@codeterm/plugin-sdk": "^1.4.6"
+    "@codeterm/plugin-sdk": "^1.18.7"
   }
 }

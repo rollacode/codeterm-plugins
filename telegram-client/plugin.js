@@ -34,9 +34,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// node_modules/qrcode-generator/qrcode.js
+// ../../codeterm-plugins/node_modules/qrcode-generator/qrcode.js
 var require_qrcode = __commonJS({
-  "node_modules/qrcode-generator/qrcode.js"(exports, module2) {
+  "../../codeterm-plugins/node_modules/qrcode-generator/qrcode.js"(exports, module2) {
     var qrcode2 = (function() {
       var qrcode3 = function(typeNumber, errorCorrectionLevel) {
         var PAD0 = 236;
@@ -1728,6 +1728,28 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
+// ../../codeterm/codeterm/packages/plugin-sdk/src/ioPrograms.ts
+function* ioValue(request) {
+  return yield request;
+}
+function* ioMap(values, project) {
+  const result = [];
+  for (let index = 0; index < values.length; index++) result.push(yield* project(values[index], index));
+  return result;
+}
+function defineProviderIo(source, io) {
+  const exports = { ...source };
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (typeof value !== "function") continue;
+    exports[key] = function(...args) {
+      const result = value.apply(source, args);
+      return result && typeof result.next === "function" ? io().run(result) : result;
+    };
+  }
+  return exports;
+}
+
 // telegram-client/src/qr.ts
 var import_qrcode_generator = __toESM(require_qrcode(), 1);
 var QUIET_ZONE = 4;
@@ -2115,12 +2137,12 @@ function parseJson(text) {
     return null;
   }
 }
-function redact(text) {
+function* redact(text) {
   let out = text || "";
   for (const key of ["api_id", "api_hash"]) {
     let value = "";
     try {
-      value = host.secretGet(key) || "";
+      value = (yield* ioValue({ op: "secretGet", name: key })) || "";
     } catch {
       value = "";
     }
@@ -2128,16 +2150,16 @@ function redact(text) {
   }
   return out;
 }
-function redactDeep(value) {
-  if (typeof value === "string") return redact(value);
-  if (Array.isArray(value)) return value.map(redactDeep);
+function* redactDeep(value) {
+  if (typeof value === "string") return yield* redact(value);
+  if (Array.isArray(value)) return yield* ioMap(value, redactDeep);
   if (!value || typeof value !== "object") return value;
   const out = {};
-  for (const key of Object.keys(value)) if (key !== "app_id" && key !== "app_hash") out[key] = redactDeep(value[key]);
+  for (const key of Object.keys(value)) if (key !== "app_id" && key !== "app_hash") out[key] = yield* redactDeep(value[key]);
   return out;
 }
-function telegramLoginArtifacts(text) {
-  const safe = redact(String(text || "")).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, " ");
+function* telegramLoginArtifacts(text) {
+  const safe = (yield* redact(String(text || ""))).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, " ");
   const match = safe.match(/tg:\/\/login\?token=[A-Za-z0-9_%=-]+/i);
   if (!match) return {};
   const link = match[0].replace(/[),.;]+$/, "");
@@ -2159,13 +2181,13 @@ function rejectedCredentials(failure) {
 function loginFailureMessage(failure) {
   return rejectedCredentials(failure) ? `Telegram rejected the API ID and hash (${failure.match(/API_[A-Z_]+/)?.[0]}). Check them at https://my.telegram.org, store the corrected values with --secret api_id and --secret api_hash, then run login again.` : `tg login failed: ${failure}`;
 }
-function resetRejectedConfig(p, label) {
-  const entries = host.fs.readDir(p.root) || [];
+function* resetRejectedConfig(p, label) {
+  const entries = (yield* host.io.fs.readDir(p.root)) || [];
   const prefix = new RegExp(`^gotd\\.(session|peers)\\.${label}\\.`);
-  for (const entry of entries) if (prefix.test(entry.name)) host.fs.removeFile(entry.path);
-  host.fs.removeFile(p.config);
+  for (const entry of entries) if (prefix.test(entry.name)) yield* host.io.fs.removeFile(entry.path);
+  yield* host.io.fs.removeFile(p.config);
   try {
-    host.secretDelete("config_initialized");
+    yield* ioValue({ op: "secretDelete", name: "config_initialized" });
   } catch {
   }
 }
@@ -2183,48 +2205,48 @@ function notInstalledMessage(p) {
   if (!p) return "The host home directory is unavailable.";
   return `tg is not installed in ${p.root}. Install the pinned release with: ${installCommand(p)}`;
 }
-function safeError(run) {
+function* safeError(run) {
   if (run.ok) return "";
-  const detail = redact(run.error || run.stderr || "tg command failed").trim();
+  const detail = (yield* redact(run.error || run.stderr || "tg command failed")).trim();
   return detail.slice(0, 600) || "tg command failed";
 }
-function options(args, env, extra) {
+function* options(args, env, extra) {
   const p = paths();
-  if (!p || !host.fs.fileExists(p.binary)) return null;
+  if (!p || !(yield* host.io.fs.fileExists(p.binary))) return null;
   const full = ["--config", p.config].concat(args);
   return { bin: p.binary, args: full, env: env || {}, ...extra || {} };
 }
-function startTg(args, env, extra) {
-  const opts = options(args, env, extra);
+function* startTg(args, env, extra) {
+  const opts = yield* options(args, env, extra);
   if (!opts) return { error: notInstalledMessage(paths()) };
   try {
-    const started = host.exec.start(opts);
+    const started = yield* ioValue({ op: "execStart", options: opts });
     if (!started || !started.jobId && !started.error) return { error: "tg start returned no job identifier.", ambiguousStart: true };
     return started;
   } catch {
     return { error: "Could not confirm whether tg started.", ambiguousStart: true };
   }
 }
-function runTg(args, env) {
-  const opts = options(args, env, { timeoutMs: 4500 });
+function* runTg(args, env) {
+  const opts = yield* options(args, env, { timeoutMs: 4500 });
   if (!opts) return { ok: false, error: notInstalledMessage(paths()), stderr: "" };
-  const raw = host.exec(JSON.stringify(opts));
+  const raw = JSON.stringify(yield* host.io.exec(opts));
   const result = parseJson(raw);
   if (!result) return { ok: false, error: "tg returned an unreadable process result.", stderr: "" };
-  const stdout = redact(result.stdout || "");
-  const stderr = redact(result.stderr || "");
-  if (result.error) return { ok: false, error: redact(result.error), stderr };
+  const stdout = yield* redact(result.stdout || "");
+  const stderr = yield* redact(result.stderr || "");
+  if (result.error) return { ok: false, error: yield* redact(result.error), stderr };
   if (result.code !== 0) return { ok: false, error: stderr || stdout || `tg exited ${result.code}`, stderr };
   return { ok: true, stdout, stderr, raw: String(result.stdout || "") };
 }
-function jsonCommand(args) {
-  const run = runTg(["--output", "json"].concat(args));
-  if (!run.ok) return { error: safeError(run), stderr: run.stderr };
+function* jsonCommand(args) {
+  const run = yield* runTg(["--output", "json"].concat(args));
+  if (!run.ok) return { error: yield* safeError(run), stderr: run.stderr };
   const parsed = parseJson(run.raw.trim());
   if (!parsed || parsed.schema !== 1 || parsed.data === void 0) {
     return { error: "tg returned an unreadable JSON response." };
   }
-  return { data: redactDeep(parsed.data), stderr: run.stderr };
+  return { data: yield* redactDeep(parsed.data), stderr: run.stderr };
 }
 function settings() {
   let value = {};
@@ -2453,8 +2475,8 @@ function chatId(peer) {
   const id = String(peer.id);
   return /^-?[0-9]{1,20}$/.test(id) ? `id:${id}` : null;
 }
-function agentAccounts() {
-  const response = jsonCommand(["accounts"]);
+function* agentAccounts() {
+  const response = yield* jsonCommand(["accounts"]);
   if (response.error) return { error: response.error };
   const accounts = Array.isArray(response.data.accounts) ? response.data.accounts : [];
   return { result: JSON.stringify({ accounts: accounts.map((a) => ({
@@ -2464,8 +2486,8 @@ function agentAccounts() {
     current: !!a.default
   })) }) };
 }
-function accountLabels() {
-  const response = jsonCommand(["accounts"]);
+function* accountLabels() {
+  const response = yield* jsonCommand(["accounts"]);
   if (response.error) return { labels: [], current: null, error: response.error };
   const accounts = Array.isArray(response.data.accounts) ? response.data.accounts : [];
   return {
@@ -2473,17 +2495,17 @@ function accountLabels() {
     current: (accounts.find((a) => a.default) || {}).label || null
   };
 }
-function useAccount(label) {
+function* useAccount(label) {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(label) || label === "all") return { error: "Use a configured account label." };
-  const current = accountLabels();
+  const current = yield* accountLabels();
   if (current.error) return { error: current.error };
   if (current.labels.indexOf(label) < 0) return { error: "That account is not configured. Open the Telegram view to add it." };
-  const run = runTg(["accounts", "default", label]);
-  if (!run.ok) return { error: safeError(run) };
+  const run = yield* runTg(["accounts", "default", label]);
+  if (!run.ok) return { error: yield* safeError(run) };
   return { result: JSON.stringify({ currentAccount: label }) };
 }
-function chatList() {
-  const response = jsonCommand(["chats", "list", "--limit", "100"]);
+function* chatList() {
+  const response = yield* jsonCommand(["chats", "list", "--limit", "100"]);
   if (response.error) return { error: response.error };
   const source = Array.isArray(response.data.chats) ? response.data.chats : [];
   const chats = source.flatMap((item) => {
@@ -2503,8 +2525,8 @@ function chatList() {
   });
   return { chats };
 }
-function agentChats(args = []) {
-  const listed = chatList();
+function* agentChats(args = []) {
+  const listed = yield* chatList();
   if ("error" in listed) return { error: listed.error };
   const query = args.join(" ").trim();
   if (!query) return { result: JSON.stringify({ chats: listed.chats }) };
@@ -2512,33 +2534,33 @@ function agentChats(args = []) {
   const next = found.match ? `Send with: send ${found.match.id} --key <unique-key> --from-pad message.md` : found.ambiguous ? "Several chats match. Show the candidates to the owner and ask which one, then use its id." : "No chat in the 100 most recent dialogs matches. Ask the owner for a more exact name or @username.";
   return { result: JSON.stringify({ query, match: found.match, ambiguous: found.ambiguous, candidates: found.candidates, next }) };
 }
-function readSendScope() {
+function* readSendScope() {
   const p = paths();
   if (!p) return parseSendScope(null, validChatId);
   let raw = null;
   try {
-    raw = host.fs.fileExists(p.scope) ? host.fs.readFile(p.scope) ?? "" : null;
+    raw = (yield* host.io.fs.fileExists(p.scope)) ? (yield* host.io.fs.readFile(p.scope)) ?? "" : null;
   } catch {
     raw = "";
   }
   return parseSendScope(raw, validChatId);
 }
-function setSendScope(args) {
+function* setSendScope(args) {
   const scope = validateSendScope(args, validChatId);
   if ("error" in scope) return { error: `${scope.error} The restriction was not changed.` };
   const p = paths();
   if (!p) return { error: "Could not resolve the Telegram Client data directory; the restriction was not changed." };
   try {
-    if (!host.fs.makeDirs(p.root) || host.fs.writeFile(p.scope, JSON.stringify(scope)) !== true) {
+    if (!(yield* host.io.fs.makeDirs(p.root)) || (yield* host.io.fs.writeFile(p.scope, JSON.stringify(scope))) !== true) {
       return { error: "Could not save the restriction; the previous setting still applies." };
     }
   } catch {
     return { error: "Could not save the restriction; the previous setting still applies." };
   }
-  return { result: JSON.stringify(readSendScope()) };
+  return { result: JSON.stringify(yield* readSendScope()) };
 }
-function resolveSender() {
-  const current = status();
+function* resolveSender() {
+  const current = yield* rememberLoginState(yield* status());
   if (current.state === "reauth-needed") return { error: "reauth-needed: Open Telegram Client and complete QR login again before previewing or sending." };
   if (current.state === "logged-in" && current.currentAccount && !current.resolvedAccount) {
     return { error: "upstream-rejected: The signed-in sender could not be resolved from Telegram. Restore the connection and refresh status before sending." };
@@ -2558,10 +2580,10 @@ function resolveSender() {
     telegramUserId
   } };
 }
-function resolveDestination(id, sender) {
+function* resolveDestination(id, sender) {
   if (!validChatId(id)) return { error: "invalid-request: Use an immutable chat id such as id:12345 from `chats <name>`; display names are not accepted here." };
   if (id === `id:${sender.telegramUserId}`) return { destination: { id, label: "Saved Messages", type: "self", savedMessages: true } };
-  const listed = chatList();
+  const listed = yield* chatList();
   if ("error" in listed) return { error: `upstream-rejected: Could not list chats to resolve ${id} (${listed.error}).` };
   const match = listed.chats.find((chat) => chat.id === id);
   if (!match) return { error: failureMessage("chat-not-found", id) };
@@ -2570,19 +2592,19 @@ function resolveDestination(id, sender) {
   return { destination };
 }
 var previewSequence = 0;
-function previewCommand(args, origin = "agent", body) {
+function* previewCommand(args, origin = "agent", body) {
   if (args.length < (body === void 0 ? 2 : 1)) return { error: "Usage: preview <immutable-chat-id> --from-pad message.md." };
   if (!validChatId(args[0])) return { error: "Usage: preview <immutable-chat-id> --from-pad message.md. Display names are not accepted; find the id with `chats <name>`." };
   if (body !== void 0 && args.length > 1) return { error: "invalid-request: Inline text cannot be combined with a body source." };
   const text = body ?? args.slice(1).join(" ");
   if (!text.length) return { error: "Preview text must not be empty." };
-  const resolved = resolveSender();
+  const resolved = yield* resolveSender();
   if ("error" in resolved) return { error: resolved.error };
-  const destination = resolveDestination(args[0], resolved.sender);
+  const destination = yield* resolveDestination(args[0], resolved.sender);
   if ("error" in destination) return { error: destination.error };
   const previewId = sha256Hex(`preview\0${now()}\0${++previewSequence}`);
   previewTokens[previewId] = { sender: resolved.sender, destination: destination.destination, text, origin, previewNonce: previewId };
-  const decision = decideSend(readSendScope(), destination.destination.id, origin);
+  const decision = decideSend(yield* readSendScope(), destination.destination.id, origin);
   return { result: JSON.stringify({
     previewId,
     sender: resolved.sender,
@@ -2622,20 +2644,20 @@ function failureMessage(kind, detail) {
   }
   return "upstream-rejected: The send failure state was not recognized. Inspect Telegram Client status before trying again.";
 }
-function loadOutbox(p) {
+function* loadOutbox(p) {
   try {
-    if (!host.fs.fileExists(p.outbox)) return { ledger: { schema: 1, attempts: [] } };
-    const value = host.fs.readJson(p.outbox);
+    if (!(yield* host.io.fs.fileExists(p.outbox))) return { ledger: { schema: 1, attempts: [] } };
+    const value = yield* host.io.fs.readJson(p.outbox);
     if (!value || value.schema !== 1 || !Array.isArray(value.attempts)) return { error: "the existing outbox ledger is unreadable" };
     return { ledger: value };
   } catch {
     return { error: "the existing outbox ledger could not be read" };
   }
 }
-function persistOutbox(p, ledger) {
+function* persistOutbox(p, ledger) {
   try {
-    if (!host.fs.makeDirs(p.root)) return false;
-    return host.fs.writeFile(p.outbox, JSON.stringify(ledger)) === true;
+    if (!(yield* host.io.fs.makeDirs(p.root))) return false;
+    return (yield* host.io.fs.writeFileAtomic(p.outbox, JSON.stringify(ledger))) === true;
   } catch {
     return false;
   }
@@ -2720,13 +2742,13 @@ function attemptResult(attempt) {
     deliveryGuarantee: "The local ledger prevents another send for a recorded sent key. Telegram does not provide an exactly-once delivery guarantee."
   }) };
 }
-function failAttempt(p, ledger, attempt, kind, detail) {
+function* failAttempt(p, ledger, attempt, kind, detail) {
   attempt.failure = kind;
   attempt.failureMessage = failureMessage(kind, detail);
   attempt.updatedAt = now();
   if (kind === "rate-limited") {
     const seconds = waitSeconds(String(detail || ""));
-    if (seconds === null) return failAttempt(p, ledger, attempt, "upstream-rejected", "Telegram returned a rate-limit message without a retry duration; check Telegram before retrying");
+    if (seconds === null) return yield* failAttempt(p, ledger, attempt, "upstream-rejected", "Telegram returned a rate-limit message without a retry duration; check Telegram before retrying");
     attempt.state = "rate_limited";
     attempt.retryAfter = now() + seconds * 1e3;
     attempt.failureMessage = failureMessage(kind, attempt.retryAfter);
@@ -2737,13 +2759,13 @@ function failAttempt(p, ledger, attempt, kind, detail) {
     attempt.state = "failed";
     delete attempt.retryAfter;
   }
-  persistOutbox(p, ledger);
+  yield* persistOutbox(p, ledger);
   return rememberSendFailure(kind, attempt.failureMessage);
 }
-function recordedByCallerKey(key, chatId2, text, format) {
+function* recordedByCallerKey(key, chatId2, text, format) {
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
-  const loaded = loadOutbox(p);
+  const loaded = yield* loadOutbox(p);
   if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error);
   const attempt = loaded.ledger.attempts.find((item) => item.idempotencyKey === key);
   if (!attempt) return null;
@@ -2752,7 +2774,7 @@ function recordedByCallerKey(key, chatId2, text, format) {
   }
   if (attempt.state === "sent") return attemptResult(attempt);
   if (attempt.state === "unknown") return sendFailureResult("unknown");
-  if (attempt.state === "pending") return failAttempt(p, loaded.ledger, attempt, "unknown", "a prior invocation ended while its send result was unrecorded");
+  if (attempt.state === "pending") return yield* failAttempt(p, loaded.ledger, attempt, "unknown", "a prior invocation ended while its send result was unrecorded");
   if (attempt.state === "rate_limited" && Number(attempt.retryAfter) > now()) return sendFailureResult("rate-limited", attempt.retryAfter);
   return null;
 }
@@ -2763,84 +2785,93 @@ function serverMessageId(data) {
   }
   return null;
 }
-function sendCommand(origin, args, body) {
+function* sendCommand(origin, args, body) {
   const parsed = parseSendArgs(args, body);
   if ("error" in parsed) return rememberPrefixedFailure(parsed.error);
-  const matchingPreview = parsed.format === "plain" ? Object.values(previewTokens).reverse().find((token) => token.destination.id === parsed.chatId && token.text === parsed.text) : void 0;
-  let key = parsed.key || matchingPreview?.previewNonce;
-  if (key) {
-    const recorded = recordedByCallerKey(key, parsed.chatId, parsed.text, parsed.format);
-    if (recorded) return recorded;
-  }
-  const resolved = resolveSender();
-  if ("error" in resolved) return rememberPrefixedFailure(resolved.error);
-  const found = resolveDestination(parsed.chatId, resolved.sender);
-  if ("error" in found) return rememberPrefixedFailure(found.error);
-  const decision = decideSend(readSendScope(), found.destination.id, origin);
-  if (!decision.allow) return sendFailureResult("chat-not-allowed", decision.message);
-  if (!key) key = sha256Hex(`send\0${now()}\0${++previewSequence}\0${parsed.chatId}`).slice(0, 32);
-  const payloadHash = sendPayloadHash(parsed.text, parsed.format);
-  const p = paths();
-  if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
-  const loaded = loadOutbox(p);
-  if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error);
-  const ledger = loaded.ledger;
-  let attempt = ledger.attempts.find((item) => item.idempotencyKey === key);
-  if (attempt && (attempt.payloadHash !== payloadHash || attempt.sender.id !== resolved.sender.id || attempt.destination.id !== found.destination.id)) {
-    return sendFailureResult("invalid-request", "This idempotency key is already bound to a different sender, chat, or text (including format); choose a new key.");
-  }
-  if (attempt && attempt.state === "sent") return attemptResult(attempt);
-  if (attempt && attempt.state === "unknown") return sendFailureResult("unknown");
-  if (attempt && attempt.state === "pending") {
-    return failAttempt(p, ledger, attempt, "unknown", "a prior invocation ended while its send result was unrecorded");
-  }
-  if (attempt && attempt.state === "rate_limited" && Number(attempt.retryAfter) > now()) {
-    return sendFailureResult("rate-limited", attempt.retryAfter);
-  }
-  if (!attempt) {
-    attempt = {
-      idempotencyKey: key,
-      sender: resolved.sender,
-      destination: found.destination,
-      payloadHash,
-      state: "pending",
-      createdAt: now(),
-      updatedAt: now(),
-      sendCount: 0
-    };
-    ledger.attempts.push(attempt);
-  }
-  attempt.state = "pending";
-  attempt.updatedAt = now();
-  attempt.sendCount += 1;
-  delete attempt.failure;
-  delete attempt.failureMessage;
-  delete attempt.retryAfter;
-  if (!persistOutbox(p, ledger)) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; Telegram was not contacted");
-  const peer = found.destination.savedMessages ? [] : ["--peer", found.destination.id];
-  const opts = options(["--account", resolved.sender.id, "--output", "json", "send", ...peer, ...sendFormatArgs(parsed.format), "--", parsed.text], void 0, { timeoutMs: 5e3 });
-  if (!opts) return failAttempt(p, ledger, attempt, "upstream-rejected", "tg binary is unavailable before send");
-  return host.exec.async(opts, (result) => {
-    const output = redact(result.stdout || "");
-    const detail = redact(result.error || result.stderr || output).trim();
-    if (result.error || typeof result.code !== "number" || result.code !== 0) return failAttempt(p, ledger, attempt, failureForUpstream(detail), detail);
-    const response = parseJson(output.trim());
-    if (!response || response.schema !== 1 || response.data === void 0) return failAttempt(p, ledger, attempt, "unknown");
-    const upstreamId = serverMessageId(response.data);
-    if (upstreamId === null) return failAttempt(p, ledger, attempt, "unknown");
-    attempt.telegramMessageId = upstreamId;
-    attempt.state = "sent";
+  const lockPaths = paths();
+  if (!lockPaths) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
+  const outboxLock = yield* host.io.fs.lockFile(lockPaths.outbox);
+  if (!outboxLock) return { error: "busy: another send is updating the outbox; retry after it completes." };
+  try {
+    const matchingPreview = parsed.format === "plain" ? Object.values(previewTokens).reverse().find((token) => token.destination.id === parsed.chatId && token.text === parsed.text) : void 0;
+    let key = parsed.key || matchingPreview?.previewNonce;
+    if (key) {
+      const recorded = yield* recordedByCallerKey(key, parsed.chatId, parsed.text, parsed.format);
+      if (recorded) return recorded;
+    }
+    const resolved = yield* resolveSender();
+    if ("error" in resolved) return rememberPrefixedFailure(resolved.error);
+    const found = yield* resolveDestination(parsed.chatId, resolved.sender);
+    if ("error" in found) return rememberPrefixedFailure(found.error);
+    const decision = decideSend(yield* readSendScope(), found.destination.id, origin);
+    if (!decision.allow) return sendFailureResult("chat-not-allowed", decision.message);
+    if (!key) key = sha256Hex(`send\0${now()}\0${++previewSequence}\0${parsed.chatId}`).slice(0, 32);
+    const payloadHash = sendPayloadHash(parsed.text, parsed.format);
+    const p = paths();
+    if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
+    const loaded = yield* loadOutbox(p);
+    if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error);
+    const ledger = loaded.ledger;
+    let attempt = ledger.attempts.find((item) => item.idempotencyKey === key);
+    if (attempt && (attempt.payloadHash !== payloadHash || attempt.sender.id !== resolved.sender.id || attempt.destination.id !== found.destination.id)) {
+      return sendFailureResult("invalid-request", "This idempotency key is already bound to a different sender, chat, or text (including format); choose a new key.");
+    }
+    if (attempt && attempt.state === "sent") return attemptResult(attempt);
+    if (attempt && attempt.state === "unknown") return sendFailureResult("unknown");
+    if (attempt && attempt.state === "pending") {
+      return yield* failAttempt(p, ledger, attempt, "unknown", "a prior invocation ended while its send result was unrecorded");
+    }
+    if (attempt && attempt.state === "rate_limited" && Number(attempt.retryAfter) > now()) {
+      return sendFailureResult("rate-limited", attempt.retryAfter);
+    }
+    if (!attempt) {
+      attempt = {
+        idempotencyKey: key,
+        sender: resolved.sender,
+        destination: found.destination,
+        payloadHash,
+        state: "pending",
+        createdAt: now(),
+        updatedAt: now(),
+        sendCount: 0
+      };
+      ledger.attempts.push(attempt);
+    }
+    attempt.state = "pending";
     attempt.updatedAt = now();
+    attempt.sendCount += 1;
     delete attempt.failure;
     delete attempt.failureMessage;
-    if (!persistOutbox(p, ledger)) return sendFailureResult("unknown");
-    return attemptResult(attempt);
-  });
+    delete attempt.retryAfter;
+    if (!(yield* persistOutbox(p, ledger))) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; Telegram was not contacted");
+    const peer = found.destination.savedMessages ? [] : ["--peer", found.destination.id];
+    const opts = yield* options(["--account", resolved.sender.id, "--output", "json", "send", ...peer, ...sendFormatArgs(parsed.format), "--", parsed.text], void 0, { timeoutMs: 5e3 });
+    if (!opts) return yield* failAttempt(p, ledger, attempt, "upstream-rejected", "tg binary is unavailable before send");
+    const result = yield* host.io.exec(opts);
+    {
+      const output = yield* redact(result.stdout || "");
+      const detail = (yield* redact(result.error || result.stderr || output)).trim();
+      if (result.error || typeof result.code !== "number" || result.code !== 0) return yield* failAttempt(p, ledger, attempt, failureForUpstream(detail), detail);
+      const response = parseJson(output.trim());
+      if (!response || response.schema !== 1 || response.data === void 0) return yield* failAttempt(p, ledger, attempt, "unknown");
+      const upstreamId = serverMessageId(response.data);
+      if (upstreamId === null) return yield* failAttempt(p, ledger, attempt, "unknown");
+      attempt.telegramMessageId = upstreamId;
+      attempt.state = "sent";
+      attempt.updatedAt = now();
+      delete attempt.failure;
+      delete attempt.failureMessage;
+      if (!(yield* persistOutbox(p, ledger))) return sendFailureResult("unknown");
+      return attemptResult(attempt);
+    }
+  } finally {
+    yield* host.io.fs.unlockFile(outboxLock);
+  }
 }
 var fileJobs = {};
 var SAVED_MESSAGES = /^(me|self|saved|saved messages)$/i;
-function chatByIdOrName(value) {
-  const listed = chatList();
+function* chatByIdOrName(value) {
+  const listed = yield* chatList();
   if ("error" in listed) return { error: `upstream-rejected: Could not list chats to resolve ${JSON.stringify(value)} (${listed.error}).` };
   if (validChatId(value)) {
     const match = listed.chats.find((chat) => chat.id === value);
@@ -2854,10 +2885,10 @@ function chatByIdOrName(value) {
   }
   return { error: `chat-not-found: No chat among this account's 100 most recent dialogs matches ${JSON.stringify(value)}. Ask the owner for a more exact name or @username, or look it up with \`chats <name>\`.` };
 }
-function resolveFileDestination(value, sender) {
-  if (SAVED_MESSAGES.test(value)) return resolveDestination(`id:${sender.telegramUserId}`, sender);
-  if (validChatId(value)) return resolveDestination(value, sender);
-  const found = chatByIdOrName(value);
+function* resolveFileDestination(value, sender) {
+  if (SAVED_MESSAGES.test(value)) return yield* resolveDestination(`id:${sender.telegramUserId}`, sender);
+  if (validChatId(value)) return yield* resolveDestination(value, sender);
+  const found = yield* chatByIdOrName(value);
   if ("error" in found) return found;
   const destination = { id: found.chat.id, label: found.chat.title || found.chat.id, type: found.chat.type, username: found.chat.username };
   if (found.chat.phone) destination.phone = found.chat.phone;
@@ -2866,13 +2897,13 @@ function resolveFileDestination(value, sender) {
 function mib(bytes) {
   return (bytes / (1024 * 1024)).toFixed(1);
 }
-function fileFacts(path, maxBytes) {
+function* fileFacts(path, maxBytes) {
   const native = nativePath(path);
   const name = baseName(native);
   const dir = parentDir(native);
   let entries = [];
   try {
-    entries = dir ? host.fs.readDir(dir) || [] : [];
+    entries = dir ? (yield* host.io.fs.readDir(dir)) || [] : [];
   } catch {
     entries = [];
   }
@@ -2884,7 +2915,7 @@ function fileFacts(path, maxBytes) {
   if (size > maxBytes) return { kind: "file-too-large", detail: `${name} is ${mib(size)} MiB, over the ${mib(maxBytes)} MiB limit` };
   let head = null;
   try {
-    head = host.fs.readFileHead(native, 1);
+    head = yield* host.io.fs.readFileHead(native, 1);
   } catch {
     head = null;
   }
@@ -2908,29 +2939,29 @@ function uploadingResult(attempt) {
     next: `Run \`send-file-status ${attempt.idempotencyKey}\` to read back telegramMessageId when the upload finishes. Do not start another send-file for this file under a new key.`
   }) };
 }
-function finishUpload(p, ledger, attempt, result) {
-  const output = redact(result.stdout || "");
-  const detail = redact(result.error || result.stderr || output).trim();
-  if (result.error || typeof result.code !== "number" || result.code !== 0) return failAttempt(p, ledger, attempt, failureForUpstream(detail), detail);
+function* finishUpload(p, ledger, attempt, result) {
+  const output = yield* redact(result.stdout || "");
+  const detail = (yield* redact(result.error || result.stderr || output)).trim();
+  if (result.error || typeof result.code !== "number" || result.code !== 0) return yield* failAttempt(p, ledger, attempt, failureForUpstream(detail), detail);
   const response = parseJson(output.trim());
-  if (!response || response.schema !== 1 || response.data === void 0) return failAttempt(p, ledger, attempt, "unknown");
+  if (!response || response.schema !== 1 || response.data === void 0) return yield* failAttempt(p, ledger, attempt, "unknown");
   const upstreamId = uploadedMessageId(response.data);
-  if (upstreamId === null) return failAttempt(p, ledger, attempt, "unknown");
+  if (upstreamId === null) return yield* failAttempt(p, ledger, attempt, "unknown");
   attempt.telegramMessageId = upstreamId;
   attempt.state = "sent";
   attempt.updatedAt = now();
   delete attempt.failure;
   delete attempt.failureMessage;
-  if (!persistOutbox(p, ledger)) return sendFailureResult("unknown");
+  if (!(yield* persistOutbox(p, ledger))) return sendFailureResult("unknown");
   return attemptResult(attempt);
 }
-function settleFileAttempt(p, ledger, attempt) {
+function* settleFileAttempt(p, ledger, attempt) {
   if (attempt.state === "sent") return attemptResult(attempt);
   if (attempt.state === "unknown") return sendFailureResult("unknown");
   if (attempt.state === "rate_limited" && Number(attempt.retryAfter) > now()) return sendFailureResult("rate-limited", attempt.retryAfter);
   if (attempt.state !== "pending") return null;
   const jobId = fileJobs[attempt.idempotencyKey];
-  if (!jobId) return failAttempt(p, ledger, attempt, "unknown", "the upload process result was lost before it was recorded");
+  if (!jobId) return yield* failAttempt(p, ledger, attempt, "unknown", "the upload process result was lost before it was recorded");
   let polled;
   try {
     polled = host.exec.poll(jobId);
@@ -2943,120 +2974,138 @@ function settleFileAttempt(p, ledger, attempt) {
   } catch {
   }
   delete fileJobs[attempt.idempotencyKey];
-  return finishUpload(p, ledger, attempt, polled);
+  return yield* finishUpload(p, ledger, attempt, polled);
 }
-function settleFileJobs() {
+function* settleFileJobs() {
   const keys = Object.keys(fileJobs);
   const p = paths();
   if (!keys.length || !p) return;
-  const loaded = loadOutbox(p);
-  if (!loaded.ledger) return;
-  for (const key of keys) {
-    const attempt = loaded.ledger.attempts.find((item) => item.idempotencyKey === key);
-    if (attempt && attempt.state === "pending") settleFileAttempt(p, loaded.ledger, attempt);
-    else delete fileJobs[key];
+  const outboxLock = yield* host.io.fs.lockFile(p.outbox);
+  if (!outboxLock) return;
+  try {
+    const loaded = yield* loadOutbox(p);
+    if (!loaded.ledger) return;
+    for (const key of keys) {
+      const attempt = loaded.ledger.attempts.find((item) => item.idempotencyKey === key);
+      if (attempt && attempt.state === "pending") yield* settleFileAttempt(p, loaded.ledger, attempt);
+      else delete fileJobs[key];
+    }
+  } finally {
+    yield* host.io.fs.unlockFile(outboxLock);
   }
 }
-function sendFileCommand(origin, args, body) {
+function* sendFileCommand(origin, args, body) {
   const parsed = parseSendFileArgs(args, body);
   if ("error" in parsed) return requestFailure(parsed.error);
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
-  const payloadHash = filePayloadHash(parsed.chat, parsed.path, parsed.format, parsed.caption);
-  if (parsed.key) {
-    const loaded2 = loadOutbox(p);
-    if (!loaded2.ledger) return sendFailureResult("upstream-rejected", loaded2.error);
-    const existing = loaded2.ledger.attempts.find((item) => item.idempotencyKey === parsed.key);
-    if (existing && (existing.kind !== "file" || existing.payloadHash !== payloadHash)) {
-      return requestFailure("This idempotency key is already bound to a different chat, file, caption, or format; choose a new key.");
-    }
-    if (existing) {
-      const settled2 = settleFileAttempt(p, loaded2.ledger, existing);
-      if (settled2) return settled2;
-    }
-  }
-  const resolved = resolveSender();
-  if ("error" in resolved) return rememberPrefixedFailure(resolved.error);
-  const found = resolveFileDestination(parsed.chat, resolved.sender);
-  if ("error" in found) return rememberPrefixedFailure(found.error);
-  const decision = decideSend(readSendScope(), found.destination.id, origin);
-  if (!decision.allow) return sendFailureResult("chat-not-allowed", decision.message);
-  const facts = fileFacts(parsed.path, settings().fileMaxBytes);
-  if ("kind" in facts) return facts.kind === "invalid-request" ? requestFailure(facts.detail) : sendFailureResult(facts.kind, facts.detail);
-  const key = parsed.key || sha256Hex(`file\0${now()}\0${++previewSequence}\0${parsed.chat}`).slice(0, 32);
-  const loaded = loadOutbox(p);
-  if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error);
-  const ledger = loaded.ledger;
-  let attempt = ledger.attempts.find((item) => item.idempotencyKey === key);
-  if (attempt && (attempt.sender.id !== resolved.sender.id || attempt.destination.id !== found.destination.id)) {
-    return requestFailure("This idempotency key is already bound to a different sender or chat; choose a new key.");
-  }
-  if (!attempt) {
-    attempt = {
-      idempotencyKey: key,
-      sender: resolved.sender,
-      destination: found.destination,
-      payloadHash,
-      state: "pending",
-      createdAt: now(),
-      updatedAt: now(),
-      sendCount: 0,
-      kind: "file"
-    };
-    ledger.attempts.push(attempt);
-  }
-  attempt.fileBytes = facts.size;
-  attempt.state = "pending";
-  attempt.updatedAt = now();
-  attempt.sendCount += 1;
-  delete attempt.failure;
-  delete attempt.failureMessage;
-  delete attempt.retryAfter;
-  if (!persistOutbox(p, ledger)) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; Telegram was not contacted");
-  const peer = found.destination.savedMessages ? [] : ["--peer", found.destination.id];
-  const caption = parsed.caption ? [`--message=${parsed.caption}`] : [];
-  const html = parsed.format === "html" ? ["--html"] : [];
-  const opts = options(["--account", resolved.sender.id, "--output", "json", "upload", ...peer, ...caption, ...html, "--", facts.path], void 0, { timeoutMs: uploadTimeoutMs(facts.size) });
-  if (!opts) return failAttempt(p, ledger, attempt, "upstream-rejected", "tg binary is unavailable before upload");
-  let started = null;
+  const outboxLock = yield* host.io.fs.lockFile(p.outbox);
+  if (!outboxLock) return { error: "busy: another send is updating the outbox; retry after it completes." };
   try {
-    started = host.exec.start(opts);
-  } catch {
-    started = null;
+    const payloadHash = filePayloadHash(parsed.chat, parsed.path, parsed.format, parsed.caption);
+    if (parsed.key) {
+      const loaded2 = yield* loadOutbox(p);
+      if (!loaded2.ledger) return sendFailureResult("upstream-rejected", loaded2.error);
+      const existing = loaded2.ledger.attempts.find((item) => item.idempotencyKey === parsed.key);
+      if (existing && (existing.kind !== "file" || existing.payloadHash !== payloadHash)) {
+        return requestFailure("This idempotency key is already bound to a different chat, file, caption, or format; choose a new key.");
+      }
+      if (existing) {
+        const settled2 = yield* settleFileAttempt(p, loaded2.ledger, existing);
+        if (settled2) return settled2;
+      }
+    }
+    const resolved = yield* resolveSender();
+    if ("error" in resolved) return rememberPrefixedFailure(resolved.error);
+    const found = yield* resolveFileDestination(parsed.chat, resolved.sender);
+    if ("error" in found) return rememberPrefixedFailure(found.error);
+    const decision = decideSend(yield* readSendScope(), found.destination.id, origin);
+    if (!decision.allow) return sendFailureResult("chat-not-allowed", decision.message);
+    const facts = yield* fileFacts(parsed.path, settings().fileMaxBytes);
+    if ("kind" in facts) return facts.kind === "invalid-request" ? requestFailure(facts.detail) : sendFailureResult(facts.kind, facts.detail);
+    const key = parsed.key || sha256Hex(`file\0${now()}\0${++previewSequence}\0${parsed.chat}`).slice(0, 32);
+    const loaded = yield* loadOutbox(p);
+    if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error);
+    const ledger = loaded.ledger;
+    let attempt = ledger.attempts.find((item) => item.idempotencyKey === key);
+    if (attempt && (attempt.sender.id !== resolved.sender.id || attempt.destination.id !== found.destination.id)) {
+      return requestFailure("This idempotency key is already bound to a different sender or chat; choose a new key.");
+    }
+    if (!attempt) {
+      attempt = {
+        idempotencyKey: key,
+        sender: resolved.sender,
+        destination: found.destination,
+        payloadHash,
+        state: "pending",
+        createdAt: now(),
+        updatedAt: now(),
+        sendCount: 0,
+        kind: "file"
+      };
+      ledger.attempts.push(attempt);
+    }
+    attempt.fileBytes = facts.size;
+    attempt.state = "pending";
+    attempt.updatedAt = now();
+    attempt.sendCount += 1;
+    delete attempt.failure;
+    delete attempt.failureMessage;
+    delete attempt.retryAfter;
+    if (!(yield* persistOutbox(p, ledger))) return sendFailureResult("upstream-rejected", "the pending attempt could not be persisted; Telegram was not contacted");
+    const peer = found.destination.savedMessages ? [] : ["--peer", found.destination.id];
+    const caption = parsed.caption ? [`--message=${parsed.caption}`] : [];
+    const html = parsed.format === "html" ? ["--html"] : [];
+    const opts = yield* options(["--account", resolved.sender.id, "--output", "json", "upload", ...peer, ...caption, ...html, "--", facts.path], void 0, { timeoutMs: uploadTimeoutMs(facts.size) });
+    if (!opts) return yield* failAttempt(p, ledger, attempt, "upstream-rejected", "tg binary is unavailable before upload");
+    let started = null;
+    try {
+      started = yield* ioValue({ op: "execStart", options: opts });
+    } catch {
+      started = null;
+    }
+    if (!started || !started.jobId) {
+      return started && started.error ? yield* failAttempt(p, ledger, attempt, "upstream-rejected", yield* redact(started.error)) : yield* failAttempt(p, ledger, attempt, "unknown", "the upload process start could not be confirmed");
+    }
+    fileJobs[key] = started.jobId;
+    const settled = yield* settleFileAttempt(p, ledger, attempt);
+    return settled || uploadingResult(attempt);
+  } finally {
+    yield* host.io.fs.unlockFile(outboxLock);
   }
-  if (!started || !started.jobId) {
-    return started && started.error ? failAttempt(p, ledger, attempt, "upstream-rejected", redact(started.error)) : failAttempt(p, ledger, attempt, "unknown", "the upload process start could not be confirmed");
-  }
-  fileJobs[key] = started.jobId;
-  const settled = settleFileAttempt(p, ledger, attempt);
-  return settled || uploadingResult(attempt);
 }
-function sendFileStatus(args) {
+function* sendFileStatus(args) {
   if (args.length !== 1 || !/^[A-Za-z0-9._:-]{1,160}$/.test(args[0])) return requestFailure("Usage: send-file-status <idempotency-key> from the send-file result.");
   const p = paths();
   if (!p) return sendFailureResult("upstream-rejected", "the plugin-owned data directory is unavailable");
-  const loaded = loadOutbox(p);
-  if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error);
-  const attempt = loaded.ledger.attempts.find((item) => item.idempotencyKey === args[0]);
-  if (!attempt || attempt.kind !== "file") return requestFailure(`No file send is recorded under key ${args[0]}.`);
-  const settled = settleFileAttempt(p, loaded.ledger, attempt);
-  if (settled) return settled;
-  return { error: attempt.failureMessage || failureMessage(attempt.failure || "upstream-rejected") };
+  const outboxLock = yield* host.io.fs.lockFile(p.outbox);
+  if (!outboxLock) return { error: "busy: another send is updating the outbox; retry after it completes." };
+  try {
+    const loaded = yield* loadOutbox(p);
+    if (!loaded.ledger) return sendFailureResult("upstream-rejected", loaded.error);
+    const attempt = loaded.ledger.attempts.find((item) => item.idempotencyKey === args[0]);
+    if (!attempt || attempt.kind !== "file") return requestFailure(`No file send is recorded under key ${args[0]}.`);
+    const settled = yield* settleFileAttempt(p, loaded.ledger, attempt);
+    if (settled) return settled;
+    return { error: attempt.failureMessage || failureMessage(attempt.failure || "upstream-rejected") };
+  } finally {
+    yield* host.io.fs.unlockFile(outboxLock);
+  }
 }
-function searchMessagesCommand(args) {
+function* searchMessagesCommand(args) {
   const parsed = parseSearchArgs(args);
   if ("error" in parsed) return { error: `invalid-request: ${parsed.error}` };
   let chat = null;
   if (parsed.chat !== void 0) {
     if (SAVED_MESSAGES.test(parsed.chat)) chat = { id: "me", title: "Saved Messages", type: "self", username: null };
     else {
-      const found = chatByIdOrName(parsed.chat);
+      const found = yield* chatByIdOrName(parsed.chat);
       if ("error" in found) return { error: found.error.replace(/nothing was sent\./, "nothing was searched.") };
       chat = { id: found.chat.id, title: found.chat.title, type: found.chat.type, username: found.chat.username };
     }
   }
   const command = chat ? ["search", "--limit", String(parsed.limit), "--", chat.id, parsed.query] : ["search", "--global", "--limit", String(parsed.limit), "--", parsed.query];
-  const response = jsonCommand(command);
+  const response = yield* jsonCommand(command);
   if (response.error) {
     return { error: authFailure(response.error) ? "reauth-needed: Telegram authorization expired or was revoked. Complete QR login in Telegram Client, then search again." : `upstream-rejected: Telegram search did not complete (${response.error}).` };
   }
@@ -3081,7 +3130,7 @@ function searchMessagesCommand(args) {
   }
   return { result: JSON.stringify(out) };
 }
-function agentHistory(args) {
+function* agentHistory(args) {
   if (args.length < 1 || args.length > 2 || !validChatId(args[0])) return { error: "Usage: history id:<numeric-chat-id> [count]. Select an id from chats." };
   const configured = settings();
   let count = configured.historyCount;
@@ -3089,7 +3138,7 @@ function agentHistory(args) {
     if (!/^[0-9]+$/.test(args[1])) return { error: "History count must be an integer from 1 to 50." };
     count = Math.max(1, Math.min(MAX_COUNT, Number(args[1])));
   }
-  const response = jsonCommand(["history", args[0], "--limit", String(count)]);
+  const response = yield* jsonCommand(["history", args[0], "--limit", String(count)]);
   if (response.error) return { error: response.error };
   const history = boundedHistory(args[0], response.data.messages, count, configured.historyMaxBytes);
   return { result: history.json };
@@ -3103,9 +3152,9 @@ function storageBackend() {
   if (host.path.isWindows) return { name: "plugin-owned plaintext file", note: "tg stores the session under this plugin data directory on Windows. This plugin does not inspect or set a Windows ACL, so it makes no ACL protection claim." };
   return { name: "plugin-owned plaintext file", note: "On POSIX hosts tg stores the session in a 0600 file under this plugin's private data directory." };
 }
-function failureState(p) {
+function* failureState(p) {
   try {
-    const value = host.fs.readJson(p.failure);
+    const value = yield* host.io.fs.readJson(p.failure);
     if (value && typeof value.state === "string") return { state: value.state, message: String(value.message || "") };
   } catch {
   }
@@ -3123,11 +3172,47 @@ function versionOlder(installed, required) {
   }
   return false;
 }
-function status() {
+function* localLoginStatus() {
+  const p = paths();
+  if (!p || !(yield* host.io.fs.fileExists(p.binary))) return { state: "not-installed" };
+  if ((yield* ioValue({ op: "secretGet", name: "config_initialized" })) !== "true") return { state: (yield* ioValue({ op: "secretGet", name: "configured_once" })) === "true" ? "logged-out" : "installed-but-not-configured" };
+  let state = null;
+  try {
+    state = JSON.parse((yield* ioValue({ op: "secretGet", name: "login_state" })) || "null");
+  } catch {
+  }
+  return state || { state: "unknown", message: "Session state has not been checked yet. Run health once to verify the existing session." };
+}
+function* rememberLoginState(current) {
+  if (["logged-in", "logged-out", "reauth-needed"].includes(current.state)) {
+    yield* ioValue({ op: "secretSet", name: "login_state", value: JSON.stringify({ state: current.state, currentAccount: current.currentAccount || null }) });
+  }
+  return current;
+}
+function loginIdentity(output) {
+  const start = output.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0, quoted = false, escaped = false;
+  for (let i = start; i < output.length; i++) {
+    const c = output[i];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === '"') quoted = false;
+    } else if (c === '"') quoted = true;
+    else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) {
+      const value = parseJson(output.slice(start, i + 1));
+      return value && value.schema === 1 && value.data && value.data.id ? value.data : null;
+    }
+  }
+  return null;
+}
+function* status() {
   const p = paths();
   if (!p) return { state: "unsupported-platform", message: "The host home directory is unavailable.", storage: storageBackend() };
   const storage = storageBackend();
-  const failure = failureState(p);
+  const failure = yield* failureState(p);
   if (failure.state === "unsupported-platform" || failure.state === "checksum-mismatch") {
     return { state: failure.state, message: failure.message, storage, accounts: [], currentAccount: null };
   }
@@ -3137,17 +3222,17 @@ function status() {
     return { state: "unsupported-platform", message: `No pinned tg release is available for ${platformName() || "this operating system"}.`, storage, accounts: [], currentAccount: null };
   }
   if (failure.state) return { state: "install-error", message: failure.message || "The pinned tg install did not complete.", storage, accounts: [], currentAccount: null };
-  if (!host.fs.fileExists(p.binary)) {
+  if (!(yield* host.io.fs.fileExists(p.binary))) {
     return { state: "not-installed", message: notInstalledMessage(p), installCommand: installCommand(p), storage, accounts: [], currentAccount: null };
   }
-  const install = host.fs.readJson(p.install);
+  const install = yield* host.io.fs.readJson(p.install);
   if (install && install.version && install.version !== VERSION) {
     const state = versionOlder(String(install.version), VERSION) ? "upgrade-available" : "install-error";
     const message = state === "upgrade-available" ? `tg ${VERSION} is pinned; installed metadata reports ${String(install.version)}. Run the installer to upgrade.` : `Installed tg ${String(install.version)} does not match pinned ${VERSION}. Reinstall the pinned release.`;
     return { state, message, storage, accounts: [], currentAccount: null };
   }
-  if (host.secretGet("config_initialized") !== "true") {
-    const wasConfigured = host.secretGet("configured_once") === "true";
+  if ((yield* ioValue({ op: "secretGet", name: "config_initialized" })) !== "true") {
+    const wasConfigured = (yield* ioValue({ op: "secretGet", name: "configured_once" })) === "true";
     return {
       state: wasConfigured ? "logged-out" : "installed-but-not-configured",
       message: wasConfigured ? "Signed out. Store your Telegram API ID and hash again, then start QR login." : "Store your own Telegram API ID and hash (secrets api_id and api_hash), then start QR login.",
@@ -3156,14 +3241,14 @@ function status() {
       currentAccount: null
     };
   }
-  const listed = accountLabels();
+  const listed = yield* accountLabels();
   if (listed.error) {
     const state = authFailure(listed.error) ? "reauth-needed" : "logged-out";
     const message = state === "reauth-needed" ? "Telegram needs authorization again. Start QR login again." : "Telegram account config could not be read. Store your own API credentials again, then start QR login.";
     return { state, message, storage, accounts: [], currentAccount: null };
   }
-  const result = jsonCommand(["whoami"]);
-  const accounts = jsonCommand(["accounts"]);
+  const result = yield* jsonCommand(["whoami"]);
+  const accounts = yield* jsonCommand(["accounts"]);
   const accountRows = accounts.error ? [] : (Array.isArray(accounts.data.accounts) ? accounts.data.accounts : []).map((a) => ({
     id: String(a.label || ""),
     label: String(a.label || ""),
@@ -3172,7 +3257,7 @@ function status() {
   }));
   const active = accountRows.find((a) => a.current) || null;
   if (result.error || !(active && active.hasSession)) {
-    const pending = pendingLoginStep();
+    const pending = yield* pendingLoginStep();
     if (pending) {
       return { state: loginStateForStep(pending.step), message: stepMessage(pending.step), loginStep: pending.step, storage, accounts: accountRows, currentAccount: active && active.label, resolvedAccount: null };
     }
@@ -3192,22 +3277,22 @@ function status() {
     resolvedAccount: result.data
   };
 }
-function ensureAccount(label, apiId, apiHash) {
+function* ensureAccount(label, apiId, apiHash) {
   const p = paths();
   if (!p) return { error: "The host home directory is unavailable." };
-  if (!host.fs.fileExists(p.binDir)) return { error: notInstalledMessage(p) };
+  if (!(yield* host.io.fs.fileExists(p.binDir))) return { error: notInstalledMessage(p) };
   let configExists = false;
   try {
-    configExists = host.secretGet("config_initialized") === "true";
+    configExists = (yield* ioValue({ op: "secretGet", name: "config_initialized" })) === "true";
   } catch {
     configExists = false;
   }
   if (!configExists) {
-    const existing = jsonCommand(["accounts"]);
+    const existing = yield* jsonCommand(["accounts"]);
     if (!existing.error) {
       configExists = true;
       try {
-        if (!host.secretSet("config_initialized", "true")) return { error: "Could not record Telegram config state in the host secret store." };
+        if (!(yield* ioValue({ op: "secretSet", name: "config_initialized", value: "true" }))) return { error: "Could not record Telegram config state in the host secret store." };
       } catch {
         return { error: "Could not record Telegram config state in the host secret store." };
       }
@@ -3216,30 +3301,30 @@ function ensureAccount(label, apiId, apiHash) {
     }
   }
   if (!configExists) {
-    const init = runTg(["init"], { APP_ID: apiId, APP_HASH: apiHash });
-    if (!init.ok) return { error: safeError(init) };
+    const init = yield* runTg(["init"], { APP_ID: apiId, APP_HASH: apiHash });
+    if (!init.ok) return { error: yield* safeError(init) };
     try {
-      if (!host.secretSet("config_initialized", "true")) return { error: "tg created the config, but CodeTerm could not record its state. Retry login to recover." };
+      if (!(yield* ioValue({ op: "secretSet", name: "config_initialized", value: "true" }))) return { error: "tg created the config, but CodeTerm could not record its state. Retry login to recover." };
     } catch {
       return { error: "tg created the config, but CodeTerm could not record its state. Retry login to recover." };
     }
   }
   if (label !== "default") {
-    const listed = accountLabels();
+    const listed = yield* accountLabels();
     if (listed.error) return { error: listed.error };
     if (listed.labels.indexOf(label) < 0) {
-      const add = runTg(["accounts", "add", label], { APP_ID: apiId, APP_HASH: apiHash });
-      if (!add.ok) return { error: safeError(add) };
+      const add = yield* runTg(["accounts", "add", label], { APP_ID: apiId, APP_HASH: apiHash });
+      if (!add.ok) return { error: yield* safeError(add) };
     }
   }
   return {};
 }
-function loginStart(args, fromAgent = false) {
+function* loginStart(args, fromAgent = false) {
   const p = paths();
-  if (!p || !host.fs.fileExists(p.binary)) return { error: notInstalledMessage(p) };
+  if (!p || !(yield* host.io.fs.fileExists(p.binary))) return { error: notInstalledMessage(p) };
   const useStored = fromAgent || !String(args.apiId || "").trim() && !String(args.apiHash || "").trim();
-  const apiId = String(useStored ? host.secretGet("api_id") || "" : args.apiId || "").trim();
-  const apiHash = String(useStored ? host.secretGet("api_hash") || "" : args.apiHash || "").trim();
+  const apiId = String(useStored ? (yield* ioValue({ op: "secretGet", name: "api_id" })) || "" : args.apiId || "").trim();
+  const apiHash = String(useStored ? (yield* ioValue({ op: "secretGet", name: "api_hash" })) || "" : args.apiHash || "").trim();
   const label = String(args.accountLabel || "default").trim();
   const twoFactorPassword = String(args.twoFactorPassword || "");
   if (!/^[0-9]{1,12}$/.test(apiId) || !/^[A-Fa-f0-9]{32}$/.test(apiHash)) {
@@ -3248,13 +3333,13 @@ function loginStart(args, fromAgent = false) {
     return { error: `${stored} Store them from stdin: printf '%s' "<API_ID>" | codeterm plugin config telegram-client --secret api_id, then the same for api_hash.` };
   }
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(label) || label === "all") return { error: "Account label must use letters, numbers, hyphens, or underscores." };
-  if (!useStored && (!host.secretSet("api_id", apiId) || !host.secretSet("api_hash", apiHash))) return { error: "Could not store Telegram API credentials in the host secret store." };
-  const setup = ensureAccount(label, apiId, apiHash);
+  if (!useStored && (!(yield* ioValue({ op: "secretSet", name: "api_id", value: apiId })) || !(yield* ioValue({ op: "secretSet", name: "api_hash", value: apiHash })))) return { error: "Could not store Telegram API credentials in the host secret store." };
+  const setup = yield* ensureAccount(label, apiId, apiHash);
   if (setup.error) return { error: setup.error };
-  if (activeLoginJobId && loginJobs[activeLoginJobId]) cancelLoginJob(activeLoginJobId);
-  removeLoginLogs(p, label);
+  if (activeLoginJobId && loginJobs[activeLoginJobId]) yield* cancelLoginJob(activeLoginJobId);
+  yield* removeLoginLogs(p, label);
   const logFile = childPath(p.root, `login-${label}.${now().toString(36)}${(++loginLogSequence).toString(36)}.log`);
-  const job = startTg(["--account", label, "login", "--output", "json"], twoFactorPassword ? { TG_PASSWORD: twoFactorPassword } : {}, { detach: true, logFile, timeoutMs: LOGIN_TIMEOUT_MS });
+  const job = yield* startTg(["--account", label, "login", "--output", "json"], twoFactorPassword ? { TG_PASSWORD: twoFactorPassword } : {}, { detach: true, logFile, timeoutMs: LOGIN_TIMEOUT_MS });
   if (job.error || !job.jobId) return { error: job.error || "tg login did not start." };
   loginJobs[job.jobId] = label;
   activeLoginJobId = job.jobId;
@@ -3277,7 +3362,7 @@ function forgetLoginJob(jobId) {
   delete loginLaunchPending[jobId];
   if (activeLoginJobId === jobId) activeLoginJobId = null;
 }
-function cancelLoginJob(jobId) {
+function* cancelLoginJob(jobId) {
   const log = loginLogPaths[jobId];
   try {
     host.exec.close(jobId);
@@ -3285,31 +3370,31 @@ function cancelLoginJob(jobId) {
   }
   forgetLoginJob(jobId);
   if (log) try {
-    host.fs.removeFile(log);
+    yield* host.io.fs.removeFile(log);
   } catch {
   }
 }
-function removeLoginLogs(p, label) {
+function* removeLoginLogs(p, label) {
   let entries = [];
   try {
-    entries = host.fs.readDir(p.root) || [];
+    entries = (yield* host.io.fs.readDir(p.root)) || [];
   } catch {
     entries = [];
   }
   for (const entry of entries) {
     const match = LOGIN_LOG.exec(entry.name);
     if (match && match[1] === label) try {
-      host.fs.removeFile(entry.path);
+      yield* host.io.fs.removeFile(entry.path);
     } catch {
     }
   }
 }
-function pendingLoginStep() {
+function* pendingLoginStep() {
   const p = paths();
   if (!p) return null;
   let entries = [];
   try {
-    entries = host.fs.readDir(p.root) || [];
+    entries = (yield* host.io.fs.readDir(p.root)) || [];
   } catch {
     return null;
   }
@@ -3317,7 +3402,7 @@ function pendingLoginStep() {
   for (const entry of entries) {
     const match = LOGIN_LOG.exec(entry.name);
     if (!match || match[1] === running) continue;
-    const outcome = classifyLoginOutput(host.fs.readFileTail(entry.path, 8192) || "");
+    const outcome = classifyLoginOutput((yield* host.io.fs.readFileTail(entry.path, 8192)) || "");
     if (outcome.phase === "input-required") return { label: match[1], step: outcome.step };
   }
   return null;
@@ -3325,33 +3410,33 @@ function pendingLoginStep() {
 function stepResult(step, label, output) {
   return { done: false, output, state: loginStateForStep(step), step, accountLabel: label, message: stepMessage(step) };
 }
-function takeOneShotSecret(name) {
+function* takeOneShotSecret(name) {
   let value = "";
   try {
-    value = host.secretGet(name) || "";
+    value = (yield* ioValue({ op: "secretGet", name })) || "";
   } catch {
     value = "";
   }
   try {
-    if (value) host.secretDelete(name);
+    if (value) yield* ioValue({ op: "secretDelete", name });
   } catch {
   }
   return value;
 }
-function submitLoginPassword(password) {
+function* submitLoginPassword(password) {
   if (!password) return { error: `No password was received. Pipe it on stdin, never as an argument: ${PASSWORD_SUBMIT}` };
   if (activeLoginJobId && loginJobs[activeLoginJobId]) {
     return { error: "Telegram login is still running and has not asked for a password. Poll login-status and submit the password when it reports password-required." };
   }
-  const pending = pendingLoginStep();
+  const pending = yield* pendingLoginStep();
   if (pending && pending.step.kind !== "password") return { error: `Telegram is waiting for a different step (${pending.step.prompt}), not a password.` };
   const label = pending ? pending.label : "default";
-  const started = loginStart({ accountLabel: label, twoFactorPassword: password }, true);
+  const started = yield* loginStart({ accountLabel: label, twoFactorPassword: password }, true);
   if (started.error) return { error: started.error };
-  const current = loginPoll(started.jobId);
+  const current = yield* loginPoll(started.jobId);
   return { ...current, jobId: started.jobId };
 }
-function loginPoll(jobId) {
+function* loginPoll(jobId) {
   if (!jobId || !loginJobs[jobId]) return { error: "Unknown login job." };
   const p = paths();
   if (!p) return { error: "The host home directory is unavailable." };
@@ -3363,26 +3448,26 @@ function loginPoll(jobId) {
       return { error: "Could not read the login job." };
     }
     if (!launch.done) {
-      let partial = host.fs.readFileTail(loginLogPaths[jobId], 8192) || "";
+      let partial = (yield* host.io.fs.readFileTail(loginLogPaths[jobId], 8192)) || "";
       const password = loginPasswords[jobId] || "";
       if (password) partial = partial.split(password).join("[redacted]");
-      return { done: false, output: redact(partial), state: "login-in-progress", ...telegramLoginArtifacts(partial) };
+      return { done: false, output: yield* redact(partial), state: "login-in-progress", ...yield* telegramLoginArtifacts(partial) };
     }
     try {
       host.exec.close(jobId);
     } catch {
     }
     delete loginLaunchPending[jobId];
-    const exited = classifyLoginOutput(redact(host.fs.readFileTail(loginLogPaths[jobId], 8192) || ""));
+    const exited = classifyLoginOutput(yield* redact((yield* host.io.fs.readFileTail(loginLogPaths[jobId], 8192)) || ""));
     if ((launch.error || launch.code !== 0) && exited.phase === "running") {
       forgetLoginJob(jobId);
-      return { done: true, output: redact(launch.stderr || ""), error: redact(launch.error || launch.stderr || "tg login could not start."), state: "reauth-needed" };
+      return { done: true, output: yield* redact(launch.stderr || ""), error: yield* redact(launch.error || launch.stderr || "tg login could not start."), state: "reauth-needed" };
     }
   }
-  let output = host.fs.readFileTail(loginLogPaths[jobId], 8192) || "";
+  let output = (yield* host.io.fs.readFileTail(loginLogPaths[jobId], 8192)) || "";
   const twoFactorPassword = loginPasswords[jobId] || "";
   if (twoFactorPassword) output = output.split(twoFactorPassword).join("[redacted]");
-  output = redact(output);
+  output = yield* redact(output);
   const label = loginJobs[jobId];
   const outcome = classifyLoginOutput(output);
   if (outcome.phase === "input-required") {
@@ -3391,130 +3476,132 @@ function loginPoll(jobId) {
   }
   if (outcome.phase === "failed") {
     forgetLoginJob(jobId);
-    if (rejectedCredentials(outcome.failure)) resetRejectedConfig(p, label);
+    if (rejectedCredentials(outcome.failure)) yield* resetRejectedConfig(p, label);
     return { done: true, output, state: "logged-out", error: loginFailureMessage(outcome.failure), credentialsRejected: rejectedCredentials(outcome.failure) };
   }
-  const verified = jsonCommand(["--account", label, "whoami"]);
-  const artifacts = telegramLoginArtifacts(output);
-  if (verified.error) return { done: false, output, state: "login-in-progress", message: "Scan the QR, then refresh progress. Telegram session authorization is still pending.", ...artifacts };
-  const selected = runTg(["accounts", "default", label]);
-  if (!selected.ok) return { done: false, output, state: "login-in-progress", message: safeError(selected), ...artifacts };
+  const identity = loginIdentity(output);
+  const artifacts = yield* telegramLoginArtifacts(output);
+  if (!identity) return { done: false, output, state: "login-in-progress", message: "Scan the QR, then refresh progress. Telegram session authorization is still pending.", ...artifacts };
+  const selected = yield* runTg(["accounts", "default", label]);
+  if (!selected.ok) return { done: false, output, state: "login-in-progress", message: yield* safeError(selected), ...artifacts };
   const log = loginLogPaths[jobId];
   forgetLoginJob(jobId);
   try {
-    if (log) host.fs.removeFile(log);
+    if (log) yield* host.io.fs.removeFile(log);
   } catch {
   }
   try {
-    host.secretSet("configured_once", "true");
+    yield* ioValue({ op: "secretSet", name: "configured_once", value: "true" });
   } catch {
   }
+  yield* rememberLoginState({ state: "logged-in", currentAccount: label });
   return { done: true, output, state: "logged-in", currentAccount: label, ...artifacts };
 }
-function removeFiles(p) {
-  const entries = host.fs.readDir(p.root) || [];
+function* removeFiles(p) {
+  const entries = (yield* host.io.fs.readDir(p.root)) || [];
   for (const entry of entries) {
-    if ((/^gotd\.(session|peers)\..+\.json$/.test(entry.name) || LOGIN_LOG.test(entry.name)) && host.fs.fileExists(entry.path)) {
-      if (!host.fs.removeFile(entry.path) && host.fs.fileExists(entry.path)) return false;
+    if ((/^gotd\.(session|peers)\..+\.json$/.test(entry.name) || LOGIN_LOG.test(entry.name)) && (yield* host.io.fs.fileExists(entry.path))) {
+      if (!(yield* host.io.fs.removeFile(entry.path)) && (yield* host.io.fs.fileExists(entry.path))) return false;
     }
   }
-  const initialized = host.secretGet("config_initialized") === "true";
-  if (!host.fs.removeFile(p.config) && initialized) return false;
+  const initialized = (yield* ioValue({ op: "secretGet", name: "config_initialized" })) === "true";
+  if (!(yield* host.io.fs.removeFile(p.config)) && initialized) return false;
   return true;
 }
-function clearSecret(name) {
-  return !host.secretGet(name) || host.secretDelete(name);
+function* clearSecret(name) {
+  return !(yield* ioValue({ op: "secretGet", name })) || (yield* ioValue({ op: "secretDelete", name }));
 }
-function logout() {
+function* logout() {
   const p = paths();
   if (!p) return { error: "The host home directory is unavailable." };
-  if (host.secretGet("config_initialized") === "true") {
-    if (!host.fs.fileExists(p.binary)) return { error: "tg is missing. Reinstall the pinned helper, then retry logout so the Keychain session can be removed." };
-    const listed = accountLabels();
+  if ((yield* ioValue({ op: "secretGet", name: "config_initialized" })) === "true") {
+    if (!(yield* host.io.fs.fileExists(p.binary))) return { error: "tg is missing. Reinstall the pinned helper, then retry logout so the Keychain session can be removed." };
+    const listed = yield* accountLabels();
     if (listed.error) return { error: "Could not list configured accounts. The config and sessions were kept so logout can be retried." };
     for (const label of listed.labels.length ? listed.labels : ["default"]) {
-      const removed = runTg(["--account", label, "logout"]);
+      const removed = yield* runTg(["--account", label, "logout"]);
       if (!removed.ok) return { error: `Could not verify local logout for account ${label}. The config was kept so logout can be retried.` };
     }
   }
   try {
-    if (!removeFiles(p)) return { error: "Could not remove the local Telegram config and session files." };
+    if (!(yield* removeFiles(p))) return { error: "Could not remove the local Telegram config and session files." };
   } catch {
     return { error: "Could not remove the local Telegram config and session files." };
   }
   try {
-    const apiIdDeleted = clearSecret("api_id");
-    const apiHashDeleted = clearSecret("api_hash");
-    const configMarkerDeleted = clearSecret("config_initialized");
-    const logoutMarkerSaved = host.secretSet("configured_once", "true");
+    const apiIdDeleted = yield* clearSecret("api_id");
+    const apiHashDeleted = yield* clearSecret("api_hash");
+    const configMarkerDeleted = yield* clearSecret("config_initialized");
+    yield* clearSecret("login_state");
+    const logoutMarkerSaved = yield* ioValue({ op: "secretSet", name: "configured_once", value: "true" });
     if (!apiIdDeleted || !apiHashDeleted || !configMarkerDeleted || !logoutMarkerSaved) return { error: "Local files were removed, but the host could not update all Telegram secret state." };
   } catch {
     return { error: "Local files were removed, but the host could not update all Telegram secret state." };
   }
   return { result: "Logged out. Telegram config and local session files were removed." };
 }
-function onAgentCommand(ctx) {
+function* onAgentCommand(ctx) {
   const args = Array.isArray(ctx.args) ? ctx.args : [];
   switch (ctx.verb) {
     case "login": {
       if (args.length) return { error: "Usage: login. It takes no arguments; store api_id and api_hash with --secret first." };
-      const started = loginStart({}, true);
+      const started = yield* loginStart({}, true);
       if (started.error) return { error: `Telegram login could not start: ${started.error}` };
-      const current = loginPoll(started.jobId);
+      const current = yield* loginPoll(started.jobId);
       if (current.error) return { error: `Telegram login needs attention: ${current.error}` };
       return { result: JSON.stringify(agentLoginView({ ...current, state: current.state || started.state }, started.jobId)) };
     }
     case "login-status": {
       if (args.length) return { error: "Usage: login-status." };
       if (!activeLoginJobId) {
-        const pending = pendingLoginStep();
+        const pending = yield* pendingLoginStep();
         if (pending) return { result: JSON.stringify(agentLoginView(stepResult(pending.step, pending.label))) };
-        const state = status().state;
+        const state = (yield* localLoginStatus()).state;
         return { result: JSON.stringify({ state, done: true, next: nextLoginAction({ state }) }) };
       }
       const jobId = activeLoginJobId;
-      const current = loginPoll(jobId);
+      const current = yield* loginPoll(jobId);
       if (current.error) return { error: `Telegram login needs attention: ${current.error}` };
       return { result: JSON.stringify(agentLoginView(current, jobId)) };
     }
     case "login-password": {
       if (args.length) return { error: `Usage: login-password. It takes no arguments; the password travels only on stdin: ${PASSWORD_SUBMIT}` };
-      const submitted = submitLoginPassword(takeOneShotSecret("login_password"));
+      const submitted = yield* submitLoginPassword(yield* takeOneShotSecret("login_password"));
       if (submitted.error) return { error: `Telegram password was not submitted: ${submitted.error}` };
       return { result: JSON.stringify(agentLoginView(submitted, submitted.jobId)) };
     }
     case "accounts":
-      return agentAccounts();
+      return yield* agentAccounts();
     case "use":
-      return args.length === 1 ? useAccount(args[0]) : { error: "Usage: use <configured-account-id>." };
+      return args.length === 1 ? yield* useAccount(args[0]) : { error: "Usage: use <configured-account-id>." };
     case "chats":
-      return agentChats(args);
+      return yield* agentChats(args);
     case "history":
-      return agentHistory(args);
+      return yield* agentHistory(args);
     case "search-messages":
-      return searchMessagesCommand(args);
+      return yield* searchMessagesCommand(args);
     case "health": {
-      settleFileJobs();
-      const current = status();
-      current.setup = setupSummary();
+      yield* settleFileJobs();
+      const current = yield* rememberLoginState(yield* status());
+      current.setup = yield* setupSummary();
       current.account = accountSummary(current);
       delete current.resolvedAccount;
       current.runtimeDir = paths()?.root || null;
-      current.sendScope = readSendScope();
-      current.sendState = latestSendState();
+      current.sendScope = yield* readSendScope();
+      current.sendState = yield* latestSendState();
       return { result: JSON.stringify(current) };
     }
     case "logout":
-      return logout();
+      return yield* logout();
     case "send-to":
     case "send":
-      return sendCommand("agent", args, ctx.body);
+      return yield* sendCommand("agent", args, ctx.body);
     case "preview":
-      return previewCommand(args, "agent", ctx.body);
+      return yield* previewCommand(args, "agent", ctx.body);
     case "send-file":
-      return sendFileCommand("agent", args, ctx.body);
+      return yield* sendFileCommand("agent", args, ctx.body);
     case "send-file-status":
-      return sendFileStatus(args);
+      return yield* sendFileStatus(args);
     default:
       return { error: `Unknown Telegram verb: ${ctx.verb}` };
   }
@@ -3536,22 +3623,22 @@ function agentLoginView(current, jobId) {
     message: step ? stepMessage(step) : current.done ? "Telegram login status is complete." : qr ? SCAN_MESSAGE : "Login is still pending; poll login-status again for the QR and tg:// link."
   };
 }
-function setupSummary() {
+function* setupSummary() {
   const p = paths();
-  const stored = (name) => {
+  const stored = function* (name) {
     try {
-      return !!host.secretGet(name);
+      return !!(yield* ioValue({ op: "secretGet", name }));
     } catch {
       return false;
     }
   };
   let runtimeInstalled = false;
   try {
-    runtimeInstalled = !!p && host.fs.fileExists(p.binary);
+    runtimeInstalled = !!p && (yield* host.io.fs.fileExists(p.binary));
   } catch {
     runtimeInstalled = false;
   }
-  return { runtimeInstalled, apiIdSet: stored("api_id"), apiHashStored: stored("api_hash") };
+  return { runtimeInstalled, apiIdSet: yield* stored("api_id"), apiHashStored: yield* stored("api_hash") };
 }
 function accountSummary(current) {
   if (!current || !current.currentAccount) return null;
@@ -3560,10 +3647,10 @@ function accountSummary(current) {
   const username = identity && identity.username ? `@${String(identity.username).replace(/^@/, "")}` : null;
   return { label: String(current.currentAccount), name: name || null, username, phone: identity ? maskPhone(identity.phone) : null, resolved: !!identity };
 }
-function latestSendState() {
+function* latestSendState() {
   const p = paths();
   if (!p) return null;
-  const loaded = loadOutbox(p);
+  const loaded = yield* loadOutbox(p);
   let persisted = null;
   if (loaded.ledger && loaded.ledger.attempts.length) {
     const attempt = loaded.ledger.attempts.reduce((latest, item) => Number(item.updatedAt) >= Number(latest.updatedAt) ? item : latest);
@@ -3581,47 +3668,47 @@ function latestSendState() {
   }
   return persisted;
 }
-function renderGlance() {
+function* renderGlance() {
   const p = paths();
   const nodes = [];
-  if (!p || !host.fs.fileExists(p.binary)) {
+  if (!p || !(yield* host.io.fs.fileExists(p.binary))) {
     nodes.push({ kind: "badge", label: "tg not installed", tone: "warn" });
     nodes.push({ kind: "text", text: "Use Configure with AI to install the pinned release and sign in.", style: { tone: "muted" } });
-  } else if (host.secretGet("config_initialized") !== "true") {
+  } else if ((yield* ioValue({ op: "secretGet", name: "config_initialized" })) !== "true") {
     nodes.push({ kind: "badge", label: "Not signed in", tone: "warn" });
     nodes.push({ kind: "text", text: "Use Configure with AI or the Telegram Client view to sign in.", style: { tone: "muted" } });
-  } else if (pendingLoginStep()) {
+  } else if (yield* pendingLoginStep()) {
     nodes.push({ kind: "badge", label: "Sign-in needs one more step", tone: "warn" });
     nodes.push({ kind: "text", text: "Open the Telegram Client view or ask the agent to finish signing in.", style: { tone: "muted" } });
   } else {
     nodes.push({ kind: "badge", label: "Configured", tone: "ok" });
     nodes.push({ kind: "text", text: storageBackend().name, style: { tone: "muted" } });
   }
-  const scope = readSendScope();
+  const scope = yield* readSendScope();
   nodes.push({ kind: "badge", label: scope.mode === "all" ? "Agent sends: any chat" : `Agent sends: ${scope.chats.length} allowed chat${scope.chats.length === 1 ? "" : "s"}`, tone: scope.mode === "all" ? "ok" : "warn" });
-  const latest = latestSendState();
+  const latest = yield* latestSendState();
   if (latest) {
     nodes.push({ kind: "badge", label: `Last send: ${latest.state}`, tone: latest.state === "sent" ? "ok" : "warn" });
     if (latest.message) nodes.push({ kind: "text", text: latest.message, style: { tone: "muted" } });
   }
   return { title: "Telegram Client", nodes };
 }
-function viewCall(method, args) {
+function* viewCall(method, args) {
   args = args || {};
   if (method === "status") {
-    settleFileJobs();
-    const current = status();
-    current.setup = setupSummary();
+    yield* settleFileJobs();
+    const current = yield* rememberLoginState(yield* status());
+    current.setup = yield* setupSummary();
     current.account = accountSummary(current);
     delete current.resolvedAccount;
     current.loginJobId = activeLoginJobId;
-    current.sendScope = readSendScope();
-    current.sendState = latestSendState();
+    current.sendScope = yield* readSendScope();
+    current.sendState = yield* latestSendState();
     return current;
   }
-  if (method === "preview") return previewCommand([String(args.chatId || ""), String(args.text || "")], "view");
-  if (method === "chats") return agentChats(String(args.query || "").trim() ? [String(args.query)] : []);
-  if (method === "setSendScope") return setSendScope(args);
+  if (method === "preview") return yield* previewCommand([String(args.chatId || ""), String(args.text || "")], "view");
+  if (method === "chats") return yield* agentChats(String(args.query || "").trim() ? [String(args.query)] : []);
+  if (method === "setSendScope") return yield* setSendScope(args);
   if (method === "send") {
     const chat = String(args.chatId || "");
     const text = String(args.text || "");
@@ -3629,16 +3716,16 @@ function viewCall(method, args) {
     if (!token || token.destination.id !== chat || token.text !== text) {
       return rememberSendFailure("invalid-request", "invalid-request: This view has no matching preview for that chat and text. Preview again before sending.");
     }
-    return sendCommand("view", [chat, "--key", String(args.idempotencyKey || token.previewNonce), text]);
+    return yield* sendCommand("view", [chat, "--key", String(args.idempotencyKey || token.previewNonce), text]);
   }
-  if (method === "loginStart") return loginStart(args);
-  if (method === "loginPoll") return loginPoll(String(args.jobId || ""));
-  if (method === "loginPassword") return submitLoginPassword(String(args.password || ""));
-  if (method === "useAccount") return useAccount(String(args.id || ""));
-  if (method === "logout") return logout();
+  if (method === "loginStart") return yield* loginStart(args);
+  if (method === "loginPoll") return yield* loginPoll(String(args.jobId || ""));
+  if (method === "loginPassword") return yield* submitLoginPassword(String(args.password || ""));
+  if (method === "useAccount") return yield* useAccount(String(args.id || ""));
+  if (method === "logout") return yield* logout();
   return { error: `Unknown Telegram view method: ${method}` };
 }
-var plugin = {
+var plugin = defineProviderIo({
   onAgentCommand,
   renderGlance,
   viewCall,
@@ -3652,6 +3739,8 @@ var plugin = {
   __test_storageBackend: storageBackend,
   __test_versionOlder: versionOlder,
   __test_status: status,
+  __test_localLoginStatus: localLoginStatus,
+  __test_loginIdentity: loginIdentity,
   __test_loginStart: loginStart,
   __test_loginPoll: loginPoll,
   __test_loginFailure: loginFailure,
@@ -3680,5 +3769,5 @@ var plugin = {
   __test_resetFileJobs: () => {
     for (const key of Object.keys(fileJobs)) delete fileJobs[key];
   }
-};
+}, () => host.io);
 var plugin_default = plugin;
