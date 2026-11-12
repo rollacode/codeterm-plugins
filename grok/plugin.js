@@ -713,9 +713,11 @@ var plugin = {
     const root = sessionsRoot();
     if (!root) return [];
     const result = [];
-    for (const cwdDir of (yield* host.io.fs.readDir(root)) || []) {
+    const cwdDirs = (yield* host.io.fs.readDir(root)) || [];
+    for (const cwdDir of cwdDirs) {
       if (!cwdDir.isDir) continue;
-      for (const entry of (yield* host.io.fs.readDir(cwdDir.path)) || []) {
+      const entries = (yield* host.io.fs.readDir(cwdDir.path)) || [];
+      for (const entry of entries) {
         if (!entry.isDir || !isUuid(entry.name)) continue;
         const metadata = yield* sessionMetadata(entry.path, entry.name);
         if (metadata) result.push(metadata);

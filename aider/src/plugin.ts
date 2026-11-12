@@ -417,7 +417,8 @@ const plugin: IoExports<PluginModule> = {
     const limit = typeof maxAgeMs === "number" && maxAgeMs > 0 ? maxAgeMs : 0;
     const now = Date.now();
     let newest: HistoryFileEntry | null = null;
-    for (const entry of (yield* historyFileEntries(cwd))) {
+    const entries = yield* historyFileEntries(cwd);
+    for (const entry of entries) {
       if (excluded.indexOf(entry.id) !== -1) continue;
       if (limit > 0) {
         if (entry.modifiedMs === null) continue;

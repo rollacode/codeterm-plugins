@@ -72,7 +72,8 @@ export function* execute(profile: Profile, name: string, raw: unknown, deadline:
     let visited = 0;
     while (queue.length) {
       const dir = queue.shift()!;
-      for (const entry of (yield* host.io.fs.readDir(dir.path)).sort((a, b) => a.path.localeCompare(b.path))) {
+      const entries = yield* host.io.fs.readDir(dir.path);
+      for (const entry of entries.sort((a, b) => a.path.localeCompare(b.path))) {
         if (++visited > 2000) throw new Error("search exceeds entry budget");
         const rel = entry.path.replace(/\\/g, "/").slice(root.replace(/\\/g, "/").length + 1);
         try { (yield* confinedPath(profile, rel)); } catch { continue; }
