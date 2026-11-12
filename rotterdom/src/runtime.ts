@@ -1,4 +1,4 @@
-import { ioValue, type HostIoSteps } from "@codeterm/plugin-sdk";
+import { ioValue, type HostIoSteps, type HostIoResult } from "@codeterm/plugin-sdk";
 import type { Profile } from "./types";
 import { checkToolArgs } from "./toolspec";
 import { edited, globPattern, inside, permitted, relativePath } from "./policy";
@@ -41,7 +41,7 @@ export function* execute(profile: Profile, name: string, raw: unknown, deadline:
     const windows = host.platform() === "windows";
     const cmd = windows ? `Set-Location -LiteralPath ${host.shell.quoteFor(root, "windows")}; if (!$?) { exit 1 }; ${a.command}`
       : `cd ${host.shell.quoteFor(root, host.platform())} && ${a.command}`;
-    const result = (yield* ioValue<ReturnType<typeof host.exec.start>>({ op: "execStart", options: { bin: windows ? "powershell" : "sh",
+    const result = (yield* ioValue<HostIoResult<"execStart">>({ op: "execStart", options: { bin: windows ? "powershell" : "sh",
       args: windows ? ["-NoProfile", "-NonInteractive", "-Command", cmd] : ["-c", cmd],
       timeoutMs: Math.max(1, Math.min(120000, deadline - host.unixNowMs())) } }));
     if (!result.jobId) throw new Error(result.error || "shell start failed");

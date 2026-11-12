@@ -1187,6 +1187,11 @@ test("repeated commit hashes keep each turn's recorded edit paths", () => {
 });
 
 let failed = 0;
+test("history discovery uses the job surface without a legacy filesystem binding", () => {
+  const io = {run: steps => steps.next().value, fs: {readDir: function* () { return [{name: "own.md"}]; }}};
+  assert.equal(load({fs: {}, io}).sessionExists("/repo", "own"), true);
+});
+
 for (const [name, run] of tests) {
   try { run(); console.log(`  ok  ${name}`); }
   catch (err) { failed++; console.error(`  FAIL ${name}`); console.error(err); }

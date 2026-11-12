@@ -1,4 +1,4 @@
-import { type HostIoSteps, type IoExports } from "@codeterm/plugin-sdk";
+import { ioThen, type HostIoSteps, type IoExports } from "@codeterm/plugin-sdk";
 import type { DecisionAnswer, DecisionFailure, DecisionModelCapability, DecisionQuestion, DecisionQuestionsRequest, DecisionRequest, DecisionResponse, FetchResult } from "@codeterm/plugin-sdk";
 import { settings } from "./config";
 import { endpointKey, endpointRequest, request } from "./adapters";
@@ -51,7 +51,7 @@ function config(): { endpoint: Endpoint; profile: Profile } {
 function* models(): HostIoSteps<{ id: string; display_name: string; }[]> {
   try {
     const { endpoint, profile } = config();
-    return host.fetch.async({ ...endpointRequest(endpoint, "/models", (yield* endpointKey(endpoint))), method: "GET", timeoutMs: Math.min(30000, profile.budgets.deadlineMs) }, result => {
+    return (yield* ioThen(host.io.fetch({ ...endpointRequest(endpoint, "/models", (yield* endpointKey(endpoint))), method: "GET", timeoutMs: Math.min(30000, profile.budgets.deadlineMs) }), result => {
       if (result.error || !result.status || result.status < 200 || result.status >= 300) return [];
       try {
         const data = JSON.parse(result.body || "{}") as { data?: { id?: unknown; name?: unknown }[] };
@@ -62,7 +62,7 @@ function* models(): HostIoSteps<{ id: string; display_name: string; }[]> {
           return [{ id: item.id, display_name: typeof item.name === "string" ? item.name : item.id }];
         }) : [];
       } catch { return []; }
-    });
+    }));
   } catch { return []; }
 }
 function* run<T>(state: unknown, questions: Record<string, { instructions: string; question: DecisionQuestion }>, remainingMs: number | undefined, batch: boolean, decode: (value: unknown, completion: Record<string, unknown>) => T): HostIoSteps<T | DecisionFailure> {
@@ -86,7 +86,7 @@ function* run<T>(state: unknown, questions: Record<string, { instructions: strin
     opts.body = JSON.stringify(body);
     opts.timeoutMs = Math.floor(deadline - host.unixNowMs());
     if (opts.timeoutMs < 1) return { error: "timeout" };
-    return host.fetch.async(opts, (result: FetchResult): T | DecisionFailure => {
+    return (yield* ioThen(host.io.fetch(opts), (result: FetchResult): T | DecisionFailure => {
       if (host.unixNowMs() >= deadline || /timeout|timed out|deadline/i.test(result.error || "")) return { error: "timeout" };
       if (result.error || !result.status || result.status < 200 || result.status >= 300) return { error: "transport" };
       try {
@@ -96,7 +96,7 @@ function* run<T>(state: unknown, questions: Record<string, { instructions: strin
           || completion.choices?.[0]?.finish_reason === "length") throw new Error("invalid decision completion");
         return decode(JSON.parse(message.content), completion);
       } catch { return { error: "invalid_response" }; }
-    });
+    }));
   } catch { return { error: "transport" }; }
 }
 const decisionModel: IoExports<DecisionModelCapability> = {

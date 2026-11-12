@@ -1,4 +1,4 @@
-import { defineProviderIo, ioValue, type HostIoSteps } from "@codeterm/plugin-sdk";
+import { defineProviderIo, ioValue, type HostIoSteps, type HostIoResult } from "@codeterm/plugin-sdk";
 import type { GlanceView, PluginModule, ViewNode } from "@codeterm/plugin-sdk";
 import { readOutput } from "./read-output";
 import { decideSend, matchChats, parseSendScope, validateSendScope, type SendOrigin, type SendScope } from "../../shared/src/send-scope";
@@ -1073,7 +1073,7 @@ function* startInstallStage(stage: InstallStage, p: Paths, target: Target): Host
   const spec = specs[stage];
   if (stage === "extract" && !(yield* host.io.fs.makeDirs(p.toolchain))) return { error: "Could not create the private toolchain directory." };
   let started: { jobId?: string; error?: string };
-  try { started = (yield* ioValue<{ jobId?: string; error?: string }>({ op: "execStart", options: { bin: spec.bin, args: spec.args, env: spec.env, timeoutMs: spec.timeoutMs } })); }
+  try { started = (yield* ioValue<HostIoResult<"execStart">>({ op: "execStart", options: { bin: spec.bin, args: spec.args, env: spec.env, timeoutMs: spec.timeoutMs } })); }
   catch { return { error: `Could not start the ${stage} step.` }; }
   if (!started.jobId) return { error: started.error || `The ${stage} step did not start.` };
   installJobs[started.jobId] = { stage, paths: p, target };
@@ -1146,15 +1146,15 @@ function* startSignIn(p: Paths): HostIoSteps<any> {
   (yield* endSignIn(p, true));
   try { (yield* host.io.fs.removeFile(p.loginLog)); } catch { }
   let started: { jobId?: string; error?: string };
-  try { started = (yield* ioValue<{ jobId?: string; error?: string }>({ op: "execStart", options: { bin: nativePath(p.binary), args: ["auth"], env: exoEnv(p), timeoutMs: SIGN_IN_TTL_MS + 60_000, detach: true, logFile: p.loginLog } })); }
+  try { started = (yield* ioValue<HostIoResult<"execStart">>({ op: "execStart", options: { bin: nativePath(p.binary), args: ["auth"], env: exoEnv(p), timeoutMs: SIGN_IN_TTL_MS + 60_000, detach: true, logFile: p.loginLog } })); }
   catch { return { done: true, state: "sign-in-failed", error: "Could not start exo-teams sign-in." }; }
   if (!started.jobId) return { done: true, state: "sign-in-failed", error: started.error || "exo-teams sign-in did not start." };
   let pid: number | null = null;
   try {
-    const poll = (yield* ioValue<ReturnType<typeof host.exec.poll>>({ op: "execPoll", job: started.jobId })) as any;
+    const poll = (yield* ioValue<HostIoResult<"execPoll">>({ op: "execPoll", job: started.jobId }));
     const result = poll && typeof poll.stdout === "string" ? parseJson<any>(poll.stdout) : null;
     pid = Number.isInteger(poll?.pid) ? poll.pid : Number.isInteger(result?.pid) ? result.pid : null;
-    if (poll && poll.done) (yield* ioValue<void>({ op: "execClose", job: started.jobId }));
+    if (poll && poll.done) (yield* ioValue<HostIoResult<"execClose">>({ op: "execClose", job: started.jobId }));
   } catch { }
   (yield* host.io.fs.writeFile(p.loginState, JSON.stringify({ startedAt: now(), pid })));
   lastStatus = null;
@@ -1187,10 +1187,10 @@ function* loginPoll(): HostIoSteps<any> {
     const jobId = activeInstallJobId;
     const job = installJobs[jobId];
     let poll: { done?: boolean; code?: number; stdout?: string; stderr?: string; error?: string };
-    try { poll = (yield* ioValue<ReturnType<typeof host.exec.poll>>({ op: "execPoll", job: jobId })); }
+    try { poll = (yield* ioValue<HostIoResult<"execPoll">>({ op: "execPoll", job: jobId })); }
     catch { activeInstallJobId = null; return { done: true, state: "install-failed", error: "Could not read the install job." }; }
     if (!poll.done) return { done: false, jobId, state: "install-in-progress", message: STAGE_MESSAGES[job.stage] };
-    try { (yield* ioValue<void>({ op: "execClose", job: jobId })); } catch { }
+    try { (yield* ioValue<HostIoResult<"execClose">>({ op: "execClose", job: jobId })); } catch { }
     return (yield* finishInstallStage(jobId, job, poll));
   }
   const record = (yield* readLoginRecord(p));

@@ -88,7 +88,6 @@ function entryName(entry) {
 }
 function* cleanupOrphanModels(activeModel) {
   const dir = baseDir();
-  const h = host;
   let entries = [];
   try {
     entries = yield* host.io.fs.readDir(dir);
@@ -134,8 +133,7 @@ function exitedOk(r) {
   return !r.error && (r.code === void 0 || r.code === 0);
 }
 function* progress(opts) {
-  const h = host;
-  if (typeof h.progress === "function") yield* ioValue({ op: "progress", options: opts });
+  yield* ioValue({ op: "progress", options: opts });
 }
 function* errorResult(message) {
   yield* progress({ label: "Error", error: message });
@@ -153,7 +151,6 @@ function* findLocalBin(name) {
   for (const c of fixedCandidates) {
     if (yield* host.io.fs.fileExists(c)) return c;
   }
-  const h = host;
   let entries = [];
   try {
     entries = yield* host.io.fs.readDir(root);
@@ -389,7 +386,6 @@ function modelSizeMb(id) {
 function* modelFileBytes(path) {
   const dir = baseDir();
   const activeName = path.substring(path.lastIndexOf("/") + 1);
-  const h = host;
   let entries = [];
   try {
     entries = yield* host.io.fs.readDir(dir);

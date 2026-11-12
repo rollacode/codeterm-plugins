@@ -1,4 +1,4 @@
-import { ioValue, type HostIoSteps } from "@codeterm/plugin-sdk";
+import { ioValue, type HostIoSteps, type HostIoResult } from "@codeterm/plugin-sdk";
 import type { NormalizedChatMessage } from "@codeterm/plugin-sdk";
 import type { Endpoint, NativeToolCall, Profile } from "./types";
 import { endpointKey, request, response } from "./adapters";
@@ -47,8 +47,8 @@ export function* open(id: string, profile: Profile, endpoint: Endpoint, resume: 
   return id;
 }
 function* cancel(s: Session): HostIoSteps<void> {
-  if (s.request) (yield* ioValue<void>({ op: "fetchStreamClose", job: s.request.job }));
-  if (s.execution) (yield* ioValue<void>({ op: "execClose", job: s.execution.job }));
+  if (s.request) (yield* ioValue<HostIoResult<"fetchStreamClose">>({ op: "fetchStreamClose", job: s.request.job }));
+  if (s.execution) (yield* ioValue<HostIoResult<"execClose">>({ op: "execClose", job: s.execution.job }));
   s.request = undefined;
   s.execution = undefined;
   s.calls = [];
@@ -68,7 +68,7 @@ function* startRequest(s: Session): HostIoSteps<void> {
   const key = (yield* endpointKey(s.endpoint));
   const opts = (yield* request(s.endpoint, s.history.profile, s.history.turns, key, remaining));
   opts.timeoutMs = Math.max(1, Math.min(opts.timeoutMs, s.deadline - host.unixNowMs()));
-  const job = (yield* ioValue<ReturnType<typeof host.exec.start>>({ op: "fetchStreamStart", options: opts }));
+  const job = (yield* ioValue<HostIoResult<"fetchStreamStart">>({ op: "fetchStreamStart", options: opts }));
   if (!job.jobId) throw new Error(job.error || "request start failed");
   s.request = { job: job.jobId, body: "" };
 }
@@ -101,11 +101,11 @@ export function* pump(id: string): HostIoSteps<void> {
     if (host.unixNowMs() >= s.deadline) throw new Error("deadline budget exhausted");
     if (s.request) {
       const current = s.request;
-      const poll = (yield* ioValue<ReturnType<typeof host.fetch.streamPoll>>({ op: "fetchStreamPoll", job: current.job }));
+      const poll = (yield* ioValue<HostIoResult<"fetchStreamPoll">>({ op: "fetchStreamPoll", job: current.job }));
       current.body += (poll.chunks || []).join("");
       if (current.body.length > 2 * 1024 * 1024) throw new Error("response exceeds limit");
       if (!poll.done) return;
-      (yield* ioValue<void>({ op: "fetchStreamClose", job: current.job }));
+      (yield* ioValue<HostIoResult<"fetchStreamClose">>({ op: "fetchStreamClose", job: current.job }));
       s.request = undefined;
       if (poll.error || !poll.status || poll.status < 200 || poll.status >= 300) throw new Error(poll.error || `endpoint HTTP ${poll.status || "unknown"}`);
       const { turn, tokens } = response(current.body);
@@ -121,9 +121,9 @@ export function* pump(id: string): HostIoSteps<void> {
     }
     if (s.execution) {
       const pending = s.execution;
-      const polled = (yield* ioValue<ReturnType<typeof host.exec.poll>>({ op: "execPoll", job: pending.job }));
+      const polled = (yield* ioValue<HostIoResult<"execPoll">>({ op: "execPoll", job: pending.job }));
       if (!polled.done) return;
-      (yield* ioValue<void>({ op: "execClose", job: pending.job }));
+      (yield* ioValue<HostIoResult<"execClose">>({ op: "execClose", job: pending.job }));
       s.execution = undefined;
       (yield* result(s, pending.call, polled));
     }

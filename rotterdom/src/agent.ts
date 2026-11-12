@@ -1,4 +1,4 @@
-import { ioValue, ioEncoded, ioThen, type HostIoSteps } from "@codeterm/plugin-sdk";
+import { ioValue, ioEncoded, ioThen, type HostIoSteps, type HostIoResult } from "@codeterm/plugin-sdk";
 import type { AgentTaskInput, AgentTaskResult, FetchResult } from "@codeterm/plugin-sdk";
 import { resolve } from "./config";
 import { endpointKey, request, response } from "./adapters";
@@ -20,7 +20,7 @@ export function* abortAgentTask(runId: string): HostIoSteps<void> {
   const run = runs.get(runId);
   if (!run) return;
   run.cancelled = true;
-  for (const job of run.jobs) (yield* ioValue<void>({ op: "execClose", job: job }));
+  for (const job of run.jobs) (yield* ioValue<HostIoResult<"execClose">>({ op: "execClose", job: job }));
   recover(run.history);
   (yield* finish(runId, { status: "cancelled", output: null, error: "unfinished tool effects are unconfirmed" }));
 }
@@ -80,7 +80,7 @@ export function* runAgentTask(input: AgentTaskInput): HostIoSteps<AgentTaskResul
       const key = (yield* endpointKey(selected.endpoint));
       const opts = (yield* request(selected.endpoint, profile, history.turns, key, profile.budgets.tokens - run.tokens));
       opts.timeoutMs = Math.max(1, Math.min(opts.timeoutMs, run.deadline - host.unixNowMs()));
-      const started = JSON.parse((yield* ioEncoded(ioValue<unknown>({ op: "fetchStart", options: opts })))) as { jobId?: string; error?: string };
+      const started = JSON.parse((yield* ioEncoded(ioValue<HostIoResult<"fetchStart">>({ op: "fetchStart", options: opts })))) as { jobId?: string; error?: string };
       if (!started.jobId) throw new Error(started.error || "request start failed");
       const job = started.jobId; run.jobs.add(job);
       return yield* ioThen(ioValue<FetchResult>({ op: "awaitJob", job }), function* (value: FetchResult): HostIoSteps<AgentTaskResult> {

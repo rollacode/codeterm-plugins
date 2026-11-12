@@ -6,6 +6,7 @@ function attachHostIo(host) {
       const next = failed ? steps.throw(value) : steps.next(value);
       if (next.done) return resolve(next.value);
       const request = next.value;
+      if (request.op === 'fetch' && typeof host.fetch !== 'function' && typeof host.fetch?.async === 'function') return host.fetch.async(request.options, reply => resume(reply));
       if (request.op === 'awaitJob' && typeof host.awaitJob === 'function') return host.awaitJob(request.job, reply => resume(reply));
       let reply;
       try { reply = execute(request); } catch (error) { return resume(error, true); }

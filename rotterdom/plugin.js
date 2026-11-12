@@ -346,7 +346,7 @@ function config() {
 function* models() {
   try {
     const { endpoint, profile } = config();
-    return host.fetch.async({ ...endpointRequest(endpoint, "/models", yield* endpointKey(endpoint)), method: "GET", timeoutMs: Math.min(3e4, profile.budgets.deadlineMs) }, (result2) => {
+    return yield* ioThen(host.io.fetch({ ...endpointRequest(endpoint, "/models", yield* endpointKey(endpoint)), method: "GET", timeoutMs: Math.min(3e4, profile.budgets.deadlineMs) }), (result2) => {
       if (result2.error || !result2.status || result2.status < 200 || result2.status >= 300) return [];
       try {
         const data = JSON.parse(result2.body || "{}");
@@ -392,7 +392,7 @@ function* run(state, questions, remainingMs, batch, decode) {
     opts.body = JSON.stringify(body);
     opts.timeoutMs = Math.floor(deadline - host.unixNowMs());
     if (opts.timeoutMs < 1) return { error: "timeout" };
-    return host.fetch.async(opts, (result2) => {
+    return yield* ioThen(host.io.fetch(opts), (result2) => {
       if (host.unixNowMs() >= deadline || /timeout|timed out|deadline/i.test(result2.error || "")) return { error: "timeout" };
       if (result2.error || !result2.status || result2.status < 200 || result2.status >= 300) return { error: "transport" };
       try {

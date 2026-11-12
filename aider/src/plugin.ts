@@ -119,8 +119,6 @@ interface HistoryFileEntry {
 }
 
 function* historyFileEntries(cwd: string): HostIoSteps<HistoryFileEntry[]> {
-  const fs = (globalThis as { host?: { fs?: { readDir?: (p: string) => unknown[] } } }).host?.fs;
-  if (!fs || typeof fs.readDir !== "function") return [];
   let entries: unknown[];
   try {
     entries = (yield* host.io.fs.readDir(historyDir(cwd))) as unknown[];

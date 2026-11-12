@@ -734,8 +734,6 @@ function resumeLaunchParams(params) {
   };
 }
 function* historyFileEntries(cwd) {
-  const fs = globalThis.host?.fs;
-  if (!fs || typeof fs.readDir !== "function") return [];
   let entries;
   try {
     entries = yield* host.io.fs.readDir(historyDir(cwd));

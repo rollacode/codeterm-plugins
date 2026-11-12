@@ -1,4 +1,4 @@
-import { defineProviderIo, ioValue, type HostIoSteps } from "@codeterm/plugin-sdk";
+import { defineProviderIo, ioValue, type HostIoSteps, type HostIoResult } from "@codeterm/plugin-sdk";
 // Transcriber plugin — CodeTerm's speech-to-text backend (capability: transcriber).
 // Authored in TypeScript against @codeterm/plugin-sdk and compiled to a
 // QuickJS-compatible plugin.js by scripts/build-plugin.mjs.
@@ -107,7 +107,6 @@ function entryName(entry: DirEntry | string): string {
 
 function* cleanupOrphanModels(activeModel: string): HostIoSteps<void> {
   const dir = baseDir();
-  const h = host as typeof host & { readDir?: (path: string) => DirEntry[] };
   let entries: (DirEntry | string)[] = [];
   try {
     entries = yield* host.io.fs.readDir(dir);
@@ -164,8 +163,7 @@ function exitedOk(r: ExecResult): boolean {
 }
 
 function* progress(opts: ProgressOptions): HostIoSteps<void> {
-  const h = host as typeof host & { progress?: (opts: ProgressOptions) => void };
-  if (typeof h.progress === "function") (yield* ioValue<void>({ op: "progress", options: opts }));
+  yield* ioValue<HostIoResult<"progress">>({ op: "progress", options: opts });
 }
 
 function* errorResult(message: string): HostIoSteps<TranscribeResult> {
@@ -194,7 +192,6 @@ function* findLocalBin(name: string): HostIoSteps<string | null> {
     if ((yield* host.io.fs.fileExists(c))) return c;
   }
 
-  const h = host as typeof host & { readDir?: (path: string) => DirEntry[] };
   let entries: (DirEntry | string)[] = [];
   try {
     entries = yield* host.io.fs.readDir(root);
@@ -499,7 +496,6 @@ function modelSizeMb(id: string): number {
 function* modelFileBytes(path: string): HostIoSteps<number | null> {
   const dir = baseDir();
   const activeName = path.substring(path.lastIndexOf("/") + 1);
-  const h = host as typeof host & { readDir?: (path: string) => DirEntry[] };
   let entries: (DirEntry | string)[] = [];
   try {
     entries = yield* host.io.fs.readDir(dir);

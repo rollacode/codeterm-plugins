@@ -1,4 +1,4 @@
-import { defineProviderIo, ioValue, ioEncoded, type HostIoSteps } from "@codeterm/plugin-sdk";
+import { defineProviderIo, ioValue, ioEncoded, type HostIoSteps, type HostIoResult } from "@codeterm/plugin-sdk";
 import { SERVE_PROCESS } from "./serve-process";
 import { METADATA_PROCESS } from "./metadata-process";
 // Bitwarden secret-backend plugin (capability: secret_backend).
@@ -301,7 +301,7 @@ function* stopServe(): HostIoSteps<void> {
   const previous = serve;
   serve = null;
   if (!previous) return;
-  try { if (previous.job) (yield* ioValue<void>({ op: "execClose", job: previous.job })); } catch { }
+  try { if (previous.job) (yield* ioValue<HostIoResult<"execClose">>({ op: "execClose", job: previous.job })); } catch { }
   try { yield* host.io.fs.removeFile(previous.marker); } catch { }
 }
 
@@ -324,9 +324,9 @@ function* startServe(session: string): HostIoSteps<void> {
       const started = (yield { op: "execStart", options: { bin: "node", args: ["-e", SERVE_PROCESS], env, timeoutMs: 24 * 60 * 60 * 1000 } }) as { jobId?: string };
       if (!started.jobId) throw new Error("serve start failed");
       pending.job = started.jobId;
-      if (serve !== pending || serveEpoch !== epoch) { (yield* ioValue<void>({ op: "execClose", job: pending.job })); return; }
+      if (serve !== pending || serveEpoch !== epoch) { (yield* ioValue<HostIoResult<"execClose">>({ op: "execClose", job: pending.job })); return; }
     } catch {
-      try { if (pending.job) (yield* ioValue<void>({ op: "execClose", job: pending.job })); } catch { }
+      try { if (pending.job) (yield* ioValue<HostIoResult<"execClose">>({ op: "execClose", job: pending.job })); } catch { }
       try { yield* host.io.fs.removeFile(marker); } catch { }
       if (serve === pending) { serve = null; serveDisabledUntil = Date.now() + 30000; }
       return;
@@ -338,7 +338,7 @@ function* serveGet(name: string, session: string): HostIoSteps<BwResponse | null
   yield* startServe(session);
   const current = serve;
   if (!current || !current.job) return null;
-  const job = (yield* ioValue<ReturnType<typeof host.exec.poll>>({ op: "execPoll", job: current.job }));
+  const job = (yield* ioValue<HostIoResult<"execPoll">>({ op: "execPoll", job: current.job }));
   if (job.done) { yield* stopServe(); return null; }
   if (!current.port) {
     const ready = yield* host.io.fs.readJson<{ port?: number }>(current.marker);
@@ -933,7 +933,7 @@ function* statusStart(): HostIoSteps<{ jobId?: string; error?: string }> {
   const session = (yield* ioValue<string | null>({ op: "secretGet", name: K_SESSION }));
   const optsJson = bwExecOpts(["status"], { session: session || undefined });
   let res: { jobId?: string; error?: string };
-  try { res = (yield* ioValue<{ jobId?: string; error?: string }>({ op: "execStart", options: JSON.parse(optsJson) })); } catch (e) { return { error: "exec start: " + e }; }
+  try { res = (yield* ioValue<HostIoResult<"execStart">>({ op: "execStart", options: JSON.parse(optsJson) })); } catch (e) { return { error: "exec start: " + e }; }
   if (res.error) return { error: res.error };
   if (res.jobId) statusFlows[res.jobId] = { hostJobId: res.jobId, phase: "status" };
   return { jobId: res.jobId };
@@ -949,7 +949,7 @@ const statusFlows: Record<string, StatusFlow> = {};
 
 function* startFlowJob(flowId: string, phase: StatusFlow["phase"], args: string[], opts: BwOpts, usedApiKey?: boolean): HostIoSteps<string | null> {
   let started: { jobId?: string; error?: string };
-  try { started = (yield* ioValue<{ jobId?: string; error?: string }>({ op: "execStart", options: JSON.parse(bwExecOpts(args, opts)) })); } catch (e) {
+  try { started = (yield* ioValue<HostIoResult<"execStart">>({ op: "execStart", options: JSON.parse(bwExecOpts(args, opts)) })); } catch (e) {
     lastRecoveryError = { kind: "backend", message: "exec start: " + e };
     return null;
   }
@@ -1000,7 +1000,7 @@ function* statusPoll(jobId: string): HostIoSteps<{ done: boolean; status?: Secre
   if (!jobId) return { done: true, error: "no jobId" };
   const flow = statusFlows[jobId] || { hostJobId: jobId, phase: "status" as const };
   let p: BwExec & { done?: boolean };
-  try { p = JSON.parse((yield* ioEncoded(ioValue<unknown>({ op: "execPoll", job: flow.hostJobId })))); } catch (e) {
+  try { p = JSON.parse((yield* ioEncoded(ioValue<HostIoResult<"execPoll">>({ op: "execPoll", job: flow.hostJobId })))); } catch (e) {
     delete statusFlows[jobId];
     return { done: true, error: "exec poll: " + e };
   }
