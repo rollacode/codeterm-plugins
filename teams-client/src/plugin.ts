@@ -1151,10 +1151,10 @@ function* startSignIn(p: Paths): HostIoSteps<any> {
   if (!started.jobId) return { done: true, state: "sign-in-failed", error: started.error || "exo-teams sign-in did not start." };
   let pid: number | null = null;
   try {
-    const poll = host.exec.poll(started.jobId) as any;
+    const poll = (yield* ioValue<ReturnType<typeof host.exec.poll>>({ op: "execPoll", job: started.jobId })) as any;
     const result = poll && typeof poll.stdout === "string" ? parseJson<any>(poll.stdout) : null;
     pid = Number.isInteger(poll?.pid) ? poll.pid : Number.isInteger(result?.pid) ? result.pid : null;
-    if (poll && poll.done) host.exec.close(started.jobId);
+    if (poll && poll.done) (yield* ioValue<void>({ op: "execClose", job: started.jobId }));
   } catch { }
   (yield* host.io.fs.writeFile(p.loginState, JSON.stringify({ startedAt: now(), pid })));
   lastStatus = null;
@@ -1186,11 +1186,11 @@ function* loginPoll(): HostIoSteps<any> {
   if (activeInstallJobId) {
     const jobId = activeInstallJobId;
     const job = installJobs[jobId];
-    let poll: { done: boolean; code?: number; stdout?: string; stderr?: string; error?: string };
-    try { poll = host.exec.poll(jobId); }
+    let poll: { done?: boolean; code?: number; stdout?: string; stderr?: string; error?: string };
+    try { poll = (yield* ioValue<ReturnType<typeof host.exec.poll>>({ op: "execPoll", job: jobId })); }
     catch { activeInstallJobId = null; return { done: true, state: "install-failed", error: "Could not read the install job." }; }
     if (!poll.done) return { done: false, jobId, state: "install-in-progress", message: STAGE_MESSAGES[job.stage] };
-    try { host.exec.close(jobId); } catch { }
+    try { (yield* ioValue<void>({ op: "execClose", job: jobId })); } catch { }
     return (yield* finishInstallStage(jobId, job, poll));
   }
   const record = (yield* readLoginRecord(p));
@@ -1390,4 +1390,4 @@ const plugin = defineProviderIo({
   __test_failureMessage: failureMessage,
 }, () => host.io) satisfies PluginModule;
 
-export default plugin;
+export default defineProviderIo(plugin, () => host.io);

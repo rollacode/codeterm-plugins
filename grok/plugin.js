@@ -24,6 +24,53 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
+// ../../codeterm/codeterm/packages/plugin-sdk/src/fileDiffs.ts
+function textLines(text) {
+  return text ? text.replace(/\n$/, "").split("\n") : [];
+}
+function recordedTextDiff(path, oldText, newText) {
+  if (typeof path !== "string" || !path.trim() || typeof oldText !== "string" || typeof newText !== "string" || oldText === newText) return [];
+  const old = textLines(oldText);
+  const next = textLines(newText);
+  return [{
+    path,
+    additions: next.length,
+    deletions: old.length,
+    truncated: true,
+    hunks: [{
+      oldStart: 1,
+      oldLines: old.length,
+      newStart: 1,
+      newLines: next.length,
+      lines: [...old.map((line) => `-${line}`), ...next.map((line) => `+${line}`)]
+    }]
+  }];
+}
+
+// ../../codeterm/codeterm/packages/plugin-sdk/src/ioPrograms.ts
+function* ioValue(request) {
+  return yield request;
+}
+function defineProviderIo(source, io) {
+  const exports = { ...source };
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (typeof value !== "function") continue;
+    exports[key] = function(...args) {
+      const result = value.apply(source, args);
+      return result && typeof result.next === "function" ? io().run(result) : result;
+    };
+  }
+  return exports;
+}
+function* ioEncoded(steps) {
+  return JSON.stringify(yield* steps);
+}
+function* ioJson(request, nullable = false) {
+  const value = yield* ioValue(request);
+  return nullable && value == null ? null : JSON.stringify(value);
+}
+
 // provider-shared/updateCheck.ts
 function record(raw) {
   if (typeof raw !== "string") return null;
@@ -73,29 +120,33 @@ function newestSupportedVersion(versions, compatibility) {
     return best === null || compare(version, best) === 1 ? version : best;
   }, null);
 }
-function checkProviderUpdate(host2, binary, metadataUrl, compatibility) {
-  const installed = record(host2.exec(JSON.stringify({ bin: binary, args: ["--version"], timeoutMs: 5e3 })));
-  if (installed?.code !== 0 || typeof installed.stdout !== "string") return null;
-  const currentVersion = installed.stdout.match(/(?:^|\s)(\d+\.\d+\.\d+)(?=\s|$)/)?.[1];
-  if (!currentVersion || !versionParts(currentVersion)) return null;
-  const response = record(host2.fetch(JSON.stringify({
-    url: metadataUrl,
-    method: "GET",
-    timeoutMs: 6e3,
-    headers: { Accept: "application/vnd.npm.install-v1+json" }
-  })));
-  if (response?.status !== 200) return null;
-  const metadata = record(response.body);
-  let latestVersion = typeof metadata?.version === "string" ? metadata.version : null;
-  if (compatibility) {
-    if (!metadata?.versions || typeof metadata.versions !== "object") return null;
-    latestVersion = newestSupportedVersion(Object.keys(metadata.versions), compatibility);
+function* checkProviderUpdate(host2, binary, metadataUrl, compatibility) {
+  try {
+    const installed = record(yield* host2.exec(JSON.stringify({ bin: binary, args: ["--version"], timeoutMs: 5e3 })));
+    if (installed?.code !== 0 || typeof installed.stdout !== "string") return null;
+    const currentVersion = installed.stdout.match(/(?:^|\s)(\d+\.\d+\.\d+)(?=\s|$)/)?.[1];
+    if (!currentVersion || !versionParts(currentVersion)) return null;
+    const response = record(yield* host2.fetch(JSON.stringify({
+      url: metadataUrl,
+      method: "GET",
+      timeoutMs: 6e3,
+      headers: { Accept: "application/vnd.npm.install-v1+json" }
+    })));
+    if (response?.status !== 200) return null;
+    const metadata = record(response.body);
+    let latestVersion = typeof metadata?.version === "string" ? metadata.version : null;
+    if (compatibility) {
+      if (!metadata?.versions || typeof metadata.versions !== "object") return null;
+      latestVersion = newestSupportedVersion(Object.keys(metadata.versions), compatibility);
+    }
+    return latestVersion && compare(latestVersion, currentVersion) === 1 ? { currentVersion, latestVersion } : null;
+  } catch {
+    return null;
   }
-  return latestVersion && compare(latestVersion, currentVersion) === 1 ? { currentVersion, latestVersion } : null;
 }
 
 // grok/src/update.ts
-function checkGrokUpdate() {
+function* checkGrokUpdate() {
   let manifest;
   try {
     manifest = JSON.parse(host.manifestJson() ?? "null");
@@ -103,7 +154,11 @@ function checkGrokUpdate() {
     return null;
   }
   if (!manifest?.cliCompatibility?.supported?.length) return null;
-  return checkProviderUpdate(host, "grok", "https://registry.npmjs.org/@xai-official/grok", manifest.cliCompatibility);
+  return yield* checkProviderUpdate({ exec: function* (options) {
+    return yield* ioEncoded(host.io.exec(JSON.parse(options)));
+  }, fetch: function* (options) {
+    return yield* ioEncoded(host.io.fetch(JSON.parse(options)));
+  } }, "grok", "https://registry.npmjs.org/@xai-official/grok", manifest.cliCompatibility);
 }
 
 // grok/src/modelCatalogue.ts
@@ -139,29 +194,6 @@ function grokDirectoryTrustPrompt(screen) {
 function grokTrustPromptResponse(index, screen) {
   if (!grokDirectoryTrustPrompt(screen)) return [];
   return index === 0 ? ["eQ=="] : index === 1 ? ["bg=="] : [];
-}
-
-// ../codeterm/codeterm/packages/plugin-sdk/src/fileDiffs.ts
-function textLines(text) {
-  return text ? text.replace(/\n$/, "").split("\n") : [];
-}
-function recordedTextDiff(path, oldText, newText) {
-  if (typeof path !== "string" || !path.trim() || typeof oldText !== "string" || typeof newText !== "string" || oldText === newText) return [];
-  const old = textLines(oldText);
-  const next = textLines(newText);
-  return [{
-    path,
-    additions: next.length,
-    deletions: old.length,
-    truncated: true,
-    hunks: [{
-      oldStart: 1,
-      oldLines: old.length,
-      newStart: 1,
-      newLines: next.length,
-      lines: [...old.map((line) => `-${line}`), ...next.map((line) => `+${line}`)]
-    }]
-  }];
 }
 
 // grok/src/plugin.ts
@@ -224,14 +256,14 @@ function sessionDir(cwd, sessionId) {
   if (!root || !cwd || !sessionId) return null;
   return joinPath(joinPath(root, cwdKey(cwd)), sessionId);
 }
-function sessionExistsAt(cwd, sessionId) {
-  return isUuid(sessionId) && readSummary(cwd, sessionId)?.info?.id === sessionId;
+function* sessionExistsAt(cwd, sessionId) {
+  return isUuid(sessionId) && (yield* readSummary(cwd, sessionId))?.info?.id === sessionId;
 }
-function readSummary(cwd, sessionId) {
+function* readSummary(cwd, sessionId) {
   if (!isUuid(sessionId)) return null;
   const dir = sessionDir(cwd, sessionId);
   if (!dir) return null;
-  const summary = host.fs.readJson(joinPath(dir, "summary.json"));
+  const summary = yield* host.io.fs.readJson(joinPath(dir, "summary.json"));
   return summary?.info?.id === sessionId ? summary : null;
 }
 function isUuid(value) {
@@ -254,7 +286,7 @@ function appendLaunchFlags(parts, params) {
     parts.push("--session-id", quote(marker));
   }
 }
-function resumeCommand(params) {
+function* resumeCommand(params) {
   const parts = ["grok", ALWAYS_APPROVE, "--resume", quote(String(params.sessionId || ""))];
   if (params.skipPermissions && !hasFlag(parts, "--permission-mode")) {
     parts.push(BYPASS_PERMISSIONS[0], quote(BYPASS_PERMISSIONS[1]));
@@ -262,15 +294,15 @@ function resumeCommand(params) {
   const extra = params.args || [];
   for (let i = 0; i < extra.length; i++) parts.push(quote(String(extra[i])));
   const system = String(params.systemPrompt || "").trim();
-  appendRules(parts, system);
+  yield* appendRules(parts, system);
   return parts.join(" ");
 }
-function appendRules(parts, instructions) {
+function* appendRules(parts, instructions) {
   if (!instructions) return;
   const inline = ["--rules", quote(instructions)];
   if (host.platform() === "windows" && [...parts, ...inline].join(" ").length > 6e3) {
     const definition = "---\nname: domios\ndescription: Domios session instructions\npromptMode: extend\n---\n\n" + instructions;
-    const path = host.fs.writeTempFile(definition, ".ct-grok-agent.md");
+    const path = yield* host.io.fs.writeTempFile(definition, ".ct-grok-agent.md");
     if (!path) throw new Error("failed to write Grok append-only agent instructions");
     parts.push("--agent", quote(path));
   } else {
@@ -378,12 +410,12 @@ function grokUpdateToChat(row, seq) {
   if (!tsMs && typeof row.timestamp === "number") tsMs = row.timestamp > 1e12 ? row.timestamp : row.timestamp * 1e3;
   return { id, type, content, timestamp: String(tsMs || seq), seq };
 }
-function readGrokChat(cwd, sessionId, cursor) {
+function* readGrokChat(cwd, sessionId, cursor) {
   const path = sessionDir(cwd, sessionId);
   const empty = { messages: [], cursor: cursor && /^\d+$/.test(cursor) ? cursor : "0" };
   if (!path) return empty;
   const file = joinPath(path, "updates.jsonl");
-  const raw = host.fs.readFile(file);
+  const raw = yield* host.io.fs.readFile(file);
   if (!raw) return empty;
   const start = cursor && /^\d+$/.test(cursor) ? parseInt(cursor, 10) : 0;
   const lines = String(raw).split("\n");
@@ -405,22 +437,22 @@ function readGrokChat(cwd, sessionId, cursor) {
   }
   return { messages, cursor: String(next) };
 }
-function listSessionIds(cwd) {
+function* listSessionIds(cwd) {
   const root = sessionsRoot();
   if (!root || !cwd) return [];
   const dir = joinPath(root, cwdKey(cwd));
-  if (!host.fs.fileExists(dir)) return [];
-  const entries = host.fs.readDir(dir) || [];
+  if (!(yield* host.io.fs.fileExists(dir))) return [];
+  const entries = (yield* host.io.fs.readDir(dir)) || [];
   const ids = [];
   for (let i = 0; i < entries.length; i++) {
     const name = entries[i].name;
     if (!entries[i].isDir || !isUuid(name)) continue;
-    if (host.fs.fileExists(joinPath(joinPath(dir, name), "summary.json"))) ids.push(name);
+    if (yield* host.io.fs.fileExists(joinPath(joinPath(dir, name), "summary.json"))) ids.push(name);
   }
   return ids;
 }
-function sessionMetadata(dir, sessionId) {
-  const summary = host.fs.readJson(joinPath(dir, "summary.json"));
+function* sessionMetadata(dir, sessionId) {
+  const summary = yield* host.io.fs.readJson(joinPath(dir, "summary.json"));
   if (summary?.info?.id !== sessionId || !summary.info.cwd) return null;
   const filePath = joinPath(dir, "updates.jsonl");
   return {
@@ -435,10 +467,10 @@ function sessionMetadata(dir, sessionId) {
     modifiedTs: parseTimeMs(summary.updated_at) === null ? null : Math.floor(parseTimeMs(summary.updated_at) / 1e3)
   };
 }
-function discoverFromCache() {
+function* discoverFromCache() {
   const home = grokHome();
   if (!home) return null;
-  const cache = host.fs.readJson(joinPath(home, "models_cache.json"));
+  const cache = yield* host.io.fs.readJson(joinPath(home, "models_cache.json"));
   if (!cache || !cache.models) return null;
   const models = [];
   const ids = Object.keys(cache.models);
@@ -457,8 +489,8 @@ function discoverFromCache() {
   }
   return models.length ? models : null;
 }
-function discoverFromCli() {
-  const raw = host.exec(JSON.stringify({ bin: "grok", args: ["models"], timeoutMs: 5e3 }));
+function* discoverFromCli() {
+  const raw = yield* ioEncoded(host.io.exec({ bin: "grok", args: ["models"], timeoutMs: 5e3 }));
   let result = null;
   try {
     result = JSON.parse(String(raw || "null"));
@@ -468,9 +500,9 @@ function discoverFromCli() {
   if (!result || result.code !== 0 || typeof result.stdout !== "string") return null;
   return parseGrokModels(result.stdout);
 }
-function sessionUpdates(cwd, sessionId) {
+function* sessionUpdates(cwd, sessionId) {
   const dir = sessionDir(cwd, sessionId);
-  const raw = dir && host.fs.readFile(joinPath(dir, "updates.jsonl"));
+  const raw = dir && (yield* host.io.fs.readFile(joinPath(dir, "updates.jsonl")));
   if (!raw) return [];
   return String(raw).split("\n").flatMap((line) => {
     try {
@@ -524,26 +556,26 @@ var plugin = {
     }
     return true;
   },
-  buildLaunchCommand(params) {
+  *buildLaunchCommand(params) {
     const p = params || {};
     const parts = ["grok"];
     appendLaunchFlags(parts, p);
-    appendRules(parts, String(p.task || ""));
+    yield* appendRules(parts, String(p.task || ""));
     const task = starterTask(p);
     if (task) parts.push("--", quote(task));
     return parts.join(" ");
   },
-  buildResumeCommand(sessionId, skipPermissions) {
-    return resumeCommand({ sessionId, skipPermissions });
+  *buildResumeCommand(sessionId, skipPermissions) {
+    return yield* resumeCommand({ sessionId, skipPermissions });
   },
-  buildResumeCommandWithContext(params) {
-    return resumeCommand(params);
+  *buildResumeCommandWithContext(params) {
+    return yield* resumeCommand(params);
   },
-  discoverModels() {
+  *discoverModels() {
     try {
-      const live = discoverFromCli();
+      const live = yield* discoverFromCli();
       if (live) {
-        const cached = discoverFromCache() ?? [];
+        const cached = (yield* discoverFromCache()) ?? [];
         return live.map((model) => cached.find((entry) => entry.id === model.id) ?? model);
       }
     } catch {
@@ -552,27 +584,27 @@ var plugin = {
   },
   parseDirectoryTrustPrompt: grokDirectoryTrustPrompt,
   parsePrompt: grokDirectoryTrustPrompt,
-  buildPromptResponse: grokTrustPromptResponse,
+  buildPromptResponse: (index, screen) => grokTrustPromptResponse(index, screen ?? ""),
   directoryTrustPromptResponse(screen) {
     return grokDirectoryTrustPrompt(screen) ? grokTrustPromptResponse(0, screen) : null;
   },
   classifyTabState(snapshot) {
     return grokDirectoryTrustPrompt(snapshot.screenText) ? { state: "clarifying_question", confidence: 1 } : null;
   },
-  sessionExists(cwd, sessionId) {
-    return sessionExistsAt(cwd, sessionId);
+  *sessionExists(cwd, sessionId) {
+    return yield* sessionExistsAt(cwd, sessionId);
   },
-  sessionJsonlPath(cwd, sessionId) {
+  *sessionJsonlPath(cwd, sessionId) {
     const dir = sessionDir(cwd, sessionId);
     if (!dir) return null;
     const path = joinPath(dir, "chat_history.jsonl");
-    return host.fs.fileExists(path) ? path : null;
+    return (yield* host.io.fs.fileExists(path)) ? path : null;
   },
-  sessionFilePath(cwd, sessionId) {
+  *sessionFilePath(cwd, sessionId) {
     const dir = sessionDir(cwd, sessionId);
-    if (!dir || !sessionExistsAt(cwd, sessionId)) return null;
+    if (!dir || !(yield* sessionExistsAt(cwd, sessionId))) return null;
     const path = joinPath(dir, "updates.jsonl");
-    return host.fs.fileExists(path) ? path : null;
+    return (yield* host.io.fs.fileExists(path)) ? path : null;
   },
   parseSessionMessages(text) {
     return String(text).split("\n").flatMap((line, seq) => {
@@ -585,22 +617,22 @@ var plugin = {
   usesStructuredChat() {
     return true;
   },
-  readStructuredChat(cwd, sessionId, cursor) {
-    return readGrokChat(cwd, sessionId, cursor);
+  *readStructuredChat(cwd, sessionId, cursor) {
+    return yield* readGrokChat(cwd, sessionId, cursor);
   },
-  sessionCreatedMs(cwd, sessionId) {
-    return parseTimeMs(readSummary(cwd, sessionId)?.created_at);
+  *sessionCreatedMs(cwd, sessionId) {
+    return parseTimeMs((yield* readSummary(cwd, sessionId))?.created_at);
   },
-  detectSessionId(cwd, exclude, maxAgeMs) {
+  *detectSessionId(cwd, exclude, maxAgeMs) {
     const skip = new Set(Array.isArray(exclude) ? exclude : exclude ? [exclude] : []);
     const now = host.unixNowMs();
-    const ids = listSessionIds(cwd);
+    const ids = yield* listSessionIds(cwd);
     const viable = [];
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i];
       if (skip.has(id)) continue;
       if (typeof maxAgeMs === "number") {
-        const created = parseTimeMs(readSummary(cwd, id)?.created_at);
+        const created = parseTimeMs((yield* readSummary(cwd, id))?.created_at);
         if (created == null || now - created > maxAgeMs) continue;
       }
       viable.push(id);
@@ -608,10 +640,10 @@ var plugin = {
     if (viable.length === 1) return viable[0];
     return null;
   },
-  detectLaunchSession(evidence) {
+  *detectLaunchSession(evidence) {
     const home = grokHome();
     if (!home) return null;
-    const rows = host.fs.readJson(joinPath(home, "active_sessions.json"));
+    const rows = yield* host.io.fs.readJson(joinPath(home, "active_sessions.json"));
     if (!evidence || !evidence.processes) return null;
     const pids = {};
     for (let i = 0; i < evidence.processes.length; i++) pids[evidence.processes[i].pid] = true;
@@ -624,33 +656,33 @@ var plugin = {
     }
     if (matches.length === 1) return { sessionId: matches[0], source: "pid_registry" };
     const marker = String(evidence.launchMarker || "").trim();
-    const summary = isUuid(marker) ? readSummary(evidence.cwd, marker) : null;
+    const summary = isUuid(marker) ? yield* readSummary(evidence.cwd, marker) : null;
     const created = parseTimeMs(summary?.created_at);
     if (summary?.info?.id === marker && created !== null && created >= evidence.launchedAtMs) {
       return { sessionId: marker, source: "launch_marker" };
     }
     return null;
   },
-  detectSessionModel(cwd, sessionId) {
-    const model = readSummary(cwd, sessionId)?.current_model_id;
+  *detectSessionModel(cwd, sessionId) {
+    const model = (yield* readSummary(cwd, sessionId))?.current_model_id;
     return model ? String(model) : null;
   },
-  sessionModelIdentityPath(cwd, sessionId) {
+  *sessionModelIdentityPath(cwd, sessionId) {
     if (!isUuid(sessionId)) return null;
     const dir = sessionDir(cwd, sessionId);
     if (!dir) return null;
     const path = joinPath(dir, "summary.json");
-    return host.fs.fileExists(path) ? path : null;
+    return (yield* host.io.fs.fileExists(path)) ? path : null;
   },
-  sessionModelTranscriptBoundary(cwd, sessionId) {
-    const rows = sessionUpdates(cwd, sessionId);
+  *sessionModelTranscriptBoundary(cwd, sessionId) {
+    const rows = yield* sessionUpdates(cwd, sessionId);
     const last = rows[rows.length - 1];
     const id = last && eventId(last);
     return { lastEntryUuid: id ?? null, lastEntryTimestamp: null, lastEntryType: null, boundaryFound: !!id };
   },
-  detectSessionModelAfterBoundary(cwd, sessionId, boundary) {
+  *detectSessionModelAfterBoundary(cwd, sessionId, boundary) {
     if (!boundary.boundaryFound || !boundary.lastEntryUuid) return null;
-    const rows = sessionUpdates(cwd, sessionId);
+    const rows = yield* sessionUpdates(cwd, sessionId);
     const index = rows.findIndex((row) => eventId(row) === boundary.lastEntryUuid);
     if (index < 0) return null;
     let model = null;
@@ -662,30 +694,30 @@ var plugin = {
     }
     return null;
   },
-  detectSessionReasoningEffort(cwd, sessionId) {
-    const effort = readSummary(cwd, sessionId)?.reasoning_effort;
+  *detectSessionReasoningEffort(cwd, sessionId) {
+    const effort = (yield* readSummary(cwd, sessionId))?.reasoning_effort;
     return effort ? String(effort) : null;
   },
-  findSession(sessionId) {
+  *findSession(sessionId) {
     const root = sessionsRoot();
-    if (!root || !isUuid(sessionId) || !host.fs.fileExists(root)) return null;
-    const cwdDirs = host.fs.readDir(root) || [];
+    if (!root || !isUuid(sessionId) || !(yield* host.io.fs.fileExists(root))) return null;
+    const cwdDirs = (yield* host.io.fs.readDir(root)) || [];
     for (let i = 0; i < cwdDirs.length; i++) {
       if (!cwdDirs[i].isDir) continue;
-      const metadata = sessionMetadata(joinPath(cwdDirs[i].path, sessionId), sessionId);
+      const metadata = yield* sessionMetadata(joinPath(cwdDirs[i].path, sessionId), sessionId);
       if (metadata) return metadata;
     }
     return null;
   },
-  enumerateSessions() {
+  *enumerateSessions() {
     const root = sessionsRoot();
     if (!root) return [];
     const result = [];
-    for (const cwdDir of host.fs.readDir(root) || []) {
+    for (const cwdDir of (yield* host.io.fs.readDir(root)) || []) {
       if (!cwdDir.isDir) continue;
-      for (const entry of host.fs.readDir(cwdDir.path) || []) {
+      for (const entry of (yield* host.io.fs.readDir(cwdDir.path)) || []) {
         if (!entry.isDir || !isUuid(entry.name)) continue;
-        const metadata = sessionMetadata(entry.path, entry.name);
+        const metadata = yield* sessionMetadata(entry.path, entry.name);
         if (metadata) result.push(metadata);
       }
     }
@@ -716,10 +748,10 @@ var plugin = {
       raw_text: String(rawText || "")
     };
   },
-  fetchUsage(nowMs) {
-    const credential = safeJson(String(host.credentialPublic(GROK_AUTH_CREDENTIAL) || ""));
+  *fetchUsage(nowMs) {
+    const credential = safeJson(String((yield* ioJson({ op: "credentialPublic", id: GROK_AUTH_CREDENTIAL }, true)) || ""));
     if (typeof credential?.userId !== "string" || !credential.userId) return null;
-    const weekly = fetchWeeklyUsage();
+    const weekly = yield* fetchWeeklyUsage();
     return JSON.stringify({
       billingMode: "subscription",
       weeklyPct: weekly.weeklyPct,
@@ -735,14 +767,14 @@ function safeJson(raw) {
     return null;
   }
 }
-function fetchWeeklyUsage() {
+function* fetchWeeklyUsage() {
   const empty = { weeklyPct: null, weeklyResetsAtMs: null };
   try {
-    const credential = safeJson(String(host.credentialPublic(GROK_AUTH_CREDENTIAL) || ""));
+    const credential = safeJson(String((yield* ioJson({ op: "credentialPublic", id: GROK_AUTH_CREDENTIAL }, true)) || ""));
     if (!credential || typeof credential.userId !== "string" || !credential.userId) return empty;
-    const version = grokClientVersion();
+    const version = yield* grokClientVersion();
     if (!version) return empty;
-    const response = safeJson(host.fetch(JSON.stringify({
+    const response = safeJson(yield* ioEncoded(host.io.fetch({
       url: GROK_BILLING_URL,
       method: "GET",
       timeoutMs: 15e3,
@@ -774,10 +806,10 @@ function fetchWeeklyUsage() {
     return empty;
   }
 }
-function grokClientVersion() {
+function* grokClientVersion() {
   if (cachedGrokClientVersion !== void 0) return cachedGrokClientVersion;
   try {
-    const result = safeJson(host.exec(JSON.stringify({ bin: "grok", args: ["--version"], timeoutMs: 5e3 })));
+    const result = safeJson(yield* ioEncoded(host.io.exec({ bin: "grok", args: ["--version"], timeoutMs: 5e3 })));
     const stdout = result && typeof result.stdout === "string" ? result.stdout : "";
     const match = result && result.code === 0 ? stdout.match(/\bgrok\s+([0-9]+(?:\.[0-9]+){1,3})\b/i) : null;
     cachedGrokClientVersion = match ? match[1] : null;
@@ -786,4 +818,4 @@ function grokClientVersion() {
   }
   return cachedGrokClientVersion;
 }
-var plugin_default = plugin;
+var plugin_default = defineProviderIo(plugin, () => host.io);

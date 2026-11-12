@@ -1,3 +1,4 @@
+import { defineProviderIo, ioValue, ioEncoded, type HostIoSteps, type IoExports } from "@codeterm/plugin-sdk";
 // Chat Preprocessor plugin — CodeTerm outbound message stage (capability: chatPreprocessor).
 //
 // A `chatPreprocessor` is a compose/send-time stage in the outbound message
@@ -16,17 +17,6 @@
 // QuickJS-compatible plugin.js by scripts/build-plugin.mjs. QuickJS is not a
 // browser: no console, no fetch, no timers — everything goes through `host`.
 //
-// ── On sync vs async (the C2 contract this plugin is the proof of) ──
-// `chatPreprocess` returns `{ text } | null` *synchronously* — not a Promise — and
-// QuickJS has no event loop to drain mid-call (one synchronous `call_json`
-// dispatch). So every host call this stage makes must return synchronously from
-// the VM's view. Two backends already satisfy that today: `host.fetch` blocks the
-// VM thread then returns (it bridges async via a joined blocking thread), and
-// `host.mem.search` is sync at the host (F4: a direct `svc.mem.search()`). The SDK
-// *types* `host.mem`/`host.worker` as `Promise`-returning for await-consistency
-// with the genuinely-async `host.agent` siblings; the matching synchronous binds
-// land in Track C2. Until then we code — and fake, in plugin.test.cjs — against the
-// synchronous runtime views declared below.
 import type { ChatPreprocessor } from "@codeterm/plugin-sdk";
 
 type ComposeMode = "append" | "prepend";
@@ -44,20 +34,6 @@ interface MemHit {
   text: string;
   score: number;
 }
-
-// Synchronous runtime views of the host compute binds (see the file header note).
-// Track C2 finalizes these; the SDK surfaces the same methods as Promise-returning
-// for the async host.agent siblings, but the compose stage consumes them inline.
-interface SyncMem {
-  search(opts: { query: string; k?: number }): { hits: MemHit[] };
-}
-interface SyncWorker {
-  start(opts: { task: string; timeoutMs?: number }): { jobId: string };
-  poll(jobId: string): { done: boolean; report?: string; error?: string };
-}
-
-const mem = host.mem as unknown as SyncMem;
-const worker = host.worker as unknown as SyncWorker;
 
 const DEFAULT_BACKEND = "mem";
 const DEFAULT_COMPOSE: ComposeMode = "append";
@@ -92,10 +68,10 @@ function compose(text: string, block: string | null, mode: ComposeMode): string 
 }
 
 // ── Backend: mem ── search CodeTerm memory, render the hits as a bullet list.
-function memContext(query: string): string | null {
+function* memContext(query: string): HostIoSteps<string | null> {
   let hits: MemHit[] = [];
   try {
-    const res = mem.search({ query: query, k: DEFAULT_MEM_K });
+    const res = (yield* ioValue<{ hits: MemHit[]; }>({ op: "memSearch", options: { query: query, k: DEFAULT_MEM_K } }));
     hits = (res && res.hits) || [];
   } catch (e) {
     return null;
@@ -106,14 +82,14 @@ function memContext(query: string): string | null {
 }
 
 // ── Backend: groq ── ask a Groq model for context relevant to the turn.
-function groqContext(query: string, model: string): string | null {
-  const apiKey = host.secretGet(GROQ_API_KEY_SECRET);
+function* groqContext(query: string, model: string): HostIoSteps<string | null> {
+  const apiKey = (yield* ioValue<string | null>({ op: "secretGet", name: GROQ_API_KEY_SECRET }));
   if (!apiKey) return null;
 
   let raw: string;
   try {
-    raw = host.fetch(
-      JSON.stringify({
+    raw = (yield* ioEncoded(host.io.fetch(
+      {
         url: GROQ_URL,
         method: "POST",
         headers: {
@@ -135,8 +111,8 @@ function groqContext(query: string, model: string): string | null {
           stream: false,
         }),
         timeoutMs: 30000,
-      }),
-    );
+      },
+    )));
   } catch (e) {
     return null;
   }
@@ -161,17 +137,16 @@ function groqContext(query: string, model: string): string | null {
 }
 
 // ── Backend: worker ── run a one-shot worker agent to produce context. The job is
-// async (job-id/poll), so we start it then poll synchronously to completion within
-// a bounded loop; a never-finishing or failing job yields passthrough.
-function workerContext(query: string): string | null {
+// Job reads yield to the host within a bounded loop; failures yield passthrough.
+function* workerContext(query: string): HostIoSteps<string | null> {
   let jobId: string;
   try {
-    const started = worker.start({
+    const started = (yield* ioValue<{ jobId: string; }>({ op: "workerStart", options: {
       task:
         "Provide brief, relevant background context for this user message. " +
         "Reply with only the context, no preamble:\n\n" +
         query,
-    });
+    } }));
     jobId = started && started.jobId;
   } catch (e) {
     return null;
@@ -181,7 +156,7 @@ function workerContext(query: string): string | null {
   for (let i = 0; i < WORKER_POLL_LIMIT; i += 1) {
     let p: { done: boolean; report?: string; error?: string };
     try {
-      p = worker.poll(jobId);
+      p = (yield* ioValue<{ done: boolean; report?: string; error?: string; }>({ op: "workerPoll", job: jobId }));
     } catch (e) {
       return null;
     }
@@ -194,10 +169,10 @@ function workerContext(query: string): string | null {
   return null;
 }
 
-const plugin: ChatPreprocessor = {
+const plugin: IoExports<ChatPreprocessor> = {
   match: "text",
 
-  chatPreprocess(ctx) {
+  *chatPreprocess(ctx): HostIoSteps<{ text: string; } | null> {
     const s = settings();
     if (!s.enabled) return null; // disabled → passthrough
 
@@ -210,11 +185,11 @@ const plugin: ChatPreprocessor = {
 
     let block: string | null = null;
     if (backend === "mem") {
-      block = memContext(text);
+      block = (yield* memContext(text));
     } else if (backend === "groq") {
-      block = groqContext(text, model);
+      block = (yield* groqContext(text, model));
     } else if (backend === "worker") {
-      block = workerContext(text);
+      block = (yield* workerContext(text));
     } else {
       return null; // unknown backend → passthrough rather than guess
     }
@@ -224,4 +199,4 @@ const plugin: ChatPreprocessor = {
   },
 };
 
-export default plugin;
+export default defineProviderIo(plugin, () => host.io);

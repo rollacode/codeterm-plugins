@@ -24,6 +24,26 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
+// ../../codeterm/codeterm/packages/plugin-sdk/src/ioPrograms.ts
+function* ioValue(request) {
+  return yield request;
+}
+function defineProviderIo(source, io) {
+  const exports = { ...source };
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (typeof value !== "function") continue;
+    exports[key] = function(...args) {
+      const result = value.apply(source, args);
+      return result && typeof result.next === "function" ? io().run(result) : result;
+    };
+  }
+  return exports;
+}
+function* ioEncoded(steps) {
+  return JSON.stringify(yield* steps);
+}
+
 // bitwarden/src/metadata-process.ts
 var METADATA_PROCESS = String.raw`
 const { spawnSync } = require('node:child_process');
@@ -139,23 +159,6 @@ setInterval(() => {
   } catch { finish(); }
 }, 1000);
 `;
-
-// ../../codeterm/codeterm/packages/plugin-sdk/src/ioPrograms.ts
-function* ioValue(request) {
-  return yield request;
-}
-function defineProviderIo(source, io) {
-  const exports = { ...source };
-  for (const key of Object.keys(source)) {
-    const value = source[key];
-    if (typeof value !== "function") continue;
-    exports[key] = function(...args) {
-      const result = value.apply(source, args);
-      return result && typeof result.next === "function" ? io().run(result) : result;
-    };
-  }
-  return exports;
-}
 
 // bitwarden/src/plugin.ts
 var DEFAULT_SERVER = "https://vault.bitwarden.com";
@@ -346,7 +349,7 @@ function* stopServe() {
   serve = null;
   if (!previous) return;
   try {
-    if (previous.job) host.exec.close(previous.job);
+    if (previous.job) yield* ioValue({ op: "execClose", job: previous.job });
   } catch {
   }
   try {
@@ -373,12 +376,12 @@ function* startServe(session) {
       if (!started.jobId) throw new Error("serve start failed");
       pending.job = started.jobId;
       if (serve !== pending || serveEpoch !== epoch) {
-        host.exec.close(pending.job);
+        yield* ioValue({ op: "execClose", job: pending.job });
         return;
       }
     } catch {
       try {
-        if (pending.job) host.exec.close(pending.job);
+        if (pending.job) yield* ioValue({ op: "execClose", job: pending.job });
       } catch {
       }
       try {
@@ -397,7 +400,7 @@ function* serveGet(name, session) {
   yield* startServe(session);
   const current = serve;
   if (!current || !current.job) return null;
-  const job = host.exec.poll(current.job);
+  const job = yield* ioValue({ op: "execPoll", job: current.job });
   if (job.done) {
     yield* stopServe();
     return null;
@@ -881,7 +884,7 @@ function* statusStart() {
   const optsJson = bwExecOpts(["status"], { session: session || void 0 });
   let res;
   try {
-    res = JSON.parse(JSON.stringify(yield* ioValue({ op: "execStart", options: JSON.parse(optsJson) })));
+    res = yield* ioValue({ op: "execStart", options: JSON.parse(optsJson) });
   } catch (e) {
     return { error: "exec start: " + e };
   }
@@ -893,7 +896,7 @@ var statusFlows = {};
 function* startFlowJob(flowId, phase, args, opts, usedApiKey) {
   let started;
   try {
-    started = JSON.parse(JSON.stringify(yield* ioValue({ op: "execStart", options: JSON.parse(bwExecOpts(args, opts)) })));
+    started = yield* ioValue({ op: "execStart", options: JSON.parse(bwExecOpts(args, opts)) });
   } catch (e) {
     lastRecoveryError = { kind: "backend", message: "exec start: " + e };
     return null;
@@ -943,7 +946,7 @@ function* statusPoll(jobId) {
   const flow = statusFlows[jobId] || { hostJobId: jobId, phase: "status" };
   let p;
   try {
-    p = JSON.parse(host.execPoll(flow.hostJobId));
+    p = JSON.parse(yield* ioEncoded(ioValue({ op: "execPoll", job: flow.hostJobId })));
   } catch (e) {
     delete statusFlows[jobId];
     return { done: true, error: "exec poll: " + e };
@@ -1071,4 +1074,4 @@ var plugin = defineProviderIo({
   __test_serverHostAllowed: serverHostAllowed,
   __test_bwExecOpts: bwExecOpts
 }, () => host.io);
-var plugin_default = plugin;
+var plugin_default = defineProviderIo(plugin, () => host.io);

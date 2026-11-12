@@ -23,16 +23,35 @@ __export(plugin_exports, {
   default: () => plugin_default
 });
 module.exports = __toCommonJS(plugin_exports);
-function exec(opts) {
-  const raw = host.exec(JSON.stringify(opts));
+
+// ../../codeterm/codeterm/packages/plugin-sdk/src/ioPrograms.ts
+function defineProviderIo(source, io) {
+  const exports = { ...source };
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (typeof value !== "function") continue;
+    exports[key] = function(...args) {
+      const result = value.apply(source, args);
+      return result && typeof result.next === "function" ? io().run(result) : result;
+    };
+  }
+  return exports;
+}
+function* ioEncoded(steps) {
+  return JSON.stringify(yield* steps);
+}
+
+// git/src/plugin.ts
+function* exec(opts) {
+  const raw = yield* ioEncoded(host.io.exec(opts));
   try {
     return JSON.parse(raw);
   } catch (e) {
     return { error: String(e) };
   }
 }
-function git(cwd, args) {
-  return exec({ bin: "git", args: ["-C", cwd].concat(args) });
+function* git(cwd, args) {
+  return yield* exec({ bin: "git", args: ["-C", cwd].concat(args) });
 }
 function parsePorcelain(out) {
   const lines = (out || "").split("\n").filter((l) => l.length > 0);
@@ -54,8 +73,8 @@ function parsePorcelain(out) {
 function parseLog(out) {
   return (out || "").split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
 }
-function branchOf(cwd) {
-  const r = git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+function* branchOf(cwd) {
+  const r = yield* git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
   if (r.error || r.code !== 0) return null;
   return (r.stdout || "").trim() || null;
 }
@@ -64,7 +83,7 @@ var BUBBLE_CACHE_MAX = 64;
 var bubbleCache = {};
 var selectedRepoByCwd = {};
 function* bubbleGit(cwd, args) {
-  return yield { bin: "git", args: ["-C", cwd].concat(args) };
+  return yield* host.io.exec({ bin: "git", args: ["-C", cwd].concat(args) });
 }
 function* bubbleBranch(cwd) {
   const r = yield* bubbleGit(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
@@ -78,10 +97,10 @@ function* bubbleRepos(cwd) {
   }
   const sep = cwd.replace(/[/\\]$/, "");
   const out = [];
-  const names = listChildDirs(cwd);
+  const names = yield* listChildDirs(cwd);
   for (let i = 0; i < names.length && out.length < 20; i++) {
     const p = `${sep}/${names[i]}`;
-    if (host.fileExists(`${p}/.git`)) out.push({ path: p, name: names[i], branch: yield* bubbleBranch(p) });
+    if (yield* host.io.fs.fileExists(`${p}/.git`)) out.push({ path: p, name: names[i], branch: yield* bubbleBranch(p) });
   }
   return out;
 }
@@ -115,57 +134,30 @@ function* computeBubble(cwd, selectedPath) {
     action: "openPanel:view:git"
   };
 }
-var bubbleRefreshes = /* @__PURE__ */ new Map();
-function advanceBubble(cwd, refresh, result) {
-  let next = refresh.steps.next(result);
-  while (!next.done) {
-    const started = host.unixNowMs();
-    const command = next.value.args?.[2] || "unknown";
-    const job = JSON.parse(host.execStart(JSON.stringify(next.value)));
-    if (job.jobId) {
-      refresh.job = { id: job.jobId, started, command };
-      return;
-    }
-    host.log("debug", `git bubble ${command} elapsed_ms=${host.unixNowMs() - started}`);
-    next = refresh.steps.next({ error: job.error || "execStart failed" });
-  }
-  refresh.done = true;
-  refresh.bubble = next.value;
-  refresh.job = void 0;
-  if (bubbleRefreshes.get(cwd) !== refresh) return;
-  bubbleRefreshes.delete(cwd);
-  if (Object.keys(bubbleCache).length >= BUBBLE_CACHE_MAX) {
-    for (const k of Object.keys(bubbleCache)) delete bubbleCache[k];
-  }
-  bubbleCache[cwd] = { bubble: next.value, ts: refresh.ts };
-}
-function awaitBubble(cwd, refresh) {
-  if (refresh.done) return refresh.bubble;
-  const job = refresh.job;
-  return host.awaitJob(job.id, (result) => {
-    if (refresh.job === job) {
-      host.log("debug", `git bubble ${job.command} elapsed_ms=${host.unixNowMs() - job.started}`);
-      host.execClose(job.id);
-      advanceBubble(cwd, refresh, result);
-    }
-    return awaitBubble(cwd, refresh);
-  });
-}
-function statusBubble(ctx) {
+var bubbleRefreshes = /* @__PURE__ */ new Set();
+function* statusBubble(ctx) {
   const cwd = ctx && ctx.cwd;
   if (!cwd) return null;
   const now = host.unixNowMs();
   const hit = bubbleCache[cwd];
   if (hit && now - hit.ts < BUBBLE_TTL_MS) return hit.bubble;
-  let refresh = bubbleRefreshes.get(cwd);
-  if (!refresh) {
-    refresh = { steps: computeBubble(cwd, selectedRepoByCwd[cwd]), done: false, bubble: null, ts: now };
-    bubbleRefreshes.set(cwd, refresh);
-    advanceBubble(cwd, refresh, {});
+  if (bubbleRefreshes.has(cwd)) return hit?.bubble ?? null;
+  const selected = selectedRepoByCwd[cwd];
+  bubbleRefreshes.add(cwd);
+  try {
+    const bubble = yield* computeBubble(cwd, selected);
+    if (selectedRepoByCwd[cwd] === selected) {
+      if (Object.keys(bubbleCache).length >= BUBBLE_CACHE_MAX) {
+        for (const key of Object.keys(bubbleCache)) delete bubbleCache[key];
+      }
+      bubbleCache[cwd] = { bubble, ts: now };
+    }
+    return bubble;
+  } finally {
+    bubbleRefreshes.delete(cwd);
   }
-  return awaitBubble(cwd, refresh);
 }
-function renderGlance(ctx) {
+function* renderGlance(ctx) {
   const cwd = ctx && ctx.cwd;
   if (!cwd) {
     return {
@@ -173,12 +165,12 @@ function renderGlance(ctx) {
       nodes: [{ kind: "text", text: "No working directory for this pane.", style: { tone: "muted" } }]
     };
   }
-  const branch = branchOf(cwd);
+  const branch = yield* branchOf(cwd);
   if (!branch) {
     return { title: "Git", nodes: [{ kind: "text", text: "Not a git repository.", style: { tone: "muted" } }] };
   }
-  const d = parsePorcelain(git(cwd, ["status", "--porcelain"]).stdout);
-  const commits = parseLog(git(cwd, ["log", "--oneline", "-n", "5"]).stdout);
+  const d = parsePorcelain((yield* git(cwd, ["status", "--porcelain"])).stdout);
+  const commits = parseLog((yield* git(cwd, ["log", "--oneline", "-n", "5"])).stdout);
   const nodes = [
     { kind: "keyVal", key: "Branch", value: branch },
     {
@@ -345,14 +337,14 @@ function ok(r) {
 function fail(r, msg) {
   return { error: r && (r.stderr || r.error) || msg };
 }
-function branchLineStats(cwd, branch) {
+function* branchLineStats(cwd, branch) {
   if (!branch) return {};
   let base = null;
-  const up = git(cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+  const up = yield* git(cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
   if (ok(up)) base = (up.stdout || "").trim() || null;
   if (!base) {
-    ["origin/main", "origin/master", "main", "master"].some((cand) => {
-      if (ok(git(cwd, ["rev-parse", "--verify", "-q", cand]))) {
+    ["origin/main", "origin/master", "main", "master"].some(function* (cand) {
+      if (ok(yield* git(cwd, ["rev-parse", "--verify", "-q", cand]))) {
         base = cand;
         return true;
       }
@@ -360,11 +352,11 @@ function branchLineStats(cwd, branch) {
     });
   }
   if (!base) return {};
-  const mb = git(cwd, ["merge-base", base, "HEAD"]);
+  const mb = yield* git(cwd, ["merge-base", base, "HEAD"]);
   if (!ok(mb)) return {};
   const baseSha = (mb.stdout || "").trim();
   if (!baseSha) return {};
-  const ns = git(cwd, ["diff", "--numstat", baseSha, "HEAD"]);
+  const ns = yield* git(cwd, ["diff", "--numstat", baseSha, "HEAD"]);
   if (!ok(ns)) return {};
   let added = 0;
   let deleted = 0;
@@ -377,8 +369,8 @@ function branchLineStats(cwd, branch) {
   });
   return { branch_base: base, branch_added: added, branch_deleted: deleted };
 }
-function gitGraph(cwd, limit, skip) {
-  const r = git(cwd, [
+function* gitGraph(cwd, limit, skip) {
+  const r = yield* git(cwd, [
     "-c",
     "core.quotePath=false",
     "log",
@@ -395,16 +387,16 @@ function gitGraph(cwd, limit, skip) {
     String(skip || 0)
   ]);
   if (!ok(r)) return fail(r, "git log failed");
-  const head = git(cwd, ["rev-parse", "HEAD"]);
-  const branch = branchOf(cwd);
-  const dirty = (git(cwd, ["status", "--porcelain"]).stdout || "").trim().length > 0;
+  const head = yield* git(cwd, ["rev-parse", "HEAD"]);
+  const branch = yield* branchOf(cwd);
+  const dirty = ((yield* git(cwd, ["status", "--porcelain"])).stdout || "").trim().length > 0;
   const out = {
     commits: parseGraph(r.stdout),
     head_sha: ok(head) ? (head.stdout || "").trim() : "",
     branch,
     dirty
   };
-  const stats = branchLineStats(cwd, branch);
+  const stats = yield* branchLineStats(cwd, branch);
   if (stats.branch_base) {
     out.branch_base = stats.branch_base;
     out.branch_added = stats.branch_added;
@@ -412,91 +404,81 @@ function gitGraph(cwd, limit, skip) {
   }
   return out;
 }
-function gitCommitFiles(cwd, sha) {
-  const r = git(cwd, ["show", "-M", "-C", "--numstat", "--format=", sha]);
+function* gitCommitFiles(cwd, sha) {
+  const r = yield* git(cwd, ["show", "-M", "-C", "--numstat", "--format=", sha]);
   if (!ok(r)) return fail(r, "git show failed");
   return parseNumstat(r.stdout);
 }
-function gitCommitDiff(cwd, sha, path) {
-  const rl = git(cwd, ["rev-list", "--parents", "-n", "1", sha]);
+function* gitCommitDiff(cwd, sha, path) {
+  const rl = yield* git(cwd, ["rev-list", "--parents", "-n", "1", sha]);
   const isMerge = (rl.stdout || "").trim().split(" ").filter(Boolean).length > 2;
-  const r = isMerge ? git(cwd, ["diff", "-M", "-C", "--no-color", `${sha}^1`, sha, "--", path]) : git(cwd, ["show", "-M", "-C", "--no-color", "--format=", sha, "--", path]);
+  const r = isMerge ? yield* git(cwd, ["diff", "-M", "-C", "--no-color", `${sha}^1`, sha, "--", path]) : yield* git(cwd, ["show", "-M", "-C", "--no-color", "--format=", sha, "--", path]);
   if (r.error) return { error: r.error };
   return { diff: r.stdout || "" };
 }
-function gitWorkdirFiles(cwd) {
-  const s = git(cwd, ["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z"]);
+function* gitWorkdirFiles(cwd) {
+  const s = yield* git(cwd, ["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z"]);
   if (!ok(s)) return fail(s, "git status failed");
-  const ns = git(cwd, ["-c", "core.quotePath=false", "diff", "--numstat", "HEAD"]);
+  const ns = yield* git(cwd, ["-c", "core.quotePath=false", "diff", "--numstat", "HEAD"]);
   return mergeWorkdirFiles(parseStatusPorcelain(s.stdout), ok(ns) ? parseNumstatCounts(ns.stdout) : {});
 }
-function gitWorkdirDiff(cwd, path) {
-  const r = git(cwd, ["diff", "-M", "-C", "--no-color", "HEAD", "--", path]);
+function* gitWorkdirDiff(cwd, path) {
+  const r = yield* git(cwd, ["diff", "-M", "-C", "--no-color", "HEAD", "--", path]);
   if (r.error) return { error: r.error };
   return { diff: r.stdout || "" };
 }
-function gitStage(cwd, paths) {
+function* gitStage(cwd, paths) {
   if (!paths || !paths.length) return { error: "no paths" };
-  const r = git(cwd, ["add", "--"].concat(paths));
+  const r = yield* git(cwd, ["add", "--"].concat(paths));
   if (!ok(r)) return fail(r, "git add failed");
   return { ok: true };
 }
-function gitUnstage(cwd, paths) {
+function* gitUnstage(cwd, paths) {
   if (!paths || !paths.length) return { error: "no paths" };
-  const r = git(cwd, ["restore", "--staged", "--"].concat(paths));
+  const r = yield* git(cwd, ["restore", "--staged", "--"].concat(paths));
   if (!ok(r)) return fail(r, "git restore failed");
   return { ok: true };
 }
-function gitRevert(cwd, path) {
-  const s = git(cwd, ["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z", "--", path]);
+function* gitRevert(cwd, path) {
+  const s = yield* git(cwd, ["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z", "--", path]);
   const entry = parseStatusPorcelain(s.stdout).filter((e) => e.path === path)[0];
   if (entry && entry.status === "untracked") return { error: "untracked file \u2014 delete it manually" };
   if (entry && entry.status === "conflicted") return { error: "conflicted file \u2014 resolve it manually" };
-  const r = git(cwd, ["checkout", "HEAD", "--", path]);
+  const r = yield* git(cwd, ["checkout", "HEAD", "--", path]);
   if (!ok(r)) return fail(r, "git checkout failed");
   return { reverted: true };
 }
-function gitCommit(cwd, message) {
+function* gitCommit(cwd, message) {
   const msg = (message || "").trim();
   if (!msg) return { error: "commit message is empty" };
-  const r = git(cwd, ["commit", "-m", msg]);
+  const r = yield* git(cwd, ["commit", "-m", msg]);
   if (!ok(r)) return fail(r, "git commit failed");
   return { committed: true, stdout: r.stdout || "" };
 }
-function gitPush(cwd) {
-  const r = git(cwd, ["push"]);
+function* gitPush(cwd) {
+  const r = yield* git(cwd, ["push"]);
   if (!ok(r)) return fail(r, "git push failed");
   return { pushed: true, stdout: r.stdout || "", stderr: r.stderr || "" };
 }
-function listChildDirs(cwd) {
-  const list = host.listChildDirs;
-  if (typeof list !== "function") return [];
-  let names;
+function* listChildDirs(cwd) {
   try {
-    names = list.call(host, cwd);
-  } catch (e) {
+    return (yield* host.io.fs.listChildDirs(cwd))?.filter((name) => typeof name === "string" && name.length > 0) ?? [];
+  } catch {
     return [];
   }
-  if (!names || typeof names.length !== "number") return [];
-  const out = [];
-  for (let i = 0; i < names.length; i++) {
-    const n = names[i];
-    if (typeof n === "string" && n.length > 0) out.push(n);
-  }
-  return out;
 }
-function gitRepos(cwd) {
-  const top = git(cwd, ["rev-parse", "--show-toplevel"]);
+function* gitRepos(cwd) {
+  const top = yield* git(cwd, ["rev-parse", "--show-toplevel"]);
   if (ok(top) && (top.stdout || "").trim()) {
     const root = (top.stdout || "").trim();
-    return [{ path: root, name: baseName(root), branch: branchOf(root) }];
+    return [{ path: root, name: baseName(root), branch: yield* branchOf(root) }];
   }
   const sep = cwd.replace(/[/\\]$/, "");
   const out = [];
-  const names = listChildDirs(cwd);
+  const names = yield* listChildDirs(cwd);
   for (let i = 0; i < names.length && out.length < 20; i++) {
     const p = `${sep}/${names[i]}`;
-    if (host.fileExists(`${p}/.git`)) out.push({ path: p, name: names[i], branch: branchOf(p) });
+    if (yield* host.io.fs.fileExists(`${p}/.git`)) out.push({ path: p, name: names[i], branch: yield* branchOf(p) });
   }
   return out;
 }
@@ -519,13 +501,15 @@ function parseWorktrees(out) {
     };
   }).filter((worktree) => worktree !== null);
 }
-function gitWorktrees(cwd) {
-  const result = git(cwd, ["worktree", "list", "--porcelain"]);
+function* gitWorktrees(cwd) {
+  const result = yield* git(cwd, ["worktree", "list", "--porcelain"]);
   return ok(result) ? parseWorktrees(result.stdout) : [];
 }
-function selectRepo(cwd, path) {
-  const repos = gitRepos(cwd);
-  const allowed = repos.some((repo) => repo.path === path) || repos.some((repo) => gitWorktrees(repo.path).some((worktree) => worktree.path === path));
+function* selectRepo(cwd, path) {
+  const repos = yield* gitRepos(cwd);
+  const allowed = repos.some((repo) => repo.path === path) || repos.some(function* (repo) {
+    return (yield* gitWorktrees(repo.path)).some((worktree) => worktree.path === path);
+  });
   if (!allowed) return { error: "repository is outside this workspace" };
   selectedRepoByCwd[cwd] = path;
   delete bubbleCache[cwd];
@@ -539,8 +523,8 @@ var MUTATING = {
   gitPush: true,
   gitRevert: true
 };
-function repoRoot(cwd) {
-  const r = git(cwd, ["rev-parse", "--show-toplevel"]);
+function* repoRoot(cwd) {
+  const r = yield* git(cwd, ["rev-parse", "--show-toplevel"]);
   if (!ok(r)) return null;
   return (r.stdout || "").trim() || null;
 }
@@ -560,13 +544,13 @@ function pathWithinRepo(p) {
   }
   return true;
 }
-function viewCall(method, args) {
+function* viewCall(method, args) {
   args = args || {};
   const cwd = args.cwd;
   if (!cwd) return { error: "no cwd" };
   let opCwd = cwd;
   if (MUTATING[method]) {
-    const root = repoRoot(cwd);
+    const root = yield* repoRoot(cwd);
     if (!root) return { error: `${method}: not a git repository` };
     opCwd = root;
     const paths = args.paths || (args.path ? [args.path] : []);
@@ -579,31 +563,31 @@ function viewCall(method, args) {
   try {
     switch (method) {
       case "gitGraph":
-        return gitGraph(cwd, args.limit, args.skip);
+        return yield* gitGraph(cwd, args.limit, args.skip);
       case "gitCommitFiles":
-        return gitCommitFiles(cwd, args.sha);
+        return yield* gitCommitFiles(cwd, args.sha);
       case "gitCommitDiff":
-        return gitCommitDiff(cwd, args.sha, args.path);
+        return yield* gitCommitDiff(cwd, args.sha, args.path);
       case "gitWorkdirFiles":
-        return gitWorkdirFiles(cwd);
+        return yield* gitWorkdirFiles(cwd);
       case "gitWorkdirDiff":
-        return gitWorkdirDiff(cwd, args.path);
+        return yield* gitWorkdirDiff(cwd, args.path);
       case "gitStage":
-        return gitStage(opCwd, args.paths || (args.path ? [args.path] : []));
+        return yield* gitStage(opCwd, args.paths || (args.path ? [args.path] : []));
       case "gitUnstage":
-        return gitUnstage(opCwd, args.paths || (args.path ? [args.path] : []));
+        return yield* gitUnstage(opCwd, args.paths || (args.path ? [args.path] : []));
       case "gitCommit":
-        return gitCommit(opCwd, args.message);
+        return yield* gitCommit(opCwd, args.message);
       case "gitPush":
-        return gitPush(opCwd);
+        return yield* gitPush(opCwd);
       case "gitRevert":
-        return gitRevert(opCwd, args.path);
+        return yield* gitRevert(opCwd, args.path);
       case "gitRepos":
-        return gitRepos(cwd);
+        return yield* gitRepos(cwd);
       case "gitWorktrees":
-        return gitWorktrees(cwd);
+        return yield* gitWorktrees(cwd);
       case "gitSelectRepo":
-        return selectRepo(cwd, args.path);
+        return yield* selectRepo(cwd, args.path);
       default:
         return { error: `unknown method: ${method}` };
     }
@@ -629,4 +613,4 @@ var plugin = {
   __test_pathWithinRepo: pathWithinRepo,
   __test_parseWorktrees: parseWorktrees
 };
-var plugin_default = plugin;
+var plugin_default = defineProviderIo(plugin, () => host.io);

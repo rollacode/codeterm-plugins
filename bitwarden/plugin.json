@@ -1,7 +1,7 @@
 {
   "id": "bitwarden",
-  "version": "1.0.11",
-  "minCodeterm": "1.19.0",
+  "version": "1.0.12",
+  "minCodeterm": "1.20.0",
   "hostApi": 2,
   "displayName": "Bitwarden",
   "description": "Use a Bitwarden vault as CodeTerm's secret store, via the `bw` CLI. Unlock from the plugin view, then `codeterm mem secret` reads/writes go to your vault.",
@@ -32,5 +32,6 @@
     "secrets": true
   },
   "settingsSchema": "settings.schema.json",
-  "configHelp": "Bitwarden makes a Bitwarden vault CodeTerm's secret store via the `bw` CLI. Install the Bitwarden CLI (`bw`), open the plugin view, and unlock the vault there; after that `codeterm mem secret` reads and writes go to your vault. Auto-unlock is off until you turn on \"Remember master password\" in the plugin view; only then is the master password kept in the plugin's restricted local secret bucket so an expired CLI login can recover automatically. Turning it off deletes the stored password immediately. Knobs (set with `codeterm plugin config bitwarden --set key=value`): `serverUrl` — the Bitwarden server, cloud or self-hosted (default https://vault.bitwarden.com)."
+  "configHelp": "Bitwarden makes a Bitwarden vault CodeTerm's secret store via the `bw` CLI. Install the Bitwarden CLI (`bw`), open the plugin view, and unlock the vault there; after that `codeterm mem secret` reads and writes go to your vault. Auto-unlock is off until you turn on \"Remember master password\" in the plugin view; only then is the master password kept in the plugin's restricted local secret bucket so an expired CLI login can recover automatically. Turning it off deletes the stored password immediately. Knobs (set with `codeterm plugin config bitwarden --set key=value`): `serverUrl` \u2014 the Bitwarden server, cloud or self-hosted (default https://vault.bitwarden.com).",
+  "hostIoJobs": true
 }

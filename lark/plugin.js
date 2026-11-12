@@ -24,6 +24,23 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
+// ../../codeterm/codeterm/packages/plugin-sdk/src/ioPrograms.ts
+function* ioValue(request) {
+  return yield request;
+}
+function defineProviderIo(source, io) {
+  const exports = { ...source };
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (typeof value !== "function") continue;
+    exports[key] = function(...args) {
+      const result = value.apply(source, args);
+      return result && typeof result.next === "function" ? io().run(result) : result;
+    };
+  }
+  return exports;
+}
+
 // lark/src/battery.ts
 function batteryFromStatus(report) {
   if (!Array.isArray(report) || report.length !== 64 || report.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255)) return [];
@@ -78,31 +95,31 @@ function selectRecordingDevices(value) {
 }
 
 // lark/src/plugin.ts
-function diagnostics() {
-  const hostStatus = host.localRecording.status();
+function* diagnostics() {
+  const hostStatus = yield* ioValue({ op: "localRecordingStatus" });
   const connection = connectionFromStatus(hostStatus);
-  const receiverReport = connection.state === "connected" ? host.localRecording.statusReport() : null;
+  const receiverReport = connection.state === "connected" ? yield* ioValue({ op: "receiverStatusReport" }) : null;
   return { connection, hostStatus, receiverReport, batteries: batteryFromStatus(receiverReport) };
 }
 var plugin = {
-  renderGlance() {
-    const status = host.localRecording.status();
+  *renderGlance() {
+    const status = yield* ioValue({ op: "localRecordingStatus" });
     const connection = connectionFromStatus(status);
     const ready = connection.state === "connected";
     const nodes = [
       { kind: "keyVal", key: "Recording button", value: connection.label, style: { tone: ready ? "ok" : "muted" } },
       { kind: "text", text: connection.detail }
     ];
-    const batteries = ready ? batteryFromStatus(host.localRecording.statusReport()) : [];
+    const batteries = ready ? batteryFromStatus(yield* ioValue({ op: "receiverStatusReport" })) : [];
     if (!batteries.length) nodes.push({ kind: "keyVal", key: "Battery", value: ready ? "No valid receiver report" : "Connect receiver first", style: { tone: "muted" } });
     for (const battery of batteries) nodes.push({ kind: "keyVal", key: `Microphone ${battery.slot}`, value: battery.connected ? `${battery.percent}%` : "Disconnected", style: { tone: !battery.connected ? "muted" : battery.percent <= 15 ? "warn" : "ok" } });
     return { title: "LARK M2", nodes };
   },
-  statusBubble(ctx) {
-    const target = host.receiverTarget.get();
-    const status = host.localRecording.status();
+  *statusBubble(ctx) {
+    const target = yield* ioValue({ op: "receiverTarget" });
+    const status = yield* ioValue({ op: "localRecordingStatus" });
     if (!target || !("tabId" in target) || target.tabId !== ctx.tabId || !status || "error" in status || !status.granted || !status.enabled || !status.available) return null;
-    const batteries = batteryFromStatus(host.localRecording.statusReport()).filter((battery) => battery.connected);
+    const batteries = batteryFromStatus(yield* ioValue({ op: "receiverStatusReport" })).filter((battery) => battery.connected);
     if (!batteries.length) return null;
     return {
       label: `LARK ${batteries.map((battery) => `${battery.percent}%`).join(" \xB7 ")}`,
@@ -112,24 +129,24 @@ var plugin = {
       action: "openPanel:view:lark"
     };
   },
-  onAgentCommand(ctx) {
+  *onAgentCommand(ctx) {
     if (ctx.args.length) return { error: "LARK diagnostic commands take no arguments." };
-    if (ctx.verb === "status") return { result: JSON.stringify(connectionFromStatus(host.localRecording.status())) };
-    if (ctx.verb === "diagnostics") return { result: JSON.stringify(diagnostics()) };
+    if (ctx.verb === "status") return { result: JSON.stringify(connectionFromStatus(yield* ioValue({ op: "localRecordingStatus" }))) };
+    if (ctx.verb === "diagnostics") return { result: JSON.stringify(yield* diagnostics()) };
     if (ctx.verb === "help") return { result: "Read-only verbs: status, diagnostics. Run codeterm plugin get lark first; settings show Refresh status, Enable LARK, Disable LARK, Show diagnostics. Device selection is host-owned and may have no picker when no receiver is offered." };
     return { error: "unsupported_lark_command" };
   },
-  viewCall(method, args) {
+  *viewCall(method, args) {
     if (method === "selectRecordingDevices") return selectRecordingDevices(args);
-    if (method === "connection") return connectionFromStatus(host.localRecording.status());
-    if (method === "diagnostics") return diagnostics();
-    if (method === "battery") return batteryFromStatus(host.localRecording.statusReport());
-    if (method === "status") return host.localRecording.status();
-    if (method === "enable") return host.localRecording.setEnabled(true);
-    if (method === "disable") return host.localRecording.setEnabled(false);
-    if (method === "receiverTarget") return host.receiverTarget.get();
-    if (method === "resetReceiverTarget") return host.receiverTarget.clear();
+    if (method === "connection") return connectionFromStatus(yield* ioValue({ op: "localRecordingStatus" }));
+    if (method === "diagnostics") return yield* diagnostics();
+    if (method === "battery") return batteryFromStatus(yield* ioValue({ op: "receiverStatusReport" }));
+    if (method === "status") return yield* ioValue({ op: "localRecordingStatus" });
+    if (method === "enable") return yield* ioValue({ op: "localRecordingSetEnabled", enabled: true });
+    if (method === "disable") return yield* ioValue({ op: "localRecordingSetEnabled", enabled: false });
+    if (method === "receiverTarget") return yield* ioValue({ op: "receiverTarget" });
+    if (method === "resetReceiverTarget") return yield* ioValue({ op: "receiverTargetClear" });
     return { error: "unsupported_lark_action" };
   }
 };
-var plugin_default = plugin;
+var plugin_default = defineProviderIo(plugin, () => host.io);

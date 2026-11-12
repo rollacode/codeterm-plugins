@@ -1,3 +1,4 @@
+import { defineProviderIo, ioEncoded, type HostIoSteps, type IoExports } from "@codeterm/plugin-sdk";
 // Git plugin — CodeTerm's local-git presence, authored in TypeScript against
 // @codeterm/plugin-sdk and compiled to QuickJS-compatible plugin.js by
 // scripts/build-plugin.mjs. Contributes a pane-footer status bubble, a glance
@@ -12,8 +13,8 @@ import type {
   ViewNode,
 } from "@codeterm/plugin-sdk";
 
-function exec(opts: ExecOpts): ExecResult {
-  const raw = host.exec(JSON.stringify(opts));
+function* exec(opts: ExecOpts): HostIoSteps<ExecResult> {
+  const raw = (yield* ioEncoded(host.io.exec(opts)));
   try {
     return JSON.parse(raw) as ExecResult;
   } catch (e) {
@@ -21,8 +22,8 @@ function exec(opts: ExecOpts): ExecResult {
   }
 }
 
-function git(cwd: string, args: string[]): ExecResult {
-  return exec({ bin: "git", args: ["-C", cwd].concat(args) });
+function* git(cwd: string, args: string[]): HostIoSteps<ExecResult> {
+  return (yield* exec({ bin: "git", args: ["-C", cwd].concat(args) }));
 }
 
 // --- pure parsers (exported for tests) ---
@@ -61,8 +62,8 @@ function parseLog(out: string | undefined): string[] {
     .filter((l) => l.length > 0);
 }
 
-function branchOf(cwd: string): string | null {
-  const r = git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+function* branchOf(cwd: string): HostIoSteps<string | null> {
+  const r = (yield* git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]));
   if (r.error || r.code !== 0) return null;
   return (r.stdout || "").trim() || null;
 }
@@ -79,10 +80,10 @@ const BUBBLE_CACHE_MAX = 64;
 const bubbleCache: Record<string, { bubble: StatusBubble | null; ts: number }> = {};
 const selectedRepoByCwd: Record<string, string> = {};
 
-type BubbleSteps<T> = Generator<ExecOpts, T, ExecResult>;
+type BubbleSteps<T> = HostIoSteps<T>;
 
 function* bubbleGit(cwd: string, args: string[]): BubbleSteps<ExecResult> {
-  return yield { bin: "git", args: ["-C", cwd].concat(args) };
+  return yield* host.io.exec({ bin: "git", args: ["-C", cwd].concat(args) });
 }
 
 function* bubbleBranch(cwd: string): BubbleSteps<string | null> {
@@ -90,7 +91,7 @@ function* bubbleBranch(cwd: string): BubbleSteps<string | null> {
   return r.error || r.code !== 0 ? null : (r.stdout || "").trim() || null;
 }
 
-function* bubbleRepos(cwd: string): BubbleSteps<Repo[]> {
+function* bubbleRepos(cwd: string): HostIoSteps<Repo[]> {
   const top = yield* bubbleGit(cwd, ["rev-parse", "--show-toplevel"]);
   if (ok(top) && (top.stdout || "").trim()) {
     const root = (top.stdout || "").trim();
@@ -98,15 +99,15 @@ function* bubbleRepos(cwd: string): BubbleSteps<Repo[]> {
   }
   const sep = cwd.replace(/[/\\]$/, "");
   const out: Repo[] = [];
-  const names = listChildDirs(cwd);
+  const names = yield* listChildDirs(cwd);
   for (let i = 0; i < names.length && out.length < 20; i++) {
     const p = `${sep}/${names[i]}`;
-    if (host.fileExists(`${p}/.git`)) out.push({ path: p, name: names[i], branch: yield* bubbleBranch(p) });
+    if ((yield* host.io.fs.fileExists(`${p}/.git`))) out.push({ path: p, name: names[i], branch: yield* bubbleBranch(p) });
   }
   return out;
 }
 
-function* computeBubble(cwd: string, selectedPath: string | undefined): BubbleSteps<StatusBubble | null> {
+function* computeBubble(cwd: string, selectedPath: string | undefined): HostIoSteps<StatusBubble | null> {
   const directBranch = yield* bubbleBranch(cwd);
   const repos = directBranch ? [] : yield* bubbleRepos(cwd);
   let selected = repos.find((repo) => repo.path === selectedPath);
@@ -137,69 +138,32 @@ function* computeBubble(cwd: string, selectedPath: string | undefined): BubbleSt
   };
 }
 
-interface BubbleRefresh {
-  steps: BubbleSteps<StatusBubble | null>;
-  job?: { id: string; started: number; command: string };
-  done: boolean;
-  bubble: StatusBubble | null;
-  ts: number;
-}
-const bubbleRefreshes = new Map<string, BubbleRefresh>();
+const bubbleRefreshes = new Set<string>();
 
-function advanceBubble(cwd: string, refresh: BubbleRefresh, result: ExecResult): void {
-  let next = refresh.steps.next(result);
-  while (!next.done) {
-    const started = host.unixNowMs();
-    const command = next.value.args?.[2] || "unknown";
-    const job = JSON.parse(host.execStart(JSON.stringify(next.value))) as { jobId?: string; error?: string };
-    if (job.jobId) {
-      refresh.job = { id: job.jobId, started, command };
-      return;
-    }
-    host.log("debug", `git bubble ${command} elapsed_ms=${host.unixNowMs() - started}`);
-    next = refresh.steps.next({ error: job.error || "execStart failed" });
-  }
-  refresh.done = true;
-  refresh.bubble = next.value;
-  refresh.job = undefined;
-  if (bubbleRefreshes.get(cwd) !== refresh) return;
-  bubbleRefreshes.delete(cwd);
-  if (Object.keys(bubbleCache).length >= BUBBLE_CACHE_MAX) {
-    for (const k of Object.keys(bubbleCache)) delete bubbleCache[k];
-  }
-  bubbleCache[cwd] = { bubble: next.value, ts: refresh.ts };
-}
-
-function awaitBubble(cwd: string, refresh: BubbleRefresh): StatusBubble | null {
-  if (refresh.done) return refresh.bubble;
-  const job = refresh.job!;
-  return host.awaitJob(job.id, (result) => {
-    // Every waiter resumes, but only the first advances the shared computation.
-    if (refresh.job === job) {
-      host.log("debug", `git bubble ${job.command} elapsed_ms=${host.unixNowMs() - job.started}`);
-      host.execClose(job.id);
-      advanceBubble(cwd, refresh, result);
-    }
-    return awaitBubble(cwd, refresh);
-  });
-}
-
-function statusBubble(ctx: TabContext): StatusBubble | null {
+function* statusBubble(ctx: TabContext): HostIoSteps<StatusBubble | null> {
   const cwd = ctx && ctx.cwd;
   if (!cwd) return null;
   const now = host.unixNowMs();
   const hit = bubbleCache[cwd];
   if (hit && now - hit.ts < BUBBLE_TTL_MS) return hit.bubble;
-  let refresh = bubbleRefreshes.get(cwd);
-  if (!refresh) {
-    refresh = { steps: computeBubble(cwd, selectedRepoByCwd[cwd]), done: false, bubble: null, ts: now };
-    bubbleRefreshes.set(cwd, refresh);
-    advanceBubble(cwd, refresh, {});
+  if (bubbleRefreshes.has(cwd)) return hit?.bubble ?? null;
+  const selected = selectedRepoByCwd[cwd];
+  bubbleRefreshes.add(cwd);
+  try {
+    const bubble = yield* computeBubble(cwd, selected);
+    if (selectedRepoByCwd[cwd] === selected) {
+      if (Object.keys(bubbleCache).length >= BUBBLE_CACHE_MAX) {
+        for (const key of Object.keys(bubbleCache)) delete bubbleCache[key];
+      }
+      bubbleCache[cwd] = { bubble, ts: now };
+    }
+    return bubble;
+  } finally {
+    bubbleRefreshes.delete(cwd);
   }
-  return awaitBubble(cwd, refresh);
 }
 
-function renderGlance(ctx: TabContext): GlanceView {
+function* renderGlance(ctx: TabContext): HostIoSteps<GlanceView> {
   const cwd = ctx && ctx.cwd;
   if (!cwd) {
     return {
@@ -207,12 +171,12 @@ function renderGlance(ctx: TabContext): GlanceView {
       nodes: [{ kind: "text", text: "No working directory for this pane.", style: { tone: "muted" } }],
     };
   }
-  const branch = branchOf(cwd);
+  const branch = (yield* branchOf(cwd));
   if (!branch) {
     return { title: "Git", nodes: [{ kind: "text", text: "Not a git repository.", style: { tone: "muted" } }] };
   }
-  const d = parsePorcelain(git(cwd, ["status", "--porcelain"]).stdout);
-  const commits = parseLog(git(cwd, ["log", "--oneline", "-n", "5"]).stdout);
+  const d = parsePorcelain((yield* git(cwd, ["status", "--porcelain"])).stdout);
+  const commits = parseLog((yield* git(cwd, ["log", "--oneline", "-n", "5"])).stdout);
 
   const nodes: ViewNode[] = [
     { kind: "keyVal", key: "Branch", value: branch },
@@ -458,14 +422,14 @@ interface BranchStats {
   branch_deleted?: number;
 }
 
-function branchLineStats(cwd: string, branch: string | null): BranchStats {
+function* branchLineStats(cwd: string, branch: string | null): HostIoSteps<BranchStats> {
   if (!branch) return {};
   let base: string | null = null;
-  const up = git(cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+  const up = (yield* git(cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]));
   if (ok(up)) base = (up.stdout || "").trim() || null;
   if (!base) {
-    ["origin/main", "origin/master", "main", "master"].some((cand) => {
-      if (ok(git(cwd, ["rev-parse", "--verify", "-q", cand]))) {
+    ["origin/main", "origin/master", "main", "master"].some(function* (cand): HostIoSteps<boolean> {
+      if (ok((yield* git(cwd, ["rev-parse", "--verify", "-q", cand])))) {
         base = cand;
         return true;
       }
@@ -473,11 +437,11 @@ function branchLineStats(cwd: string, branch: string | null): BranchStats {
     });
   }
   if (!base) return {};
-  const mb = git(cwd, ["merge-base", base, "HEAD"]);
+  const mb = (yield* git(cwd, ["merge-base", base, "HEAD"]));
   if (!ok(mb)) return {};
   const baseSha = (mb.stdout || "").trim();
   if (!baseSha) return {};
-  const ns = git(cwd, ["diff", "--numstat", baseSha, "HEAD"]);
+  const ns = (yield* git(cwd, ["diff", "--numstat", baseSha, "HEAD"]));
   if (!ok(ns)) return {};
   let added = 0;
   let deleted = 0;
@@ -501,24 +465,24 @@ interface GraphResult {
   branch_deleted?: number;
 }
 
-function gitGraph(cwd: string, limit?: number, skip?: number): GraphResult | { error: string } {
-  const r = git(cwd, [
+function* gitGraph(cwd: string, limit?: number, skip?: number): HostIoSteps<GraphResult | { error: string }> {
+  const r = (yield* git(cwd, [
     "-c", "core.quotePath=false", "log", "--branches", "--tags", "--remotes", "HEAD",
     "--topo-order", "--decorate=full",
     "--pretty=format:%x1f%H%x1f%P%x1f%an%x1f%aI%x1f%D%x1f%s%x1e",
     "-n", String(limit || 200), "--skip", String(skip || 0),
-  ]);
+  ]));
   if (!ok(r)) return fail(r, "git log failed");
-  const head = git(cwd, ["rev-parse", "HEAD"]);
-  const branch = branchOf(cwd);
-  const dirty = (git(cwd, ["status", "--porcelain"]).stdout || "").trim().length > 0;
+  const head = (yield* git(cwd, ["rev-parse", "HEAD"]));
+  const branch = (yield* branchOf(cwd));
+  const dirty = ((yield* git(cwd, ["status", "--porcelain"])).stdout || "").trim().length > 0;
   const out: GraphResult = {
     commits: parseGraph(r.stdout),
     head_sha: ok(head) ? (head.stdout || "").trim() : "",
     branch,
     dirty,
   };
-  const stats = branchLineStats(cwd, branch);
+  const stats = (yield* branchLineStats(cwd, branch));
   if (stats.branch_base) {
     out.branch_base = stats.branch_base;
     out.branch_added = stats.branch_added;
@@ -527,69 +491,69 @@ function gitGraph(cwd: string, limit?: number, skip?: number): GraphResult | { e
   return out;
 }
 
-function gitCommitFiles(cwd: string, sha: string): NumstatFile[] | { error: string } {
-  const r = git(cwd, ["show", "-M", "-C", "--numstat", "--format=", sha]);
+function* gitCommitFiles(cwd: string, sha: string): HostIoSteps<NumstatFile[] | { error: string }> {
+  const r = (yield* git(cwd, ["show", "-M", "-C", "--numstat", "--format=", sha]));
   if (!ok(r)) return fail(r, "git show failed");
   return parseNumstat(r.stdout);
 }
 
-function gitCommitDiff(cwd: string, sha: string, path: string): { diff: string } | { error: string } {
-  const rl = git(cwd, ["rev-list", "--parents", "-n", "1", sha]);
+function* gitCommitDiff(cwd: string, sha: string, path: string): HostIoSteps<{ diff: string } | { error: string }> {
+  const rl = (yield* git(cwd, ["rev-list", "--parents", "-n", "1", sha]));
   const isMerge = (rl.stdout || "").trim().split(" ").filter(Boolean).length > 2;
   const r = isMerge
-    ? git(cwd, ["diff", "-M", "-C", "--no-color", `${sha}^1`, sha, "--", path])
-    : git(cwd, ["show", "-M", "-C", "--no-color", "--format=", sha, "--", path]);
+    ? (yield* git(cwd, ["diff", "-M", "-C", "--no-color", `${sha}^1`, sha, "--", path]))
+    : (yield* git(cwd, ["show", "-M", "-C", "--no-color", "--format=", sha, "--", path]));
   if (r.error) return { error: r.error };
   return { diff: r.stdout || "" };
 }
 
-function gitWorkdirFiles(cwd: string): WorkdirFile[] | { error: string } {
-  const s = git(cwd, ["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z"]);
+function* gitWorkdirFiles(cwd: string): HostIoSteps<WorkdirFile[] | { error: string }> {
+  const s = (yield* git(cwd, ["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z"]));
   if (!ok(s)) return fail(s, "git status failed");
-  const ns = git(cwd, ["-c", "core.quotePath=false", "diff", "--numstat", "HEAD"]);
+  const ns = (yield* git(cwd, ["-c", "core.quotePath=false", "diff", "--numstat", "HEAD"]));
   return mergeWorkdirFiles(parseStatusPorcelain(s.stdout), ok(ns) ? parseNumstatCounts(ns.stdout) : {});
 }
 
-function gitWorkdirDiff(cwd: string, path: string): { diff: string } | { error: string } {
-  const r = git(cwd, ["diff", "-M", "-C", "--no-color", "HEAD", "--", path]);
+function* gitWorkdirDiff(cwd: string, path: string): HostIoSteps<{ diff: string } | { error: string }> {
+  const r = (yield* git(cwd, ["diff", "-M", "-C", "--no-color", "HEAD", "--", path]));
   if (r.error) return { error: r.error };
   return { diff: r.stdout || "" };
 }
 
-function gitStage(cwd: string, paths: string[]): { ok: true } | { error: string } {
+function* gitStage(cwd: string, paths: string[]): HostIoSteps<{ ok: true } | { error: string }> {
   if (!paths || !paths.length) return { error: "no paths" };
-  const r = git(cwd, ["add", "--"].concat(paths));
+  const r = (yield* git(cwd, ["add", "--"].concat(paths)));
   if (!ok(r)) return fail(r, "git add failed");
   return { ok: true };
 }
 
-function gitUnstage(cwd: string, paths: string[]): { ok: true } | { error: string } {
+function* gitUnstage(cwd: string, paths: string[]): HostIoSteps<{ ok: true } | { error: string }> {
   if (!paths || !paths.length) return { error: "no paths" };
-  const r = git(cwd, ["restore", "--staged", "--"].concat(paths));
+  const r = (yield* git(cwd, ["restore", "--staged", "--"].concat(paths)));
   if (!ok(r)) return fail(r, "git restore failed");
   return { ok: true };
 }
 
-function gitRevert(cwd: string, path: string): { reverted: true } | { error: string } {
-  const s = git(cwd, ["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z", "--", path]);
+function* gitRevert(cwd: string, path: string): HostIoSteps<{ reverted: true } | { error: string }> {
+  const s = (yield* git(cwd, ["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z", "--", path]));
   const entry = parseStatusPorcelain(s.stdout).filter((e) => e.path === path)[0];
   if (entry && entry.status === "untracked") return { error: "untracked file — delete it manually" };
   if (entry && entry.status === "conflicted") return { error: "conflicted file — resolve it manually" };
-  const r = git(cwd, ["checkout", "HEAD", "--", path]);
+  const r = (yield* git(cwd, ["checkout", "HEAD", "--", path]));
   if (!ok(r)) return fail(r, "git checkout failed");
   return { reverted: true };
 }
 
-function gitCommit(cwd: string, message: string): { committed: true; stdout: string } | { error: string } {
+function* gitCommit(cwd: string, message: string): HostIoSteps<{ committed: true; stdout: string } | { error: string }> {
   const msg = (message || "").trim();
   if (!msg) return { error: "commit message is empty" };
-  const r = git(cwd, ["commit", "-m", msg]);
+  const r = (yield* git(cwd, ["commit", "-m", msg]));
   if (!ok(r)) return fail(r, "git commit failed");
   return { committed: true, stdout: r.stdout || "" };
 }
 
-function gitPush(cwd: string): { pushed: true; stdout: string; stderr: string } | { error: string } {
-  const r = git(cwd, ["push"]);
+function* gitPush(cwd: string): HostIoSteps<{ pushed: true; stdout: string; stderr: string } | { error: string }> {
+  const r = (yield* git(cwd, ["push"]));
   if (!ok(r)) return fail(r, "git push failed");
   return { pushed: true, stdout: r.stdout || "", stderr: r.stderr || "" };
 }
@@ -598,24 +562,9 @@ function gitPush(cwd: string): { pushed: true; stdout: string; stderr: string } 
 // or unreadable, `[]` a readable directory with no children. An older daemon has
 // no such binding at all, so an absent member degrades to no discovery rather
 // than a throw that would take the whole bubble down.
-type ListChildDirsHost = { listChildDirs?: (path: string) => string[] | null };
-
-function listChildDirs(cwd: string): string[] {
-  const list = (host as unknown as ListChildDirsHost).listChildDirs;
-  if (typeof list !== "function") return [];
-  let names: string[] | null;
-  try {
-    names = list.call(host, cwd);
-  } catch (e) {
-    return [];
-  }
-  if (!names || typeof names.length !== "number") return [];
-  const out: string[] = [];
-  for (let i = 0; i < names.length; i++) {
-    const n = names[i];
-    if (typeof n === "string" && n.length > 0) out.push(n);
-  }
-  return out;
+function* listChildDirs(cwd: string): HostIoSteps<string[]> {
+  try { return (yield* host.io.fs.listChildDirs(cwd))?.filter(name => typeof name === "string" && name.length > 0) ?? []; }
+  catch { return []; }
 }
 
 interface Repo {
@@ -624,18 +573,18 @@ interface Repo {
   branch: string | null;
 }
 
-function gitRepos(cwd: string): Repo[] {
-  const top = git(cwd, ["rev-parse", "--show-toplevel"]);
+function* gitRepos(cwd: string): HostIoSteps<Repo[]> {
+  const top = (yield* git(cwd, ["rev-parse", "--show-toplevel"]));
   if (ok(top) && (top.stdout || "").trim()) {
     const root = (top.stdout || "").trim();
-    return [{ path: root, name: baseName(root), branch: branchOf(root) }];
+    return [{ path: root, name: baseName(root), branch: (yield* branchOf(root)) }];
   }
   const sep = cwd.replace(/[/\\]$/, "");
   const out: Repo[] = [];
-  const names = listChildDirs(cwd);
+  const names = yield* listChildDirs(cwd);
   for (let i = 0; i < names.length && out.length < 20; i++) {
     const p = `${sep}/${names[i]}`;
-    if (host.fileExists(`${p}/.git`)) out.push({ path: p, name: names[i], branch: branchOf(p) });
+    if ((yield* host.io.fs.fileExists(`${p}/.git`))) out.push({ path: p, name: names[i], branch: (yield* branchOf(p)) });
   }
   return out;
 }
@@ -684,15 +633,15 @@ function parseWorktrees(out: string | undefined): Worktree[] {
     .filter((worktree): worktree is Worktree => worktree !== null);
 }
 
-function gitWorktrees(cwd: string): Worktree[] {
-  const result = git(cwd, ["worktree", "list", "--porcelain"]);
+function* gitWorktrees(cwd: string): HostIoSteps<Worktree[]> {
+  const result = (yield* git(cwd, ["worktree", "list", "--porcelain"]));
   return ok(result) ? parseWorktrees(result.stdout) : [];
 }
 
-function selectRepo(cwd: string, path: string): { selected: true } | { error: string } {
-  const repos = gitRepos(cwd);
+function* selectRepo(cwd: string, path: string): HostIoSteps<{ selected: true } | { error: string }> {
+  const repos = (yield* gitRepos(cwd));
   const allowed = repos.some((repo) => repo.path === path)
-    || repos.some((repo) => gitWorktrees(repo.path).some((worktree) => worktree.path === path));
+    || repos.some(function* (repo): HostIoSteps<boolean> { return (yield* gitWorktrees(repo.path)).some((worktree) => worktree.path === path); });
   if (!allowed) return { error: "repository is outside this workspace" };
   selectedRepoByCwd[cwd] = path;
   delete bubbleCache[cwd];
@@ -713,8 +662,8 @@ const MUTATING: Record<string, true> = {
 
 // Resolve the repository root that `cwd` belongs to. git itself is the authority:
 // `rev-parse --show-toplevel` fails (→ null) for anything that is not a work tree.
-function repoRoot(cwd: string): string | null {
-  const r = git(cwd, ["rev-parse", "--show-toplevel"]);
+function* repoRoot(cwd: string): HostIoSteps<string | null> {
+  const r = (yield* git(cwd, ["rev-parse", "--show-toplevel"]));
   if (!ok(r)) return null;
   return (r.stdout || "").trim() || null;
 }
@@ -740,7 +689,7 @@ function pathWithinRepo(p: string): boolean {
   return true;
 }
 
-function viewCall(method: string, args: ViewArgs): unknown {
+function* viewCall(method: string, args: ViewArgs): HostIoSteps<unknown> {
   args = args || {};
   const cwd = args.cwd;
   if (!cwd) return { error: "no cwd" };
@@ -750,7 +699,7 @@ function viewCall(method: string, args: ViewArgs): unknown {
   // that root, and we validate every path argument stays inside the repo.
   let opCwd = cwd;
   if (MUTATING[method]) {
-    const root = repoRoot(cwd);
+    const root = (yield* repoRoot(cwd));
     if (!root) return { error: `${method}: not a git repository` };
     opCwd = root;
     const paths = args.paths || (args.path ? [args.path] : []);
@@ -764,31 +713,31 @@ function viewCall(method: string, args: ViewArgs): unknown {
   try {
     switch (method) {
       case "gitGraph":
-        return gitGraph(cwd, args.limit, args.skip);
+        return (yield* gitGraph(cwd, args.limit, args.skip));
       case "gitCommitFiles":
-        return gitCommitFiles(cwd, args.sha as string);
+        return (yield* gitCommitFiles(cwd, args.sha as string));
       case "gitCommitDiff":
-        return gitCommitDiff(cwd, args.sha as string, args.path as string);
+        return (yield* gitCommitDiff(cwd, args.sha as string, args.path as string));
       case "gitWorkdirFiles":
-        return gitWorkdirFiles(cwd);
+        return (yield* gitWorkdirFiles(cwd));
       case "gitWorkdirDiff":
-        return gitWorkdirDiff(cwd, args.path as string);
+        return (yield* gitWorkdirDiff(cwd, args.path as string));
       case "gitStage":
-        return gitStage(opCwd, args.paths || (args.path ? [args.path] : []));
+        return (yield* gitStage(opCwd, args.paths || (args.path ? [args.path] : [])));
       case "gitUnstage":
-        return gitUnstage(opCwd, args.paths || (args.path ? [args.path] : []));
+        return (yield* gitUnstage(opCwd, args.paths || (args.path ? [args.path] : [])));
       case "gitCommit":
-        return gitCommit(opCwd, args.message as string);
+        return (yield* gitCommit(opCwd, args.message as string));
       case "gitPush":
-        return gitPush(opCwd);
+        return (yield* gitPush(opCwd));
       case "gitRevert":
-        return gitRevert(opCwd, args.path as string);
+        return (yield* gitRevert(opCwd, args.path as string));
       case "gitRepos":
-        return gitRepos(cwd);
+        return (yield* gitRepos(cwd));
       case "gitWorktrees":
-        return gitWorktrees(cwd);
+        return (yield* gitWorktrees(cwd));
       case "gitSelectRepo":
-        return selectRepo(cwd, args.path as string);
+        return (yield* selectRepo(cwd, args.path as string));
       default:
         return { error: `unknown method: ${method}` };
     }
@@ -799,7 +748,7 @@ function viewCall(method: string, args: ViewArgs): unknown {
   }
 }
 
-const plugin: PluginModule = {
+const plugin: IoExports<PluginModule> = {
   statusBubble,
   renderGlance,
   viewCall: viewCall as PluginModule["viewCall"],
@@ -818,4 +767,4 @@ const plugin: PluginModule = {
   __test_parseWorktrees: parseWorktrees,
 };
 
-export default plugin;
+export default defineProviderIo(plugin, () => host.io);

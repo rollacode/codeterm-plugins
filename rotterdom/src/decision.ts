@@ -1,3 +1,4 @@
+import { type HostIoSteps, type IoExports } from "@codeterm/plugin-sdk";
 import type { DecisionAnswer, DecisionFailure, DecisionModelCapability, DecisionQuestion, DecisionQuestionsRequest, DecisionRequest, DecisionResponse, FetchResult } from "@codeterm/plugin-sdk";
 import { settings } from "./config";
 import { endpointKey, endpointRequest, request } from "./adapters";
@@ -47,10 +48,10 @@ function config(): { endpoint: Endpoint; profile: Profile } {
     || !Number.isInteger(p.budgets?.tokens) || p.budgets.tokens <= 0 || p.budgets.tokens > 1000000) throw new Error("invalid decision budget");
   return { endpoint, profile: { ...p, model: selectedModel || p.model } };
 }
-function models() {
+function* models(): HostIoSteps<{ id: string; display_name: string; }[]> {
   try {
     const { endpoint, profile } = config();
-    return host.fetch.async({ ...endpointRequest(endpoint, "/models", endpointKey(endpoint)), method: "GET", timeoutMs: Math.min(30000, profile.budgets.deadlineMs) }, result => {
+    return host.fetch.async({ ...endpointRequest(endpoint, "/models", (yield* endpointKey(endpoint))), method: "GET", timeoutMs: Math.min(30000, profile.budgets.deadlineMs) }, result => {
       if (result.error || !result.status || result.status < 200 || result.status >= 300) return [];
       try {
         const data = JSON.parse(result.body || "{}") as { data?: { id?: unknown; name?: unknown }[] };
@@ -64,11 +65,11 @@ function models() {
     });
   } catch { return []; }
 }
-function run<T>(state: unknown, questions: Record<string, { instructions: string; question: DecisionQuestion }>, remainingMs: number | undefined, batch: boolean, decode: (value: unknown, completion: Record<string, unknown>) => T): T | DecisionFailure {
+function* run<T>(state: unknown, questions: Record<string, { instructions: string; question: DecisionQuestion }>, remainingMs: number | undefined, batch: boolean, decode: (value: unknown, completion: Record<string, unknown>) => T): HostIoSteps<T | DecisionFailure> {
   if (remainingMs !== undefined && (!Number.isFinite(remainingMs) || remainingMs < 1)) return { error: "timeout" };
   let selected: ReturnType<typeof config>;
   let key: string | null;
-  try { selected = config(); key = endpointKey(selected.endpoint); } catch { return { error: "unavailable" }; }
+  try { selected = config(); key = (yield* endpointKey(selected.endpoint)); } catch { return { error: "unavailable" }; }
   if (!selected.profile.model) return { error: "unavailable" };
   const deadline = host.unixNowMs() + Math.min(remainingMs ?? 30000, selected.profile.budgets.deadlineMs);
   let responseSchema: Record<string, unknown>;
@@ -79,7 +80,7 @@ function run<T>(state: unknown, questions: Record<string, { instructions: string
   } catch { return { error: "invalid_response" }; }
   try {
     const profile = { ...selected.profile, params: { temperature: 0 }, systemPrompt: "Return only JSON matching the supplied schema. Evaluate each question using the shared state. Probabilities must sum to one; confidence is your estimated certainty, or null when unknown." };
-    const opts = request(selected.endpoint, profile, [{ role: "user", content: JSON.stringify({ state, questions }) }], key, Math.min(4096, profile.budgets.tokens), false);
+    const opts = (yield* request(selected.endpoint, profile, [{ role: "user", content: JSON.stringify({ state, questions }) }], key, Math.min(4096, profile.budgets.tokens), false));
     const body = JSON.parse(opts.body) as Record<string, unknown>;
     body.response_format = { type: "json_schema", json_schema: { name: "domios_decision", strict: true, schema: responseSchema } };
     opts.body = JSON.stringify(body);
@@ -98,7 +99,7 @@ function run<T>(state: unknown, questions: Record<string, { instructions: string
     });
   } catch { return { error: "transport" }; }
 }
-const decisionModel: DecisionModelCapability = {
+const decisionModel: IoExports<DecisionModelCapability> = {
   supportsCalibratedChoiceConfidence: () => false,
   supportsQuestionBatch: () => true,
   primitives: () => ({ choice: true, noul: true, score: true }),
@@ -106,11 +107,11 @@ const decisionModel: DecisionModelCapability = {
   modelId() { try { return config().profile.model || null; } catch { return null; } },
   selectModel(id) { if (!id) return false; selectedModel = id; return true; },
   metadata() { try { return { display_name: "Rotterdom", server_address: config().endpoint.baseUrl }; } catch { return { display_name: "Rotterdom" }; } },
-  decide(input: DecisionRequest, remainingMs?: number) {
-    return run(input.state, { single: { instructions: input.instructions, question: input.question } }, remainingMs, false, value => answer(input.question, value));
+  *decide(input: DecisionRequest, remainingMs?: number): HostIoSteps<DecisionAnswer | DecisionFailure> {
+    return (yield* run(input.state, { single: { instructions: input.instructions, question: input.question } }, remainingMs, false, value => answer(input.question, value)));
   },
-  decideQuestions(input: DecisionQuestionsRequest, remainingMs?: number) {
-    return run(input.state, input.questions, remainingMs, true, (value, completion): DecisionResponse => {
+  *decideQuestions(input: DecisionQuestionsRequest, remainingMs?: number): HostIoSteps<DecisionFailure | DecisionResponse> {
+    return (yield* run(input.state, input.questions, remainingMs, true, (value, completion): DecisionResponse => {
       const answers = (value as { answers?: Record<string, unknown> })?.answers;
       if (!answers || Object.keys(answers).length !== Object.keys(input.questions).length) throw new Error("invalid answer set");
       const decoded = Object.fromEntries(Object.entries(input.questions).map(([name, spec]) => [name, answer(spec.question, answers[name])]));
@@ -118,7 +119,7 @@ const decisionModel: DecisionModelCapability = {
       const tokens = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
       return { answers: decoded, usage: tokens(usage?.prompt_tokens) && tokens(usage?.completion_tokens)
         ? { input_tokens: usage.prompt_tokens, output_tokens: usage.completion_tokens } : null };
-    });
+    }));
   },
 };
 export default decisionModel;

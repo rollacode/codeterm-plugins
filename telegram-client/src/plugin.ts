@@ -863,9 +863,9 @@ function* settleFileAttempt(p: Paths, ledger: Outbox, attempt: Attempt): HostIoS
   const jobId = fileJobs[attempt.idempotencyKey];
   if (!jobId) return (yield* failAttempt(p, ledger, attempt, "unknown", "the upload process result was lost before it was recorded"));
   let polled: PollResult;
-  try { polled = host.exec.poll(jobId) as PollResult; } catch { polled = { done: true, error: "the upload job could not be read" }; }
+  try { polled = (yield* ioValue<ReturnType<typeof host.exec.poll>>({ op: "execPoll", job: jobId })) as PollResult; } catch { polled = { done: true, error: "the upload job could not be read" }; }
   if (!polled || !polled.done) return uploadingResult(attempt);
-  try { host.exec.close(jobId); } catch { }
+  try { (yield* ioValue<void>({ op: "execClose", job: jobId })); } catch { }
   delete fileJobs[attempt.idempotencyKey];
   return (yield* finishUpload(p, ledger, attempt, polled));
 }
@@ -1263,7 +1263,7 @@ function forgetLoginJob(jobId: string): void {
 
 function* cancelLoginJob(jobId: string): HostIoSteps<void> {
   const log = loginLogPaths[jobId];
-  try { host.exec.close(jobId); } catch { }
+  try { (yield* ioValue<void>({ op: "execClose", job: jobId })); } catch { }
   forgetLoginJob(jobId);
   if (log) try { (yield* host.io.fs.removeFile(log)); } catch { }
 }
@@ -1324,7 +1324,7 @@ function* loginPoll(jobId: string): HostIoSteps<any> {
   if (!p) return { error: "The host home directory is unavailable." };
   if (loginLaunchPending[jobId]) {
     let launch: PollResult;
-    try { launch = host.exec.poll(jobId) as PollResult; }
+    try { launch = (yield* ioValue<ReturnType<typeof host.exec.poll>>({ op: "execPoll", job: jobId })) as PollResult; }
     catch { return { error: "Could not read the login job." }; }
     if (!launch.done) {
       let partial = (yield* host.io.fs.readFileTail(loginLogPaths[jobId], 8192)) || "";
@@ -1332,7 +1332,7 @@ function* loginPoll(jobId: string): HostIoSteps<any> {
       if (password) partial = partial.split(password).join("[redacted]");
       return { done: false, output: (yield* redact(partial)), state: "login-in-progress", ...(yield* telegramLoginArtifacts(partial)) };
     }
-    try { host.exec.close(jobId); } catch { }
+    try { (yield* ioValue<void>({ op: "execClose", job: jobId })); } catch { }
     delete loginLaunchPending[jobId];
     // A host that waits on detached jobs reports tg's own exit, so a prompt or tg error in the log wins.
     const exited = classifyLoginOutput((yield* redact((yield* host.io.fs.readFileTail(loginLogPaths[jobId], 8192)) || "")));
@@ -1622,4 +1622,4 @@ const plugin = defineProviderIo({
   __test_resetFileJobs: () => { for (const key of Object.keys(fileJobs)) delete fileJobs[key]; },
 }, () => host.io) satisfies PluginModule;
 
-export default plugin;
+export default defineProviderIo(plugin, () => host.io);

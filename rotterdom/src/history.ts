@@ -1,3 +1,5 @@
+import { type HostIoSteps } from "@codeterm/plugin-sdk";
+import type { AgentTaskResult } from "@codeterm/plugin-sdk";
 import type { ChatTurn, Profile } from "./types";
 export interface CallRecord { signature: string; state: "claimed" | "completed"; result?: string }
 export interface History {
@@ -7,7 +9,7 @@ export interface History {
   turns: ChatTurn[];
   ledger: Record<string, CallRecord>;
   run: number;
-  taskResult?: { status: "done" | "failed" | "cancelled" | "deadline_exceeded"; output: unknown; error?: string };
+  taskResult?: AgentTaskResult;
 }
 export function claim(history: History, id: string, signature: string): string | null {
   const old = history.ledger[id];
@@ -31,17 +33,17 @@ export function recover(history: History): void {
     answered.add(call.id);
   }
 }
-function path(id: string): string {
+function* path(id: string): HostIoSteps<string> {
   if (!/^[A-Za-z0-9_-]{1,120}$/.test(id)) throw new Error("invalid session id");
   const dir = host.fs.expandHome("~/.codeterm/rotterdom");
-  if (!dir || !host.makeDirs(dir)) throw new Error("history directory unavailable");
+  if (!dir || !(yield* host.io.fs.makeDirs(dir))) throw new Error("history directory unavailable");
   return `${dir}/session-${id}.json`;
 }
-export function save(history: History): void {
-  if (!host.writeFileAtomic(path(history.id), JSON.stringify(history))) throw new Error("history persistence failed; execution stopped");
+export function* save(history: History): HostIoSteps<void> {
+  if (!(yield* host.io.fs.writeFileAtomic((yield* path(history.id)), JSON.stringify(history)))) throw new Error("history persistence failed; execution stopped");
 }
-export function load(id: string): History | null {
-  const raw = host.readFile(path(id));
+export function* load(id: string): HostIoSteps<History | null> {
+  const raw = (yield* host.io.fs.readFile((yield* path(id))));
   if (raw === null) return null;
   const h = JSON.parse(raw) as History;
   if (h.version !== 1 || h.id !== id || !Array.isArray(h.turns) || !h.ledger || !h.profile) throw new Error("invalid persisted history");

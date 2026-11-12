@@ -1,3 +1,4 @@
+require("../scripts/host-io-fixture.cjs").installTestHostIo();
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
@@ -13,7 +14,9 @@ function fixture(replies = []) {
   fs:{expandHome:()=>'/state',readDir:()=>[]},shell:{quoteFor:s=>`'${s}'`},
   fetch:{stream:opts=>{requests.push(JSON.parse(opts.body));return {jobId:String(job++)}},streamPoll:()=>({done:true,status:200,chunks:[JSON.stringify(replies.shift())]}),streamClose:()=>{}},
   exec:{start:()=>({jobId:'exec'}),poll:()=>({done:true,code:0,stdout:'ok'}),close:()=>{}} };
+ require("../scripts/host-io-fixture.cjs").attachHostIo(host);
  const context={host,module:{exports:{}},exports:{}};
+ require('../scripts/host-io-fixture.cjs').attachHostIo(context.host);
  vm.runInNewContext(fs.readFileSync(__dirname+'/plugin.js','utf8'),context);
  return {host,plugin:context.module.exports.default,files,requests,writes,config,advance:()=>clock+=20000};
 }
@@ -122,6 +125,7 @@ test('Blueprint Agent entry returns structured output, executes native tools and
   writeFileAtomic:(path,text)=>{files.set(path,text);return true},makeDirs:()=>true,lockFile:()=> 'lock',unlockFile:()=>true,
   fs:{expandHome:()=>'/state'},fetchStart:()=>JSON.stringify({jobId:'fetch'}),
   awaitJob:(job,then)=>then({status:200,body:JSON.stringify(replies.shift())}),exec:{close:()=>{}}});
+ require('../scripts/host-io-fixture.cjs').attachHostIo(context.host);
  vm.runInNewContext(fs.readFileSync(__dirname+'/plugin.js','utf8'),context);
  const agent=context.module.exports.default;
  const result=agent.runAgentTask(hostInput);

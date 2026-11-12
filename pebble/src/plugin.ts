@@ -1,3 +1,4 @@
+import { defineProviderIo, ioValue, type HostIoSteps, type IoExports } from "@codeterm/plugin-sdk";
 import type {
   PluginModule,
   WebhookDelivery,
@@ -115,12 +116,6 @@ function unavailable(error: string, message = TARGET_UNAVAILABLE): ReceiverTarge
   return { status: "unavailable", error, message };
 }
 
-function receiverTargetApi(): { get?: unknown; clear?: unknown } | null {
-  if (typeof host === "undefined" || host === null) return null;
-  const api = (host as { receiverTarget?: unknown }).receiverTarget;
-  return typeof api === "object" && api !== null ? (api as { get?: unknown; clear?: unknown }) : null;
-}
-
 function normalizeTarget(raw: unknown): ReceiverTargetState {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return unavailable("receiver_target_unavailable");
@@ -142,27 +137,21 @@ function normalizeTarget(raw: unknown): ReceiverTargetState {
   return value.live ? { status: "bound", tabId } : { status: "notLive", tabId };
 }
 
-function callReceiverTarget(verb: "get" | "clear"): ReceiverTargetState {
-  const api = receiverTargetApi();
-  const fn = api?.[verb];
-  if (typeof fn !== "function") return unavailable("receiver_target_unavailable");
-  try {
-    return normalizeTarget(fn.call(api));
-  } catch {
-    return unavailable("receiver_target_unavailable");
-  }
+function* callReceiverTarget(verb: "get" | "clear"): HostIoSteps<ReceiverTargetState> {
+  try { return normalizeTarget(yield* ioValue<unknown>({ op: verb === "get" ? "receiverTarget" : "receiverTargetClear" })); }
+  catch { return unavailable("receiver_target_unavailable"); }
 }
 
-function viewCall(method: string): unknown {
+function* viewCall(method: string): HostIoSteps<unknown> {
   if (method === "webhookSettings") {
     return { error: "This CodeTerm build does not provide webhook settings yet" };
   }
-  if (method === "receiverTarget") return callReceiverTarget("get");
-  if (method === "resetReceiverTarget") return callReceiverTarget("clear");
+  if (method === "receiverTarget") return yield* callReceiverTarget("get");
+  if (method === "resetReceiverTarget") return yield* callReceiverTarget("clear");
   return { error: `unknown view method: ${method}` };
 }
 
-const plugin: WebhookReceiver & Pick<PluginModule, "viewCall" | "renderGlance"> = {
+const plugin: IoExports<WebhookReceiver & Pick<PluginModule, "viewCall" | "renderGlance">> = {
   webhookReceive(ctx: WebhookReceiveContext): WebhookDelivery | null {
     if (!ctx || typeof ctx !== "object" || typeof ctx.receivedAt !== "string") {
       throw new Error("invalid webhook context: receivedAt must be a string");
@@ -173,8 +162,8 @@ const plugin: WebhookReceiver & Pick<PluginModule, "viewCall" | "renderGlance"> 
       text: formatMessage(payload),
     };
   },
-  renderGlance() {
-    const target = callReceiverTarget("get");
+  *renderGlance(): HostIoSteps<import("@codeterm/plugin-sdk").GlanceView> {
+    const target = yield* callReceiverTarget("get");
     return { title: "Pebble", nodes: [
       { kind: "keyVal", key: "Recipient", value: target.status === "bound" ? "Attached to this tab" : target.status === "general" ? "General Agent" : "Unavailable" },
       { kind: "keyVal", key: "Battery", value: "Not reported by CoreApp", style: { tone: "muted" } },
@@ -183,4 +172,4 @@ const plugin: WebhookReceiver & Pick<PluginModule, "viewCall" | "renderGlance"> 
   viewCall,
 };
 
-export default plugin;
+export default defineProviderIo(plugin, () => host.io);

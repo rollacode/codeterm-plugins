@@ -1,3 +1,4 @@
+import { defineProviderIo, type HostIoSteps } from "@codeterm/plugin-sdk";
 import decisionModel from "./decision";
 import * as harness from "./harness";
 import { resolve, settings } from "./config";
@@ -9,16 +10,16 @@ import { finishToolCalls, mergeToolParts } from "./toolwire";
 import { predefinedProfiles } from "./profiles";
 import { domiosCommand } from "./domios";
 import { runAgentTask, abortAgentTask } from "./agent";
-export default {
+export default defineProviderIo({
   ...decisionModel,
   runAgentTask,
   abortAgentTask,
-  openSession(ctx: ChatBackendOpenSessionCtx) {
+  *openSession(ctx: ChatBackendOpenSessionCtx): HostIoSteps<{ sessionId: string; }> {
     const config = (ctx.config || {}) as { profile?: string; preset?: string; model?: string; systemPrompt?: string };
     if (ctx.mode === "watcher") throw new Error("watcher mode is unsupported");
     const selected = resolve(config.profile || ctx.preset || config.preset, ctx.model || config.model,
       ctx.systemPrompt === undefined ? config.systemPrompt : ctx.systemPrompt);
-    return { sessionId: harness.open(ctx.tabId, selected.profile, selected.endpoint, "auto") };
+    return { sessionId: (yield* harness.open(ctx.tabId, selected.profile, selected.endpoint, "auto")) };
   },
   sendMessage: harness.send,
   pump: harness.pump,
@@ -31,13 +32,13 @@ export default {
     return [...new Set(s.endpoints.flatMap(e => e.models))].map(id => ({ id, displayName: id }));
   },
   listPresets() { return settings().profiles.map(p => ({ id: p.id, name: p.name })); },
-  __test: { permitted, offeredTools, relativePath, inside, edited, globPattern, request, response, claim, complete, recover, finishToolCalls, mergeToolParts, predefinedProfiles, domiosCommand, historyTurns: harness.historyTurns },
-  profileOpen(id: string, profile: string, resume = false) {
+  __test: defineProviderIo({ permitted, offeredTools, relativePath, inside, edited, globPattern, request, response, claim, complete, recover, finishToolCalls, mergeToolParts, predefinedProfiles, domiosCommand, historyTurns: harness.historyTurns }, () => host.io),
+  *profileOpen(id: string, profile: string, resume = false): HostIoSteps<{ sessionId: string; }> {
     const selected = resolve(profile);
-    return { sessionId: harness.open(id, selected.profile, selected.endpoint, resume) };
+    return { sessionId: (yield* harness.open(id, selected.profile, selected.endpoint, resume)) };
   },
   profileSend: harness.send,
   profilePump: harness.pump,
   profilePoll: harness.poll,
   profileClose: harness.close,
-};
+}, () => host.io);

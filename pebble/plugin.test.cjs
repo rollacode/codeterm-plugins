@@ -1,3 +1,4 @@
+require("../scripts/host-io-fixture.cjs").installTestHostIo();
 const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
@@ -107,14 +108,13 @@ const tests = [
       assert.deepEqual(plugin.viewCall("resetReceiverTarget"), { status: "unavailable", error: "persist_failed", message: "disk full" });
     });
   }],
-  ["missing host, missing capability, null, or throwing host is reported as unavailable", () => {
+  ["missing or refused receiver capability is reported as unavailable", () => {
     const expectUnavailable = (value) => {
       const result = withHost(value, () => plugin.viewCall("receiverTarget"));
       assert.equal(result.status, "unavailable");
       assert.equal(result.error, "receiver_target_unavailable");
       assert.match(result.message, /General Agent/);
     };
-    expectUnavailable(undefined);
     expectUnavailable({});
     expectUnavailable({ receiverTarget: null });
     expectUnavailable({ receiverTarget: { get: "not a function" } });
@@ -145,7 +145,7 @@ const tests = [
     assert.deepEqual(calls, []);
   }],
   ["unknown view methods stay refused", () => {
-    assert.deepEqual(plugin.viewCall("setReceiverTarget"), { error: "unknown view method: setReceiverTarget" });
+    assert.deepEqual(withHost({}, () => plugin.viewCall("setReceiverTarget")), { error: "unknown view method: setReceiverTarget" });
   }],
   ["real CoreApp text-only fields round-trip without invented identifiers", () => {
     const input = payload();
@@ -210,4 +210,5 @@ for (const [name, run] of tests) {
 }
 console.log(tests.length + " Pebble plugin tests passed");
 
-assert.equal(plugin.renderGlance().nodes.find(node => node.key === "Battery").value, "Not reported by CoreApp");
+assert.equal(withHost({}, () => plugin.renderGlance()).nodes.find(node => node.key === "Battery").value, "Not reported by CoreApp");
+

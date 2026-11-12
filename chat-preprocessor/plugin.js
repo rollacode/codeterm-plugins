@@ -23,8 +23,28 @@ __export(plugin_exports, {
   default: () => plugin_default
 });
 module.exports = __toCommonJS(plugin_exports);
-var mem = host.mem;
-var worker = host.worker;
+
+// ../../codeterm/codeterm/packages/plugin-sdk/src/ioPrograms.ts
+function* ioValue(request) {
+  return yield request;
+}
+function defineProviderIo(source, io) {
+  const exports = { ...source };
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (typeof value !== "function") continue;
+    exports[key] = function(...args) {
+      const result = value.apply(source, args);
+      return result && typeof result.next === "function" ? io().run(result) : result;
+    };
+  }
+  return exports;
+}
+function* ioEncoded(steps) {
+  return JSON.stringify(yield* steps);
+}
+
+// chat-preprocessor/src/plugin.ts
 var DEFAULT_BACKEND = "mem";
 var DEFAULT_COMPOSE = "append";
 var DEFAULT_MEM_K = 3;
@@ -48,10 +68,10 @@ function compose(text, block, mode) {
   if (!block) return text;
   return mode === "prepend" ? block + "\n\n" + text : text + "\n\n" + block;
 }
-function memContext(query) {
+function* memContext(query) {
   let hits = [];
   try {
-    const res = mem.search({ query, k: DEFAULT_MEM_K });
+    const res = yield* ioValue({ op: "memSearch", options: { query, k: DEFAULT_MEM_K } });
     hits = res && res.hits || [];
   } catch (e) {
     return null;
@@ -60,13 +80,13 @@ function memContext(query) {
   const body = hits.map((h) => "- " + h.text).join("\n");
   return contextBlock(body);
 }
-function groqContext(query, model) {
-  const apiKey = host.secretGet(GROQ_API_KEY_SECRET);
+function* groqContext(query, model) {
+  const apiKey = yield* ioValue({ op: "secretGet", name: GROQ_API_KEY_SECRET });
   if (!apiKey) return null;
   let raw;
   try {
-    raw = host.fetch(
-      JSON.stringify({
+    raw = yield* ioEncoded(host.io.fetch(
+      {
         url: GROQ_URL,
         method: "POST",
         headers: {
@@ -85,8 +105,8 @@ function groqContext(query, model) {
           stream: false
         }),
         timeoutMs: 3e4
-      })
-    );
+      }
+    ));
   } catch (e) {
     return null;
   }
@@ -102,12 +122,12 @@ function groqContext(query, model) {
     return null;
   }
 }
-function workerContext(query) {
+function* workerContext(query) {
   let jobId;
   try {
-    const started = worker.start({
+    const started = yield* ioValue({ op: "workerStart", options: {
       task: "Provide brief, relevant background context for this user message. Reply with only the context, no preamble:\n\n" + query
-    });
+    } });
     jobId = started && started.jobId;
   } catch (e) {
     return null;
@@ -116,7 +136,7 @@ function workerContext(query) {
   for (let i = 0; i < WORKER_POLL_LIMIT; i += 1) {
     let p;
     try {
-      p = worker.poll(jobId);
+      p = yield* ioValue({ op: "workerPoll", job: jobId });
     } catch (e) {
       return null;
     }
@@ -130,7 +150,7 @@ function workerContext(query) {
 }
 var plugin = {
   match: "text",
-  chatPreprocess(ctx) {
+  *chatPreprocess(ctx) {
     const s = settings();
     if (!s.enabled) return null;
     const text = ctx.text;
@@ -140,11 +160,11 @@ var plugin = {
     const model = s.model || "";
     let block = null;
     if (backend === "mem") {
-      block = memContext(text);
+      block = yield* memContext(text);
     } else if (backend === "groq") {
-      block = groqContext(text, model);
+      block = yield* groqContext(text, model);
     } else if (backend === "worker") {
-      block = workerContext(text);
+      block = yield* workerContext(text);
     } else {
       return null;
     }
@@ -152,4 +172,4 @@ var plugin = {
     return { text: compose(text, block, mode) };
   }
 };
-var plugin_default = plugin;
+var plugin_default = defineProviderIo(plugin, () => host.io);
