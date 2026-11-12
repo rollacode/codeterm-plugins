@@ -4,7 +4,7 @@
   "minCodeterm": "1.19.0",
   "hostApi": 2,
   "displayName": "Grok",
-  "description": "xAI Grok CLI \u2014 optional PTY agent. Install the grok binary separately; not a core provider. The provider is verified against the Grok 1.0 CLI contract.",
+  "description": "xAI Grok CLI — optional PTY agent. Install the grok binary separately; not a core provider. The provider is verified against the Grok 1.0 CLI contract.",
   "readme": "README.md",
   "binaryName": "grok",
   "cliBinary": "grok",
@@ -114,7 +114,7 @@
     ],
     "modelSwitch": "live_command",
     "modelSwitchCommands": {
-      "readyInputRegex": "^\\s*\u2502\\s*[>\u276f]\\s*\u2502\\s*$",
+      "readyInputRegex": "^\\s*│\\s*[>❯]\\s*│\\s*$",
       "turnCompletion": {
         "source": "session_file",
         "eventPointer": "/params/update/sessionUpdate",

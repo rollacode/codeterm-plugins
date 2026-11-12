@@ -4,7 +4,7 @@
   "minCodeterm": "1.19.0",
   "hostApi": 2,
   "displayName": "Chat Preprocessor",
-  "description": "Augments your outbound chat messages before the agent sees them. A chatPreprocessor stage in the outbound pipeline (match: text): it pulls relevant context \u2014 from your CodeTerm memory, a one-shot worker agent, or a Groq model \u2014 and folds it into the message as a <context> block. Toggle it off for plain passthrough.",
+  "description": "Augments your outbound chat messages before the agent sees them. A chatPreprocessor stage in the outbound pipeline (match: text): it pulls relevant context — from your CodeTerm memory, a one-shot worker agent, or a Groq model — and folds it into the message as a <context> block. Toggle it off for plain passthrough.",
   "readme": "README.md",
   "icon": "icon.svg",
   "entry": "plugin.js",
@@ -14,7 +14,7 @@
     }
   },
   "settingsSchema": "settings.schema.json",
-  "configHelp": "Chat Preprocessor augments your outbound text messages before the agent sees them: it pulls relevant context and folds it into the turn as a <context> block. It is off by default and never drops a message (no context \u2192 plain passthrough). Knobs (set with `codeterm plugin config chat-preprocessor --set key=value`): `enabled` \u2014 true/false master switch; `backend` \u2014 where context comes from: `mem` (search CodeTerm memory, no network \u2014 the default), `groq` (ask a Groq model; requires the `groqApiKey` secret, set via `codeterm plugin config chat-preprocessor --set groqApiKey=gsk_...`), or `worker` (run a one-shot worker agent); `composeMode` \u2014 the compose strategy: `append` (default, context after the message) or `prepend` (context first); `model` \u2014 model id for the groq/worker backends (ignored by mem).",
+  "configHelp": "Chat Preprocessor augments your outbound text messages before the agent sees them: it pulls relevant context and folds it into the turn as a <context> block. It is off by default and never drops a message (no context → plain passthrough). Knobs (set with `codeterm plugin config chat-preprocessor --set key=value`): `enabled` — true/false master switch; `backend` — where context comes from: `mem` (search CodeTerm memory, no network — the default), `groq` (ask a Groq model; requires the `groqApiKey` secret, set via `codeterm plugin config chat-preprocessor --set groqApiKey=gsk_...`), or `worker` (run a one-shot worker agent); `composeMode` — the compose strategy: `append` (default, context after the message) or `prepend` (context first); `model` — model id for the groq/worker backends (ignored by mem).",
   "permissions": {
     "network": {
       "allow": [

@@ -80,4 +80,4 @@ Run `logout` (it deletes the token files), then remove `~/.codeterm/teams-client
 
 ## Asynchronous host I/O
 
-Subprocess and filesystem waits yield through `host.io` on Domios 1.19.0. An invocation-owned outbox lock spans delivery and its confirmation; atomic ledger writes preserve idempotency while the VM is available to other calls.
+Subprocess and filesystem waits yield through `host.io` on Domios 1.20.0. An invocation-owned outbox lock spans delivery and its confirmation; atomic ledger writes preserve idempotency while the VM is available to other calls.

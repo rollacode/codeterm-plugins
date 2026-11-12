@@ -211,4 +211,3 @@ for (const [name, run] of tests) {
 console.log(tests.length + " Pebble plugin tests passed");
 
 assert.equal(withHost({}, () => plugin.renderGlance()).nodes.find(node => node.key === "Battery").value, "Not reported by CoreApp");
-

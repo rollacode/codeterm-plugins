@@ -56,4 +56,4 @@ fast. The glance view's "Set up engine + model" button pre-warms everything ahea
 
 ## Asynchronous host I/O
 
-Process and filesystem waits yield through `host.io` on Domios 1.19.0, including ffmpeg, whisper-cli, model/dependency downloads and remote uploads. Existing progress and job-control handles remain short synchronous host operations. A shared bootstrap lock protects dependency/model installation across suspended calls; transcription jobs use unique temporary paths.
+Process and filesystem waits yield through `host.io` on Domios 1.20.0, including ffmpeg, whisper-cli, model/dependency downloads and remote uploads. Progress and job-control handles also yield through host jobs. A shared bootstrap lock protects dependency/model installation across suspended calls; transcription jobs use unique temporary paths.
