@@ -17,7 +17,6 @@ export const GO_ARCHIVES: Record<string, { file: string; sha256: string }> = {
   "win32/arm64": { file: "go1.26.8.windows-arm64.zip", sha256: "4bc560ed3ccb64eec0be6180b8c29185c07f5215276820adb4303d7bf3365435" },
 };
 
-export const ROOT = "~/.codeterm/teams-client";
 export const EXO_HOME_DIR = "exo-home";
 export const EXO_TOKEN_DIR = ".exo-teams";
 export const EXO_TOKEN_FILES = ["token-skype.jwt", "token-chatsvcagg.jwt", "token-teams.jwt", "token-graph.jwt", "token-assignments.jwt", "refresh-token.jwt"];

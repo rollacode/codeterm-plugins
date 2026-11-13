@@ -1,6 +1,6 @@
 {
   "id": "rotterdom",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "minCodeterm": "1.20.0",
   "hostApi": 2,
   "displayName": "Rotterdom",

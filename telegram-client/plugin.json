@@ -1,6 +1,6 @@
 {
   "id": "telegram-client",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "minCodeterm": "1.20.0",
   "hostApi": 2,
   "displayName": "Telegram Client",
@@ -22,12 +22,12 @@
     }
   },
   "sessions": {
-    "rootDir": "~/.codeterm/telegram-client"
+    "rootDir": "~/.domios/telegram-client"
   },
   "credentials": [
     {
       "id": "telegram-config",
-      "file": "~/.codeterm/telegram-client/gotd.cli.yaml",
+      "file": "~/.domios/telegram-client/gotd.cli.yaml",
       "secret": {
         "app_hash": "app_hash"
       }

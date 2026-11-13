@@ -1,3 +1,4 @@
+import { stateDir } from "../../shared/src/host-paths";
 import { type HostIoSteps } from "@codeterm/plugin-sdk";
 import type { AgentTaskResult } from "@codeterm/plugin-sdk";
 import type { ChatTurn, Profile } from "./types";
@@ -35,7 +36,7 @@ export function recover(history: History): void {
 }
 function* path(id: string): HostIoSteps<string> {
   if (!/^[A-Za-z0-9_-]{1,120}$/.test(id)) throw new Error("invalid session id");
-  const dir = host.fs.expandHome("~/.codeterm/rotterdom");
+  const dir = stateDir(host.dataDir(), "rotterdom");
   if (!dir || !(yield* host.io.fs.makeDirs(dir))) throw new Error("history directory unavailable");
   return `${dir}/session-${id}.json`;
 }

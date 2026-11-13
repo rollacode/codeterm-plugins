@@ -448,6 +448,13 @@ var decisionModel = {
 };
 var decision_default = decisionModel;
 
+// shared/src/host-paths.ts
+function stateDir(dataDir, pluginId) {
+  if (!dataDir || !dataDir.trim()) throw new Error("Host data directory is unavailable");
+  if (!/^[a-z][a-z0-9-]*$/.test(pluginId)) throw new Error("Invalid plugin id");
+  return `${dataDir.replace(/[\\/]+$/, "")}/${pluginId}`;
+}
+
 // rotterdom/src/history.ts
 function claim(history, id, signature) {
   const old = history.ledger[id];
@@ -476,7 +483,7 @@ function recover(history) {
 }
 function* path(id) {
   if (!/^[A-Za-z0-9_-]{1,120}$/.test(id)) throw new Error("invalid session id");
-  const dir = host.fs.expandHome("~/.codeterm/rotterdom");
+  const dir = stateDir(host.dataDir(), "rotterdom");
   if (!dir || !(yield* host.io.fs.makeDirs(dir))) throw new Error("history directory unavailable");
   return `${dir}/session-${id}.json`;
 }
@@ -495,7 +502,7 @@ function* load(id) {
 // rotterdom/src/instanceCli.ts
 function instanceBinDir() {
   try {
-    const dir = host.fs && typeof host.fs.expandHome === "function" ? host.fs.expandHome("~/.codeterm/bin") : null;
+    const dir = stateDir(host.dataDir(), "bin");
     if (!dir) return null;
     return dir;
   } catch {

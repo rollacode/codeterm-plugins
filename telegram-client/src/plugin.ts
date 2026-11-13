@@ -1,3 +1,4 @@
+import { stateDir, bundleDir } from "../../shared/src/host-paths";
 import { defineProviderIo, ioValue, ioMap, type HostIoSteps, type HostIoResult } from "@codeterm/plugin-sdk";
 import type { GlanceView, PluginModule, ViewNode } from "@codeterm/plugin-sdk";
 import { qrSvg } from "./qr";
@@ -6,8 +7,6 @@ import { decideSend, matchChats, parseSendScope, validateSendScope, type SendOri
 import { FILE_DEFAULT_MIB, FILE_MAX_MIB, baseName, parentDir, parseSearchArgs, parseSendFileArgs, searchHits, uploadedMessageId, type FileFormat, type PeerRef } from "./messages";
 
 const VERSION = "0.11.0";
-const ROOT = "~/.codeterm/telegram-client";
-const BUNDLE = "~/.codeterm/plugins/telegram-client";
 const CONFIG_NAME = "gotd.cli.yaml";
 const SCAN_MESSAGE = "Render qrSvg in chat as a scannable QR and show tgLink as text. Scan it in Telegram Settings → Devices → Link Desktop Device, then poll login-status and follow its `next` field.";
 const MAX_COUNT = 50;
@@ -49,7 +48,7 @@ function childPath(root: string, name: string): string {
 
 function paths(): Paths | null {
   try {
-    const expanded = host.fs.expandHome(ROOT);
+    const expanded = stateDir(host.dataDir(), "telegram-client");
     const root = expanded ? nativePath(expanded) : "";
     if (!root) return null;
     return {
@@ -124,9 +123,8 @@ function* resetRejectedConfig(p: Paths, label: string): HostIoSteps<void> {
 }
 
 function installCommand(p: Paths): string {
-  let bundle: string | null = null;
-  try { bundle = host.fs.expandHome(BUNDLE); } catch { bundle = null; }
-  const script = bundle ? childPath(childPath(nativePath(bundle), "scripts"), "install-tg.cjs") : "telegram-client/scripts/install-tg.cjs";
+  const bundle = nativePath(bundleDir(host.dataDir(), "telegram-client"));
+  const script = childPath(childPath(bundle, "scripts"), "install-tg.cjs");
   return `node "${script}" --root "${p.root}"`;
 }
 

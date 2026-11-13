@@ -1,10 +1,11 @@
+import { stateDir } from "../../shared/src/host-paths";
 import { defineProviderIo, ioValue, type HostIoSteps, type HostIoResult } from "@codeterm/plugin-sdk";
 import type { GlanceView, PluginModule, ViewNode } from "@codeterm/plugin-sdk";
 import { readOutput } from "./read-output";
 import { decideSend, matchChats, parseSendScope, validateSendScope, type SendOrigin, type SendScope } from "../../shared/src/send-scope";
 import {
   CHAT_CACHE_TTL_MS, EXO_HOME_DIR, EXO_MODULE, EXO_MODULE_SUM, EXO_PACKAGE, EXO_TOKEN_DIR, EXO_TOKEN_FILES,
-  EXO_VERSION, GO_ARCHIVES, GO_DOWNLOAD_BASE, GO_VERSION, MAX_BYTES, MAX_COUNT, MAX_FILE_BYTES, ROOT, SEARCH_BUDGET_MS,
+  EXO_VERSION, GO_ARCHIVES, GO_DOWNLOAD_BASE, GO_VERSION, MAX_BYTES, MAX_COUNT, MAX_FILE_BYTES, SEARCH_BUDGET_MS,
   SEARCH_CHAT_MESSAGES, SEARCH_DEFAULT_LIMIT, SEARCH_MAX_CHATS, SEARCH_RECENT_MESSAGES, SIGN_IN_TTL_MS, TIMEOUTS,
 } from "./constants";
 import {
@@ -63,7 +64,7 @@ function exeName(platform: string, name: string): string {
 
 function paths(): Paths | null {
   try {
-    const expanded = host.fs.expandHome(ROOT);
+    const expanded = stateDir(host.dataDir(), "teams-client");
     if (!expanded) return null;
     const root = host.path.normalize(expanded);
     const home = joinPath(root, EXO_HOME_DIR);

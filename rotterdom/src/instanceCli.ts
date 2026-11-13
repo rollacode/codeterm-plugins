@@ -1,4 +1,4 @@
-/** `C:\Users\me\.codeterm-dev\bin` → `/c/Users/me/.codeterm-dev/bin`, the form Git Bash's PATH needs. */
+import { stateDir } from "../../shared/src/host-paths";
 export function posixDir(dir: string): string {
   const unified = dir.replace(/\\/g, "/").replace(/\/+$/, "");
   const drive = /^([A-Za-z]):\/(.*)$/.exec(unified);
@@ -20,7 +20,7 @@ export function toolShell(shellCmd: string, binDir: string | null, tabId?: strin
 
 export function instanceBinDir(): string | null {
   try {
-    const dir = host.fs && typeof host.fs.expandHome === "function" ? host.fs.expandHome("~/.codeterm/bin") : null;
+    const dir = stateDir(host.dataDir(), "bin");
     if (!dir) return null;
     return dir;
   } catch {

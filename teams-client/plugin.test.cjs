@@ -199,10 +199,12 @@ function mockHost(options = {}) {
   }
   function expandHome(value) {
     const text = String(value || "");
+    if (text.startsWith("~/.domios/")) return normalize(`${dataDir}/${text.slice("~/.domios/".length)}`);
     if (text.startsWith("~/")) return normalize(`${home}/${text.slice(2)}`);
     return normalize(text);
   }
-  const root = () => expandHome(C.ROOT);
+  const dataDir = `${home}/instance data`;
+  const root = () => normalize(`${dataDir}/teams-client`);
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "plugin.json"), "utf8"));
   const deniedReads = () => new Set(manifest.credentials.map((entry) => expandHome(entry.file)));
   const token = (name) => files.has(normalize(`${plugin.__test_paths().tokenDir}/${name}`));
@@ -308,6 +310,7 @@ function mockHost(options = {}) {
     for (const name of C.EXO_TOKEN_FILES) files.set(normalize(`${p.tokenDir}/${name}`), "token");
   }
   globalThis.host = {
+    dataDir: () => dataDir,
     platform: () => (platform === "darwin" ? "macos" : platform === "win32" ? "windows" : platform),
     envGet: (name) => (name === "PROCESSOR_ARCHITECTURE" ? "AMD64" : name === "SystemRoot" ? "D:\\Win" : null),
     settingsJson: () => JSON.stringify(options.settings || {}),
@@ -645,7 +648,7 @@ test("no exo-teams call carries a token, and logout deletes every token file", (
 test("manifest declares the token files as credentials, the subprocess allowlist, and no m365 path", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "plugin.json"), "utf8"));
   const declared = manifest.credentials.map((entry) => entry.file);
-  for (const name of C.EXO_TOKEN_FILES) assert.ok(declared.includes(`${C.ROOT}/${C.EXO_HOME_DIR}/${C.EXO_TOKEN_DIR}/${name}`), name);
+  for (const name of C.EXO_TOKEN_FILES) assert.ok(declared.includes(`~/.domios/teams-client/${C.EXO_HOME_DIR}/${C.EXO_TOKEN_DIR}/${name}`), name);
   for (const bin of ["exo-teams.exe", "go.exe", "curl.exe", "tar.exe", "powershell.exe", "exo-teams", "go", "curl", "tar", "shasum", "sha256sum"]) assert.ok(manifest.permissions.subprocess.allow.includes(bin), bin);
   const text = fs.readFileSync(path.join(__dirname, "plugin.json"), "utf8") + fs.readFileSync(path.join(__dirname, "src/plugin.ts"), "utf8");
   assert.doesNotMatch(text, /m365|cli-microsoft365|graph\.microsoft\.com\/v1\.0\/chats/);
