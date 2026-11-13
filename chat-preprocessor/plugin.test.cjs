@@ -1,3 +1,4 @@
+require("../scripts/host-io-fixture.cjs").installTestHostIo();
 // Plugin-side tests for the chat-preprocessor: the compose logic and the three
 // context backends (mem / groq / worker), exercised against a FAKE host (like the
 // LM Studio plugin fakes host.fetch). No live host: host.mem / host.worker /

@@ -1,4 +1,4 @@
-require("../scripts/test-host-io.cjs").installTestHostIo();
+require("../scripts/host-io-fixture.cjs").installTestHostIo();
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");

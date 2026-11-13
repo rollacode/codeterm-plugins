@@ -1,3 +1,4 @@
+require("../scripts/host-io-fixture.cjs").installTestHostIo();
 const assert = require("node:assert/strict");
 const { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync, realpathSync } = require("node:fs");
 const { tmpdir, homedir } = require("node:os");
@@ -8,7 +9,9 @@ const vm = require("node:vm");
 const pluginPath = join(__dirname, "plugin.js");
 
 function load(host) {
+  require("../scripts/host-io-fixture.cjs").attachHostIo(host);
   const source = readFileSync(pluginPath, "utf8");
+  require("../scripts/host-io-fixture.cjs").attachHostIo(host);
   const context = { host, module: { exports: {} }, exports: {} };
   new vm.Script(source, { filename: pluginPath }).runInNewContext(context);
   return context.module.exports.default;
@@ -167,7 +170,7 @@ const tests = [
     assert.equal(manifest.cliBinary, "grok");
     assert.equal(manifest.version, pkg.version);
     assert.equal(manifest.version, entry.version);
-    assert.equal(manifest.minCodeterm, "1.14.2");
+    assert.equal(manifest.minCodeterm, "1.19.0");
     assert.equal(manifest.minCodeterm, entry.minCodeterm);
     assert.deepEqual(manifest.commands.autoApproveFlags, ["--always-approve"]);
     assert.deepEqual(manifest.spawn.systemPromptDelivery, { kind: "cli_flag", flag: "--rules" });

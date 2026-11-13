@@ -1,6 +1,7 @@
+import { defineProviderIo, ioResolve, type HostIoSteps, type IoExports } from "@codeterm/plugin-sdk";
 import { checkAiderUpdate } from "./update";
 import type {
-  LaunchParams,
+  LaunchParams as HostLaunchParams,
   ModelInfo,
   ParsedPrompt,
   PluginModule,
@@ -21,6 +22,8 @@ import { contextAttachments } from "./contextAttachments";
 import { aiderCommitDiffs } from "./fileDiffs";
 import type { Endpoint } from "./endpoints";
 import { configuredEndpoints, endpointModels, launchEndpoint, selectedModel, PROVIDER_ENV } from "./endpoints";
+
+type LaunchParams = HostLaunchParams & { cwd?: string | null; configPath?: string | null; restoreChatHistory?: boolean };
 
 const TITLE_RE = /aider/i;
 const OUTPUT_MARKERS = ["aider", "Aider", "Aider Chat"];
@@ -104,9 +107,9 @@ function resumeLaunchParams(params: ResumeParams): LaunchParams {
   }
   // Resume owns an existing history file; a new launch marker must not rename it.
   return { ...params, sessionId: params.sessionId, launchMarker: params.sessionId,
-    contextFiles: params.contextFiles ?? undefined, toolLessInstructionsPath: params.toolLessInstructionsPath ?? undefined,
-    agentName: params.agentName ?? undefined, instanceId: params.instanceId ?? undefined,
-    restoreChatHistory: true, task: undefined };
+    contextFiles: params.contextFiles ?? null, toolLessInstructionsPath: params.toolLessInstructionsPath ?? null,
+    agentName: params.agentName ?? null, instanceId: params.instanceId ?? null,
+    restoreChatHistory: true, args: params.args ?? null, skipPermissions: params.skipPermissions ?? false, hostOwned: params.hostOwned ?? { questions: false, todos: false }, task: null, starterPrompt: "no_starter", starterPromptText: null, starterPromptPrefix: null, structuredPromptServer: null };
 }
 
 interface HistoryFileEntry {
@@ -115,12 +118,10 @@ interface HistoryFileEntry {
   modifiedMs: number | null;
 }
 
-function historyFileEntries(cwd: string): HistoryFileEntry[] {
-  const fs = (globalThis as { host?: { fs?: { readDir?: (p: string) => unknown[] } } }).host?.fs;
-  if (!fs || typeof fs.readDir !== "function") return [];
+function* historyFileEntries(cwd: string): HostIoSteps<HistoryFileEntry[]> {
   let entries: unknown[];
   try {
-    entries = fs.readDir(historyDir(cwd)) as unknown[];
+    entries = (yield* host.io.fs.readDir(historyDir(cwd))) as unknown[];
   } catch (_) {
     return [];
   }
@@ -194,7 +195,7 @@ function promptSafeChoice(prompt: ParsedPrompt | null | undefined, screen: strin
   return isCodetermOnlyCommandList(extractPromptedCommands(screen)) ? "1" : null;
 }
 
-const plugin: PluginModule = {
+const plugin: IoExports<PluginModule> = {
   checkForUpdate: checkAiderUpdate,
   starterPromptText(_prompt: "no_starter" | "assigned_task" | "idle_wakeup" | "team_bootstrap" | "startup_handshake"): string | undefined {
     // No native initial turn: core delivers the exact prepared payload to the
@@ -292,7 +293,7 @@ const plugin: PluginModule = {
     return [optionIndex === 0 ? YES : NO, ENTER];
   },
 
-  buildLaunchCommand(params: LaunchParams): string {
+  *buildLaunchCommand(params: LaunchParams): HostIoSteps<string> {
     const p = params || {};
     const platform = host.platform();
     const quote = (v: string) => host.shell.quoteFor(v, platform);
@@ -327,7 +328,7 @@ const plugin: PluginModule = {
     const context = contextAttachments(p.contextFiles);
     for (const path of context.read) {
       let readable = false;
-      try { readable = host.fs.readFileHead(path, 1) !== null; } catch (_) { /* refuse below */ }
+      try { readable = (yield* host.io.fs.readFileHead(path, 1)) !== null; } catch (_) { /* refuse below */ }
       if (!readable) throw new Error(`Aider read-only context is unreadable: ${path}. Restore the file or update the task's read files.`);
     }
     for (const path of context.edit) parts.push("--file", quote(path));
@@ -338,7 +339,7 @@ const plugin: PluginModule = {
       const path = p.toolLessInstructionsPath;
       let readable = false;
       if (typeof path === "string" && path.trim()) {
-        try { readable = host.fs.readFileHead(path, 1) !== null; } catch (_) { /* refuse below */ }
+        try { readable = (yield* host.io.fs.readFileHead(path, 1)) !== null; } catch (_) { /* refuse below */ }
       }
       if (!readable) throw new Error("Domios tool-less instructions are unreadable. Retry the launch so Domios can recreate its instructions file.");
       parts.push("--read", quote(path as string));
@@ -350,7 +351,7 @@ const plugin: PluginModule = {
     // instructions in read-only context, without scanning the whole tree.
     const instructions = `${cwd.replace(/[\\/]+$/, "")}/AGENTS.md`;
     try {
-      if (host.fs.readFileHead(instructions, 1) !== null) {
+      if ((yield* host.io.fs.readFileHead(instructions, 1)) !== null) {
         parts.push("--read", quote(instructions));
       }
     } catch (_) {
@@ -360,7 +361,7 @@ const plugin: PluginModule = {
       // expandHome maps ~/.codeterm to this instance's data directory, so
       // the bundled primer resolves inside the installed plugin on DEV too.
       const primer = host.fs.expandHome("~/.codeterm/plugins/aider/domios-primer.md");
-      if (primer && host.fs.readFileHead(primer, 1) !== null) {
+      if (primer && (yield* host.io.fs.readFileHead(primer, 1)) !== null) {
         parts.push("--read", quote(primer));
       }
     } catch (_) {
@@ -389,20 +390,20 @@ const plugin: PluginModule = {
   },
 
 
-  buildResumeCommand(sessionId: string, skipPermissions?: boolean): string {
-    return this.buildLaunchCommand!(resumeLaunchParams({sessionId, skipPermissions}));
+  *buildResumeCommand(sessionId: string, skipPermissions?: boolean): HostIoSteps<string> {
+    return yield* ioResolve(this.buildLaunchCommand!(resumeLaunchParams({sessionId, skipPermissions})));
   },
 
-  buildResumeCommandWithContext(params: ResumeParams): string {
-    return this.buildLaunchCommand!(resumeLaunchParams(params));
+  *buildResumeCommandWithContext(params: ResumeParams): HostIoSteps<string> {
+    return yield* ioResolve(this.buildLaunchCommand!(resumeLaunchParams(params)));
   },
 
-  launchOnboardingResponse(screen: string): { frameKey: string; step: string } | null {
+  *launchOnboardingResponse(screen: string): HostIoSteps<{ frameKey: string; step: string } | null> {
     const prompt = parsePromptWithContext(String(screen || ""));
     if (!prompt) return null;
     const choice = promptSafeChoice(prompt, String(screen || ""));
     if (!choice) return null;
-    const keys = this.buildPromptResponse!(Number(choice) - 1, String(screen || ""));
+    const keys = yield* ioResolve(this.buildPromptResponse!(Number(choice) - 1, String(screen || "")));
     return { frameKey: prompt.question, step: keys[0] };
   },
 
@@ -411,12 +412,13 @@ const plugin: PluginModule = {
     return prompt ? promptSafeChoice(prompt, String(screen || "")) : null;
   },
 
-  detectSessionId(cwd: string, exclude?: string[] | string, maxAgeMs?: number): string | null {
+  *detectSessionId(cwd: string, exclude?: string[] | string, maxAgeMs?: number): HostIoSteps<string | null> {
     const excluded = Array.isArray(exclude) ? exclude : exclude ? [exclude] : [];
     const limit = typeof maxAgeMs === "number" && maxAgeMs > 0 ? maxAgeMs : 0;
     const now = Date.now();
     let newest: HistoryFileEntry | null = null;
-    for (const entry of historyFileEntries(cwd)) {
+    const entries = yield* historyFileEntries(cwd);
+    for (const entry of entries) {
       if (excluded.indexOf(entry.id) !== -1) continue;
       if (limit > 0) {
         if (entry.modifiedMs === null) continue;
@@ -433,17 +435,17 @@ const plugin: PluginModule = {
     return newest ? newest.id : null;
   },
 
-  detectLaunchSession(evidence: {
+  *detectLaunchSession(evidence: {
     cwd: string;
     launchMarker?: string | null;
     launchedAtMs: number;
     processes?: unknown[];
-  }): { sessionId: string; source: "pid_registry" | "launch_marker" } | null {
+  }): HostIoSteps<{ sessionId: string; source: "pid_registry" | "launch_marker" } | null> {
     const marker = evidence && typeof evidence.launchMarker === "string" ? evidence.launchMarker : "";
     if (!marker) return null;
     const cwd = evidence && typeof evidence.cwd === "string" ? evidence.cwd : "";
     if (!cwd) return null;
-    return historyFileEntries(cwd).some((entry) => entry.id === marker)
+    return (yield* historyFileEntries(cwd)).some((entry) => entry.id === marker)
       ? { sessionId: marker, source: "launch_marker" }
       : null;
   },
@@ -456,9 +458,9 @@ const plugin: PluginModule = {
     return null;
   },
 
-  sessionExists(cwd: string, sessionId: string): boolean {
+  *sessionExists(cwd: string, sessionId: string): HostIoSteps<boolean> {
     if (!sessionId) return false;
-    return historyFileEntries(cwd).some((entry) => entry.id === sessionId);
+    return (yield* historyFileEntries(cwd)).some((entry) => entry.id === sessionId);
   },
 
   sessionCreatedMs(_cwd: string, _sessionId: string): number | null {
@@ -487,24 +489,26 @@ const plugin: PluginModule = {
     return historyFilePath(cwd, sessionId);
   },
 
-  readReplyRelayTurn(cwd: string, sessionId: string, afterOffset: number) {
+  *readReplyRelayTurn(cwd: string, sessionId: string, afterOffset: number): HostIoSteps<import("./replyRelay").RelayResult> {
     if (!cwd || !/^[A-Za-z0-9_-]+$/.test(sessionId)) return null;
     const path = historyFilePath(cwd, sessionId);
     try {
-      return readRelayEvidence(host.fs.readFile(path), host.fs.readFile(`${path}.domios-turns.jsonl`), sessionId, afterOffset);
+      return readRelayEvidence((yield* host.io.fs.readFile(path)), (yield* host.io.fs.readFile(`${path}.domios-turns.jsonl`)), sessionId, afterOffset);
     } catch (_) {
       return { unavailable: true as const, reason: "Domios Aider completion evidence is unreadable." };
     }
   },
 
-  parseSessionDelta(chunk: string, context?: SessionDeltaContext): unknown {
+  *parseSessionDelta(chunk: string, context?: SessionDeltaContext): HostIoSteps<unknown> {
     const text = String(chunk || "");
-    const commitDiffs = context ? (hash: string, paths: string[]) => aiderCommitDiffs(context.session_key, hash, paths) : undefined;
-    if (!context || context.from_offset === 0) return parseAiderHistoryDelta(text, 0, commitDiffs);
-    // Evidence, backfill and live tail readers can call independently.
-    const prefix = host.fs.readFileHead(context.session_key, context.from_offset + utf8Length(text));
+    if (!context) return parseAiderHistoryDelta(text);
+    const prefix = context.from_offset === 0 ? text : yield* host.io.fs.readFileHead(context.session_key, context.from_offset + utf8Length(text));
     if (prefix === null) return { messages: [] };
-    return parseAiderHistoryDelta(prefix, context.from_offset, commitDiffs);
+    const pending: { hash: string; paths: string[] }[] = [];
+    parseAiderHistoryDelta(prefix, context.from_offset, (hash, paths) => { pending.push({ hash, paths }); return []; });
+    const diffs = new Map<string, import("@codeterm/plugin-sdk").RecordedFileDiff[]>();
+    for (const item of pending) diffs.set(JSON.stringify([item.hash, item.paths]), yield* aiderCommitDiffs(context.session_key, item.hash, item.paths));
+    return parseAiderHistoryDelta(prefix, context.from_offset, (hash, paths) => diffs.get(JSON.stringify([hash, paths])) ?? []);
   },
 
   checkIntegration(): unknown {
@@ -530,7 +534,7 @@ const plugin: PluginModule = {
   },
 };
 
-export default plugin;
+export default defineProviderIo(plugin, () => host.io);
 export {
   extractBannerModel,
   lastNonEmptyLine,

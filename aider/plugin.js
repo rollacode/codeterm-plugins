@@ -29,6 +29,54 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
+// ../../codeterm/codeterm/packages/plugin-sdk/src/fileDiffs.ts
+function recordedPatchDiff(path, patch, kind) {
+  if (!path.trim()) return [];
+  const hunks = [];
+  let current;
+  for (const line of patch.replace(/\n$/, "").split("\n")) {
+    const header = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (header) {
+      current = { oldStart: Number(header[1]), oldLines: Number(header[2] ?? 1), newStart: Number(header[3]), newLines: Number(header[4] ?? 1), lines: [] };
+      hunks.push(current);
+    } else if (current) {
+      if (!/^[ +\-\\]/.test(line)) return [];
+      current.lines.push(line);
+    }
+  }
+  if (hunks.some((h) => h.lines.filter((l) => /^[ -]/.test(l)).length !== h.oldLines || h.lines.filter((l) => /^[ +]/.test(l)).length !== h.newLines)) return [];
+  if (!hunks.length && kind === "modify") return [];
+  const lines = hunks.flatMap((h) => h.lines);
+  return [{
+    path,
+    kind,
+    additions: lines.filter((l) => l.startsWith("+")).length,
+    deletions: lines.filter((l) => l.startsWith("-")).length,
+    hunks
+  }];
+}
+
+// ../../codeterm/codeterm/packages/plugin-sdk/src/ioPrograms.ts
+function defineProviderIo(source, io) {
+  const exports = { ...source };
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (typeof value !== "function") continue;
+    exports[key] = function(...args) {
+      const result = value.apply(source, args);
+      return result && typeof result.next === "function" ? io().run(result) : result;
+    };
+  }
+  return exports;
+}
+function* ioEncoded(steps) {
+  return JSON.stringify(yield* steps);
+}
+function* ioResolve(value) {
+  if (value && typeof value.next === "function") return yield* value;
+  return value;
+}
+
 // provider-shared/updateCheck.ts
 function record(raw) {
   if (typeof raw !== "string") return null;
@@ -78,29 +126,33 @@ function newestSupportedVersion(versions, compatibility) {
     return best === null || compare(version, best) === 1 ? version : best;
   }, null);
 }
-function checkProviderUpdate(host2, binary, metadataUrl, compatibility) {
-  const installed = record(host2.exec(JSON.stringify({ bin: binary, args: ["--version"], timeoutMs: 5e3 })));
-  if (installed?.code !== 0 || typeof installed.stdout !== "string") return null;
-  const currentVersion = installed.stdout.match(/(?:^|\s)(\d+\.\d+\.\d+)(?=\s|$)/)?.[1];
-  if (!currentVersion || !versionParts(currentVersion)) return null;
-  const response = record(host2.fetch(JSON.stringify({
-    url: metadataUrl,
-    method: "GET",
-    timeoutMs: 6e3,
-    headers: { Accept: "application/vnd.npm.install-v1+json" }
-  })));
-  if (response?.status !== 200) return null;
-  const metadata = record(response.body);
-  let latestVersion = typeof metadata?.version === "string" ? metadata.version : null;
-  if (compatibility) {
-    if (!metadata?.versions || typeof metadata.versions !== "object") return null;
-    latestVersion = newestSupportedVersion(Object.keys(metadata.versions), compatibility);
+function* checkProviderUpdate(host2, binary, metadataUrl, compatibility) {
+  try {
+    const installed = record(yield* host2.exec(JSON.stringify({ bin: binary, args: ["--version"], timeoutMs: 5e3 })));
+    if (installed?.code !== 0 || typeof installed.stdout !== "string") return null;
+    const currentVersion = installed.stdout.match(/(?:^|\s)(\d+\.\d+\.\d+)(?=\s|$)/)?.[1];
+    if (!currentVersion || !versionParts(currentVersion)) return null;
+    const response = record(yield* host2.fetch(JSON.stringify({
+      url: metadataUrl,
+      method: "GET",
+      timeoutMs: 6e3,
+      headers: { Accept: "application/vnd.npm.install-v1+json" }
+    })));
+    if (response?.status !== 200) return null;
+    const metadata = record(response.body);
+    let latestVersion = typeof metadata?.version === "string" ? metadata.version : null;
+    if (compatibility) {
+      if (!metadata?.versions || typeof metadata.versions !== "object") return null;
+      latestVersion = newestSupportedVersion(Object.keys(metadata.versions), compatibility);
+    }
+    return latestVersion && compare(latestVersion, currentVersion) === 1 ? { currentVersion, latestVersion } : null;
+  } catch {
+    return null;
   }
-  return latestVersion && compare(latestVersion, currentVersion) === 1 ? { currentVersion, latestVersion } : null;
 }
 
 // aider/src/update.ts
-function checkAiderUpdate() {
+function* checkAiderUpdate() {
   let manifest;
   try {
     manifest = JSON.parse(host.manifestJson() ?? "null");
@@ -108,11 +160,13 @@ function checkAiderUpdate() {
     return null;
   }
   if (!manifest?.cliCompatibility?.supported?.length) return null;
-  return checkProviderUpdate({
-    exec: (options) => host.exec(options),
-    fetch: (options) => {
+  return yield* checkProviderUpdate({
+    exec: function* (options) {
+      return yield* ioEncoded(host.io.exec(JSON.parse(options)));
+    },
+    fetch: function* (options) {
       try {
-        const response = JSON.parse(host.fetch(options));
+        const response = JSON.parse(yield* ioEncoded(host.io.fetch(JSON.parse(options))));
         if (response.status !== 200) return JSON.stringify(response);
         const metadata = JSON.parse(response.body);
         return JSON.stringify({ ...response, body: JSON.stringify({ versions: metadata.releases }) });
@@ -442,33 +496,6 @@ function contextAttachments(value) {
   return { edit, read };
 }
 
-// ../../codeterm/packages/plugin-sdk/src/fileDiffs.ts
-function recordedPatchDiff(path, patch, kind) {
-  if (!path.trim()) return [];
-  const hunks = [];
-  let current;
-  for (const line of patch.replace(/\n$/, "").split("\n")) {
-    const header = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
-    if (header) {
-      current = { oldStart: Number(header[1]), oldLines: Number(header[2] ?? 1), newStart: Number(header[3]), newLines: Number(header[4] ?? 1), lines: [] };
-      hunks.push(current);
-    } else if (current) {
-      if (!/^[ +\-\\]/.test(line)) return [];
-      current.lines.push(line);
-    }
-  }
-  if (hunks.some((h) => h.lines.filter((l) => /^[ -]/.test(l)).length !== h.oldLines || h.lines.filter((l) => /^[ +]/.test(l)).length !== h.newLines)) return [];
-  if (!hunks.length && kind === "modify") return [];
-  const lines = hunks.flatMap((h) => h.lines);
-  return [{
-    path,
-    kind,
-    additions: lines.filter((l) => l.startsWith("+")).length,
-    deletions: lines.filter((l) => l.startsWith("-")).length,
-    hunks
-  }];
-}
-
 // aider/src/fileDiffs.ts
 function gitPath(line) {
   let value = line.slice(4);
@@ -481,22 +508,22 @@ function gitPath(line) {
   }
   return value === "/dev/null" ? null : /^[ab]\//.test(value) ? value.slice(2) : null;
 }
-function gitOutput(args) {
+function* gitOutput(args) {
   try {
-    const result = JSON.parse(host.exec(JSON.stringify({ bin: "git", timeoutMs: 5e3, args })));
+    const result = JSON.parse(yield* ioEncoded(host.io.exec({ bin: "git", timeoutMs: 5e3, args })));
     return result?.code === 0 && typeof result.stdout === "string" ? result.stdout : null;
   } catch (_) {
     return null;
   }
 }
-function aiderCommitDiffs(sessionKey, hash, paths) {
+function* aiderCommitDiffs(sessionKey, hash, paths) {
   const cwd = /^(.*)[\\/]\.aider[\\/]history[\\/][^\\/]+\.md$/.exec(sessionKey)?.[1];
   if (!cwd || !/^[0-9a-f]{7,40}$/.test(hash)) return [];
-  const root = gitOutput(["-C", cwd, "rev-parse", "--show-toplevel"])?.trimEnd();
+  const root = (yield* gitOutput(["-C", cwd, "rev-parse", "--show-toplevel"]))?.trimEnd();
   if (!root) return [];
   const diffs = [];
   for (const path of new Set(paths)) {
-    const patch = gitOutput(["-C", root, "-c", "core.quotePath=false", "--literal-pathspecs", "show", "--format=", "--no-color", "--no-notes", "--no-ext-diff", "--no-textconv", "--no-renames", "--root", hash, "--", path]);
+    const patch = yield* gitOutput(["-C", root, "-c", "core.quotePath=false", "--literal-pathspecs", "show", "--format=", "--no-color", "--no-notes", "--no-ext-diff", "--no-textconv", "--no-renames", "--root", hash, "--", path]);
     if (!patch?.startsWith("diff --git ")) continue;
     const kind = /^new file mode /m.test(patch) ? "add" : /^deleted file mode /m.test(patch) ? "delete" : "modify";
     const oldHeader = patch.match(/^--- .+$/m)?.[0];
@@ -691,20 +718,25 @@ function resumeLaunchParams(params) {
     ...params,
     sessionId: params.sessionId,
     launchMarker: params.sessionId,
-    contextFiles: params.contextFiles ?? void 0,
-    toolLessInstructionsPath: params.toolLessInstructionsPath ?? void 0,
-    agentName: params.agentName ?? void 0,
-    instanceId: params.instanceId ?? void 0,
+    contextFiles: params.contextFiles ?? null,
+    toolLessInstructionsPath: params.toolLessInstructionsPath ?? null,
+    agentName: params.agentName ?? null,
+    instanceId: params.instanceId ?? null,
     restoreChatHistory: true,
-    task: void 0
+    args: params.args ?? null,
+    skipPermissions: params.skipPermissions ?? false,
+    hostOwned: params.hostOwned ?? { questions: false, todos: false },
+    task: null,
+    starterPrompt: "no_starter",
+    starterPromptText: null,
+    starterPromptPrefix: null,
+    structuredPromptServer: null
   };
 }
-function historyFileEntries(cwd) {
-  const fs = globalThis.host?.fs;
-  if (!fs || typeof fs.readDir !== "function") return [];
+function* historyFileEntries(cwd) {
   let entries;
   try {
-    entries = fs.readDir(historyDir(cwd));
+    entries = yield* host.io.fs.readDir(historyDir(cwd));
   } catch (_) {
     return [];
   }
@@ -848,7 +880,7 @@ var plugin = {
     if (optionIndex === 2) return [DONT_ASK, ENTER];
     return [optionIndex === 0 ? YES : NO, ENTER];
   },
-  buildLaunchCommand(params) {
+  *buildLaunchCommand(params) {
     const p = params || {};
     const platform = host.platform();
     const quote = (v) => host.shell.quoteFor(v, platform);
@@ -873,7 +905,7 @@ var plugin = {
     for (const path of context.read) {
       let readable = false;
       try {
-        readable = host.fs.readFileHead(path, 1) !== null;
+        readable = (yield* host.io.fs.readFileHead(path, 1)) !== null;
       } catch (_) {
       }
       if (!readable) throw new Error(`Aider read-only context is unreadable: ${path}. Restore the file or update the task's read files.`);
@@ -885,7 +917,7 @@ var plugin = {
       let readable = false;
       if (typeof path === "string" && path.trim()) {
         try {
-          readable = host.fs.readFileHead(path, 1) !== null;
+          readable = (yield* host.io.fs.readFileHead(path, 1)) !== null;
         } catch (_) {
         }
       }
@@ -897,14 +929,14 @@ var plugin = {
     parts.push("--no-suggest-shell-commands", "--no-auto-commits", "--no-pretty", "--no-fancy-input", "--no-show-model-warnings", "--chat-language", "English");
     const instructions = `${cwd.replace(/[\\/]+$/, "")}/AGENTS.md`;
     try {
-      if (host.fs.readFileHead(instructions, 1) !== null) {
+      if ((yield* host.io.fs.readFileHead(instructions, 1)) !== null) {
         parts.push("--read", quote(instructions));
       }
     } catch (_) {
     }
     try {
       const primer = host.fs.expandHome("~/.codeterm/plugins/aider/domios-primer.md");
-      if (primer && host.fs.readFileHead(primer, 1) !== null) {
+      if (primer && (yield* host.io.fs.readFileHead(primer, 1)) !== null) {
         parts.push("--read", quote(primer));
       }
     } catch (_) {
@@ -923,30 +955,31 @@ var plugin = {
     const mkdir = isPowerShell ? `New-Item -ItemType Directory -Force -Path ${quote(historyDirPath)} | Out-Null;` : `mkdir -p ${quote(historyDirPath)};`;
     return withLaunchEnv(`${mkdir} ${command} ${historyFlags}`, p, selected.endpoint, startupDir);
   },
-  buildResumeCommand(sessionId, skipPermissions) {
-    return this.buildLaunchCommand(resumeLaunchParams({ sessionId, skipPermissions }));
+  *buildResumeCommand(sessionId, skipPermissions) {
+    return yield* ioResolve(this.buildLaunchCommand(resumeLaunchParams({ sessionId, skipPermissions })));
   },
-  buildResumeCommandWithContext(params) {
-    return this.buildLaunchCommand(resumeLaunchParams(params));
+  *buildResumeCommandWithContext(params) {
+    return yield* ioResolve(this.buildLaunchCommand(resumeLaunchParams(params)));
   },
-  launchOnboardingResponse(screen) {
+  *launchOnboardingResponse(screen) {
     const prompt = parsePromptWithContext(String(screen || ""));
     if (!prompt) return null;
     const choice = promptSafeChoice(prompt, String(screen || ""));
     if (!choice) return null;
-    const keys = this.buildPromptResponse(Number(choice) - 1, String(screen || ""));
+    const keys = yield* ioResolve(this.buildPromptResponse(Number(choice) - 1, String(screen || "")));
     return { frameKey: prompt.question, step: keys[0] };
   },
   launchOnboardingSafeChoice(screen) {
     const prompt = parsePromptWithContext(String(screen || ""));
     return prompt ? promptSafeChoice(prompt, String(screen || "")) : null;
   },
-  detectSessionId(cwd, exclude, maxAgeMs) {
+  *detectSessionId(cwd, exclude, maxAgeMs) {
     const excluded = Array.isArray(exclude) ? exclude : exclude ? [exclude] : [];
     const limit = typeof maxAgeMs === "number" && maxAgeMs > 0 ? maxAgeMs : 0;
     const now = Date.now();
     let newest = null;
-    for (const entry of historyFileEntries(cwd)) {
+    const entries = yield* historyFileEntries(cwd);
+    for (const entry of entries) {
       if (excluded.indexOf(entry.id) !== -1) continue;
       if (limit > 0) {
         if (entry.modifiedMs === null) continue;
@@ -962,12 +995,12 @@ var plugin = {
     }
     return newest ? newest.id : null;
   },
-  detectLaunchSession(evidence) {
+  *detectLaunchSession(evidence) {
     const marker = evidence && typeof evidence.launchMarker === "string" ? evidence.launchMarker : "";
     if (!marker) return null;
     const cwd = evidence && typeof evidence.cwd === "string" ? evidence.cwd : "";
     if (!cwd) return null;
-    return historyFileEntries(cwd).some((entry) => entry.id === marker) ? { sessionId: marker, source: "launch_marker" } : null;
+    return (yield* historyFileEntries(cwd)).some((entry) => entry.id === marker) ? { sessionId: marker, source: "launch_marker" } : null;
   },
   enumerateSessions() {
     return [];
@@ -975,9 +1008,9 @@ var plugin = {
   findSession(_sessionId) {
     return null;
   },
-  sessionExists(cwd, sessionId) {
+  *sessionExists(cwd, sessionId) {
     if (!sessionId) return false;
-    return historyFileEntries(cwd).some((entry) => entry.id === sessionId);
+    return (yield* historyFileEntries(cwd)).some((entry) => entry.id === sessionId);
   },
   sessionCreatedMs(_cwd, _sessionId) {
     return null;
@@ -999,22 +1032,28 @@ var plugin = {
     if (!cwd || !sessionId) return null;
     return historyFilePath(cwd, sessionId);
   },
-  readReplyRelayTurn(cwd, sessionId, afterOffset) {
+  *readReplyRelayTurn(cwd, sessionId, afterOffset) {
     if (!cwd || !/^[A-Za-z0-9_-]+$/.test(sessionId)) return null;
     const path = historyFilePath(cwd, sessionId);
     try {
-      return readRelayEvidence(host.fs.readFile(path), host.fs.readFile(`${path}.domios-turns.jsonl`), sessionId, afterOffset);
+      return readRelayEvidence(yield* host.io.fs.readFile(path), yield* host.io.fs.readFile(`${path}.domios-turns.jsonl`), sessionId, afterOffset);
     } catch (_) {
       return { unavailable: true, reason: "Domios Aider completion evidence is unreadable." };
     }
   },
-  parseSessionDelta(chunk, context) {
+  *parseSessionDelta(chunk, context) {
     const text = String(chunk || "");
-    const commitDiffs = context ? (hash, paths) => aiderCommitDiffs(context.session_key, hash, paths) : void 0;
-    if (!context || context.from_offset === 0) return parseAiderHistoryDelta(text, 0, commitDiffs);
-    const prefix = host.fs.readFileHead(context.session_key, context.from_offset + utf8Length(text));
+    if (!context) return parseAiderHistoryDelta(text);
+    const prefix = context.from_offset === 0 ? text : yield* host.io.fs.readFileHead(context.session_key, context.from_offset + utf8Length(text));
     if (prefix === null) return { messages: [] };
-    return parseAiderHistoryDelta(prefix, context.from_offset, commitDiffs);
+    const pending = [];
+    parseAiderHistoryDelta(prefix, context.from_offset, (hash, paths) => {
+      pending.push({ hash, paths });
+      return [];
+    });
+    const diffs = /* @__PURE__ */ new Map();
+    for (const item of pending) diffs.set(JSON.stringify([item.hash, item.paths]), yield* aiderCommitDiffs(context.session_key, item.hash, item.paths));
+    return parseAiderHistoryDelta(prefix, context.from_offset, (hash, paths) => diffs.get(JSON.stringify([hash, paths])) ?? []);
   },
   checkIntegration() {
     return {
@@ -1035,4 +1074,4 @@ var plugin = {
     return this.checkIntegration();
   }
 };
-var plugin_default = plugin;
+var plugin_default = defineProviderIo(plugin, () => host.io);

@@ -1,4 +1,4 @@
-import { defineProviderIo, type HostIoSteps } from "@codeterm/plugin-sdk";
+import { defineProviderIo, ioValue, type HostIoSteps, type HostIoResult } from "@codeterm/plugin-sdk";
 // Transcriber plugin — CodeTerm's speech-to-text backend (capability: transcriber).
 // Authored in TypeScript against @codeterm/plugin-sdk and compiled to a
 // QuickJS-compatible plugin.js by scripts/build-plugin.mjs.
@@ -107,7 +107,6 @@ function entryName(entry: DirEntry | string): string {
 
 function* cleanupOrphanModels(activeModel: string): HostIoSteps<void> {
   const dir = baseDir();
-  const h = host as typeof host & { readDir?: (path: string) => DirEntry[] };
   let entries: (DirEntry | string)[] = [];
   try {
     entries = yield* host.io.fs.readDir(dir);
@@ -163,13 +162,12 @@ function exitedOk(r: ExecResult): boolean {
   return !r.error && (r.code === undefined || r.code === 0);
 }
 
-function progress(opts: ProgressOptions): void {
-  const h = host as typeof host & { progress?: (opts: ProgressOptions) => void };
-  if (typeof h.progress === "function") h.progress(opts);
+function* progress(opts: ProgressOptions): HostIoSteps<void> {
+  yield* ioValue<HostIoResult<"progress">>({ op: "progress", options: opts });
 }
 
-function errorResult(message: string): TranscribeResult {
-  progress({ label: "Error", error: message });
+function* errorResult(message: string): HostIoSteps<TranscribeResult> {
+  (yield* progress({ label: "Error", error: message }));
   return { error: message };
 }
 
@@ -194,7 +192,6 @@ function* findLocalBin(name: string): HostIoSteps<string | null> {
     if ((yield* host.io.fs.fileExists(c))) return c;
   }
 
-  const h = host as typeof host & { readDir?: (path: string) => DirEntry[] };
   let entries: (DirEntry | string)[] = [];
   try {
     entries = yield* host.io.fs.readDir(root);
@@ -348,7 +345,7 @@ function* ensureFfmpeg(): HostIoSteps<Resolved> {
   if (os === "macos") {
     const found = (yield* resolveUnixBin("ffmpeg"));
     if (found) return { bin: found };
-    progress({ label: "Installing ffmpeg…" });
+    (yield* progress({ label: "Installing ffmpeg…" }));
     const r = (yield* exec({ bin: "brew", args: ["install", "ffmpeg"], timeoutMs: 1800000 }));
     if (exitedOk(r)) {
       // Absolute first, because the PATH probe already failed once; the probe
@@ -360,7 +357,7 @@ function* ensureFfmpeg(): HostIoSteps<Resolved> {
     return { error: "ffmpeg is required. Install it with `brew install ffmpeg`. Looked in: " + (yield* lookedIn("ffmpeg")) };
   }
   if (os === "windows") {
-    progress({ label: "Installing ffmpeg…" });
+    (yield* progress({ label: "Installing ffmpeg…" }));
     const zip = baseDir() + "/ffmpeg.zip";
     const dl = (yield* download(FFMPEG_WIN_ZIP, zip));
     if ("error" in dl) return ffmpegManual(dl.error);
@@ -372,7 +369,7 @@ function* ensureFfmpeg(): HostIoSteps<Resolved> {
     return ffmpegManual("ffmpeg binary not found after extraction");
   }
   // linux
-  progress({ label: "Installing ffmpeg…" });
+  (yield* progress({ label: "Installing ffmpeg…" }));
   const tar = baseDir() + "/ffmpeg.tar.xz";
   const dl = (yield* download(FFMPEG_LINUX_TAR, tar));
   if ("error" in dl) return ffmpegManual(dl.error);
@@ -402,7 +399,7 @@ function* ensureEngine(): HostIoSteps<Resolved> {
   if (os === "macos") {
     const found = (yield* resolveUnixBin("whisper-cli"));
     if (found) return { bin: found };
-    progress({ label: "Installing whisper.cpp…" });
+    (yield* progress({ label: "Installing whisper.cpp…" }));
     const r = (yield* exec({ bin: "brew", args: ["install", "whisper-cpp"], timeoutMs: 1800000 }));
     if (exitedOk(r)) {
       const installed = (yield* resolveUnixBin("whisper-cli"));
@@ -412,7 +409,7 @@ function* ensureEngine(): HostIoSteps<Resolved> {
     return { error: "whisper-cli is required. Install it with `brew install whisper-cpp`. Looked in: " + (yield* lookedIn("whisper-cli")) };
   }
   // Windows + Linux: prebuilt archives from the whisper.cpp GitHub release.
-  progress({ label: "Installing whisper.cpp…" });
+  (yield* progress({ label: "Installing whisper.cpp…" }));
   const asset = os === "windows" ? "whisper-bin-x64.zip" : "whisper-bin-Linux.zip";
   const archive = baseDir() + "/whisper.zip";
   const dl = (yield* download(WHISPER_BASE + "/" + asset, archive));
@@ -457,7 +454,7 @@ function* ensureModel(force = false): HostIoSteps<Ensured> {
   (yield* host.io.fs.makeDirs(baseDir()));
   const url =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-" + modelId() + ".bin";
-  progress({ label: "Downloading model ggml-" + modelId() + " (~" + modelSizeMb(modelId()) + "MB)…" });
+  (yield* progress({ label: "Downloading model ggml-" + modelId() + " (~" + modelSizeMb(modelId()) + "MB)…" }));
   const dl = (yield* download(url, mp));
   if ("error" in dl) {
     (yield* host.io.fs.removeFile(mp));
@@ -499,7 +496,6 @@ function modelSizeMb(id: string): number {
 function* modelFileBytes(path: string): HostIoSteps<number | null> {
   const dir = baseDir();
   const activeName = path.substring(path.lastIndexOf("/") + 1);
-  const h = host as typeof host & { readDir?: (path: string) => DirEntry[] };
   let entries: (DirEntry | string)[] = [];
   try {
     entries = yield* host.io.fs.readDir(dir);
@@ -591,16 +587,16 @@ function* transcribeRemote(ep: string, path: string, lang?: string): HostIoSteps
   // The daemon rejects "auto"; omit the field so faster-whisper auto-detects.
   if (l && l.length && l !== "auto") args.push("-F", "language=" + l);
   args.push(ep);
-  progress({ label: "Transcribing on remote…" });
+  (yield* progress({ label: "Transcribing on remote…" }));
   const r = (yield* exec({ bin: "curl", args, timeoutMs: 660000 }));
   if (!exitedOk(r)) {
-    return errorResult(
+    return (yield* errorResult(
       "remote transcription failed (" + ep + "): " + (r.stderr || r.error || "curl exit " + r.code),
-    );
+    ));
   }
   const parsed = parseRemote(r.stdout || "");
-  if ("error" in parsed) return errorResult("remote transcription failed (" + ep + "): " + parsed.error);
-  progress({ label: "Done", done: true });
+  if ("error" in parsed) return (yield* errorResult("remote transcription failed (" + ep + "): " + parsed.error));
+  (yield* progress({ label: "Done", done: true }));
   return { text: parsed.text };
 }
 
@@ -626,7 +622,7 @@ function* transcribe(path: string, lang?: string): HostIoSteps<TranscribeResult>
   // the GPU daemon owns its own no-speech handling.
   if (ep.length) return (yield* transcribeRemote(ep, path, lang));
   const installed = yield* ensureLocal();
-  if ("error" in installed) return errorResult(installed.error);
+  if ("error" in installed) return (yield* errorResult(installed.error));
   const { ffmpeg, engine } = installed;
 
   (yield* host.io.fs.makeDirs(tmpDir()));
@@ -637,7 +633,7 @@ function* transcribe(path: string, lang?: string): HostIoSteps<TranscribeResult>
   const conv = (yield* runBin(ffmpeg.bin, ["-y", "-i", path, "-ar", "16000", "-ac", "1", "-f", "wav", wav], 120000));
   if (!exitedOk(conv)) {
     (yield* host.io.fs.removeFile(wav));
-    return errorResult("ffmpeg could not decode the audio: " + (conv.stderr || conv.error || "exit " + conv.code));
+    return (yield* errorResult("ffmpeg could not decode the audio: " + (conv.stderr || conv.error || "exit " + conv.code)));
   }
 
   // Gate: near-silent audio produces hallucinated tokens from Whisper.
@@ -648,19 +644,19 @@ function* transcribe(path: string, lang?: string): HostIoSteps<TranscribeResult>
   }
 
   const l = lang && lang.length ? lang : language();
-  progress({ label: "Transcribing…" });
+  (yield* progress({ label: "Transcribing…" }));
   const tr = (yield* runBin(engine.bin, ["-m", modelPath(), "-f", wav, "-l", l, "-nt", "-oj", "-of", base], 600000));
   if (!exitedOk(tr)) {
     (yield* host.io.fs.removeFile(wav));
     (yield* host.io.fs.removeFile(json));
-    return errorResult("whisper-cli failed: " + (tr.stderr || tr.error || "exit " + tr.code));
+    return (yield* errorResult("whisper-cli failed: " + (tr.stderr || tr.error || "exit " + tr.code)));
   }
 
   const raw = (yield* host.io.fs.readFile(json));
   (yield* host.io.fs.removeFile(wav));
   (yield* host.io.fs.removeFile(json));
-  if (!raw) return errorResult("whisper-cli produced no transcript output");
-  progress({ label: "Done", done: true });
+  if (!raw) return (yield* errorResult("whisper-cli produced no transcript output"));
+  (yield* progress({ label: "Done", done: true }));
   return { text: joinSegments(raw) };
 }
 
@@ -735,4 +731,4 @@ const plugin = defineProviderIo({
   glanceAction,
 }, () => host.io) satisfies PluginModule;
 
-export default plugin;
+export default defineProviderIo(plugin, () => host.io);

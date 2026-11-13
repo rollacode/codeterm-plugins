@@ -2964,13 +2964,13 @@ function* settleFileAttempt(p, ledger, attempt) {
   if (!jobId) return yield* failAttempt(p, ledger, attempt, "unknown", "the upload process result was lost before it was recorded");
   let polled;
   try {
-    polled = host.exec.poll(jobId);
+    polled = yield* ioValue({ op: "execPoll", job: jobId });
   } catch {
     polled = { done: true, error: "the upload job could not be read" };
   }
   if (!polled || !polled.done) return uploadingResult(attempt);
   try {
-    host.exec.close(jobId);
+    yield* ioValue({ op: "execClose", job: jobId });
   } catch {
   }
   delete fileJobs[attempt.idempotencyKey];
@@ -3365,7 +3365,7 @@ function forgetLoginJob(jobId) {
 function* cancelLoginJob(jobId) {
   const log = loginLogPaths[jobId];
   try {
-    host.exec.close(jobId);
+    yield* ioValue({ op: "execClose", job: jobId });
   } catch {
   }
   forgetLoginJob(jobId);
@@ -3443,7 +3443,7 @@ function* loginPoll(jobId) {
   if (loginLaunchPending[jobId]) {
     let launch;
     try {
-      launch = host.exec.poll(jobId);
+      launch = yield* ioValue({ op: "execPoll", job: jobId });
     } catch {
       return { error: "Could not read the login job." };
     }
@@ -3454,7 +3454,7 @@ function* loginPoll(jobId) {
       return { done: false, output: yield* redact(partial), state: "login-in-progress", ...yield* telegramLoginArtifacts(partial) };
     }
     try {
-      host.exec.close(jobId);
+      yield* ioValue({ op: "execClose", job: jobId });
     } catch {
     }
     delete loginLaunchPending[jobId];
@@ -3770,4 +3770,4 @@ var plugin = defineProviderIo({
     for (const key of Object.keys(fileJobs)) delete fileJobs[key];
   }
 }, () => host.io);
-var plugin_default = plugin;
+var plugin_default = defineProviderIo(plugin, () => host.io);

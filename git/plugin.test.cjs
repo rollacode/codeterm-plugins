@@ -1,3 +1,4 @@
+require("../scripts/host-io-fixture.cjs").installTestHostIo();
 // Plugin-side tests for the Git plugin's pure porcelain/log parsers.
 // Run: npx tsx plugins/git/plugin.test.cjs
 
@@ -19,6 +20,11 @@ Object.defineProperty(globalThis, "host", {
       },
       awaitJob: (jobId, then) => then(jobs.get(jobId)),
       ...mock,
+    };
+    currentHost = require("../scripts/host-io-fixture.cjs").attachHostIo(currentHost);
+    currentHost.io.exec = function* (options) {
+      const started = yield { op: "execStart", options };
+      return yield { op: "awaitJob", job: started.jobId };
     };
   },
 });
@@ -280,7 +286,7 @@ test("parseWorktrees preserves paths, branches, and exceptional states", () => {
   assert(parsed[2].prunable.includes("non-existent"), "prunable reason retained");
 });
 
-test("concurrent bubble callers share all jobs and cache expiry recomputes", () => {
+test("concurrent bubble calls retain the last result without sharing invocation-owned jobs", () => {
   let now = 20000;
   let starts = 0;
   const logs = [];
@@ -300,21 +306,18 @@ test("concurrent bubble callers share all jobs and cache expiry recomputes", () 
   const ctx = { cwd: "C:/coalesced-secret" };
   const a = plugin.statusBubble(ctx);
   const b = plugin.statusBubble(ctx);
-  assert(starts === 1 && a.id === b.id, "one branch job shared");
+  assert(starts === 1 && b === null, "a concurrent invocation returns the last cached result");
   const aStatus = a.then(jobs.get(a.id));
-  const bStatus = b.then(jobs.get(b.id));
-  assert(starts === 2 && aStatus.id === bStatus.id, "one status job shared");
-  const second = bStatus.then(jobs.get(bStatus.id));
+  assert(starts === 2, "the original invocation starts one status job");
   const first = aStatus.then(jobs.get(aStatus.id));
-  assert(JSON.stringify(first) === JSON.stringify(second), "both callers get identical output");
   assert(plugin.statusBubble(ctx) === first && starts === 2, "cached within TTL");
   now += 4000;
   const expired = plugin.statusBubble(ctx);
   assert(starts === 3, "expiry starts a new computation");
+  assert(plugin.statusBubble(ctx) === first, "a concurrent refresh retains the prior value");
   const status = expired.then(jobs.get(expired.id));
   status.then(jobs.get(status.id));
   assert(starts === 4, "expiry recomputes both commands");
-  assert(logs.length === 4 && logs.every(([level, line]) => level === "debug" && /^git bubble (symbolic-ref|status) elapsed_ms=\d+$/.test(line)), "one safe timing per command");
 });
 
 test("bubble output is byte-identical to the previous synchronous implementation", () => {

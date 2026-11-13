@@ -1,3 +1,4 @@
+import { defineProviderIo, ioEncoded, ioJson, type HostIoSteps, type IoExports } from "@codeterm/plugin-sdk";
 import { checkGrokUpdate } from "./update";
 import { parseGrokModels } from "./modelCatalogue";
 import { grokDirectoryTrustPrompt, grokTrustPromptResponse } from "./directoryTrust";
@@ -110,15 +111,15 @@ function sessionDir(cwd: string, sessionId: string): string | null {
   return joinPath(joinPath(root, cwdKey(cwd)), sessionId);
 }
 
-function sessionExistsAt(cwd: string, sessionId: string): boolean {
-  return isUuid(sessionId) && readSummary(cwd, sessionId)?.info?.id === sessionId;
+function* sessionExistsAt(cwd: string, sessionId: string): HostIoSteps<boolean> {
+  return isUuid(sessionId) && (yield* readSummary(cwd, sessionId))?.info?.id === sessionId;
 }
 
-function readSummary(cwd: string, sessionId: string): GrokSummary | null {
+function* readSummary(cwd: string, sessionId: string): HostIoSteps<GrokSummary | null> {
   if (!isUuid(sessionId)) return null;
   const dir = sessionDir(cwd, sessionId);
   if (!dir) return null;
-  const summary = host.fs.readJson(joinPath(dir, "summary.json")) as GrokSummary | null;
+  const summary = (yield* host.io.fs.readJson(joinPath(dir, "summary.json"))) as GrokSummary | null;
   return summary?.info?.id === sessionId ? summary : null;
 }
 
@@ -145,7 +146,7 @@ function appendLaunchFlags(parts: string[], params: LaunchParams): void {
   }
 }
 
-function resumeCommand(params: ResumeParams): string {
+function* resumeCommand(params: ResumeParams): HostIoSteps<string> {
   const parts = ["grok", ALWAYS_APPROVE, "--resume", quote(String(params.sessionId || ""))];
   if (params.skipPermissions && !hasFlag(parts, "--permission-mode")) {
     parts.push(BYPASS_PERMISSIONS[0], quote(BYPASS_PERMISSIONS[1]));
@@ -153,18 +154,18 @@ function resumeCommand(params: ResumeParams): string {
   const extra = params.args || [];
   for (let i = 0; i < extra.length; i++) parts.push(quote(String(extra[i])));
   const system = String(params.systemPrompt || "").trim();
-  appendRules(parts, system);
+  (yield* appendRules(parts, system));
   return parts.join(" ");
 }
 
-function appendRules(parts: string[], instructions: string): void {
+function* appendRules(parts: string[], instructions: string): HostIoSteps<void> {
   if (!instructions) return;
   // --rules is text-only. Keep long Windows launches below shell/native argv
   // limits using Grok's append-only agent definition mode, never a full prompt.
   const inline = ["--rules", quote(instructions)];
   if (host.platform() === "windows" && [...parts, ...inline].join(" ").length > 6000) {
     const definition = "---\nname: domios\ndescription: Domios session instructions\npromptMode: extend\n---\n\n" + instructions;
-    const path = host.fs.writeTempFile(definition, ".ct-grok-agent.md");
+    const path = (yield* host.io.fs.writeTempFile(definition, ".ct-grok-agent.md"));
     if (!path) throw new Error("failed to write Grok append-only agent instructions");
     parts.push("--agent", quote(path));
   } else {
@@ -258,12 +259,12 @@ function grokUpdateToChat(row: Record<string, unknown>, seq: number): Record<str
   return { id, type, content, timestamp: String(tsMs || seq), seq };
 }
 
-function readGrokChat(cwd: string, sessionId: string, cursor?: string | null): { messages: unknown[]; cursor: string } {
+function* readGrokChat(cwd: string, sessionId: string, cursor?: string | null): HostIoSteps<{ messages: unknown[]; cursor: string }> {
   const path = sessionDir(cwd, sessionId);
   const empty = { messages: [] as unknown[], cursor: cursor && /^\d+$/.test(cursor) ? cursor : "0" };
   if (!path) return empty;
   const file = joinPath(path, "updates.jsonl");
-  const raw = host.fs.readFile(file);
+  const raw = (yield* host.io.fs.readFile(file));
   if (!raw) return empty;
   const start = cursor && /^\d+$/.test(cursor) ? parseInt(cursor, 10) : 0;
   const lines = String(raw).split("\n");
@@ -284,23 +285,23 @@ function readGrokChat(cwd: string, sessionId: string, cursor?: string | null): {
   return { messages, cursor: String(next) };
 }
 
-function listSessionIds(cwd: string): string[] {
+function* listSessionIds(cwd: string): HostIoSteps<string[]> {
   const root = sessionsRoot();
   if (!root || !cwd) return [];
   const dir = joinPath(root, cwdKey(cwd));
-  if (!host.fs.fileExists(dir)) return [];
-  const entries = host.fs.readDir(dir) || [];
+  if (!(yield* host.io.fs.fileExists(dir))) return [];
+  const entries = (yield* host.io.fs.readDir(dir)) || [];
   const ids: string[] = [];
   for (let i = 0; i < entries.length; i++) {
     const name = entries[i].name;
     if (!entries[i].isDir || !isUuid(name)) continue;
-    if (host.fs.fileExists(joinPath(joinPath(dir, name), "summary.json"))) ids.push(name);
+    if ((yield* host.io.fs.fileExists(joinPath(joinPath(dir, name), "summary.json")))) ids.push(name);
   }
   return ids;
 }
 
-function sessionMetadata(dir: string, sessionId: string): Record<string, unknown> | null {
-  const summary = host.fs.readJson(joinPath(dir, "summary.json")) as GrokSummary | null;
+function* sessionMetadata(dir: string, sessionId: string): HostIoSteps<Record<string, unknown> | null> {
+  const summary = (yield* host.io.fs.readJson(joinPath(dir, "summary.json"))) as GrokSummary | null;
   if (summary?.info?.id !== sessionId || !summary.info.cwd) return null;
   const filePath = joinPath(dir, "updates.jsonl");
   return {
@@ -312,10 +313,10 @@ function sessionMetadata(dir: string, sessionId: string): Record<string, unknown
   };
 }
 
-function discoverFromCache(): ModelInfo[] | null {
+function* discoverFromCache(): HostIoSteps<ModelInfo[] | null> {
   const home = grokHome();
   if (!home) return null;
-  const cache = host.fs.readJson(joinPath(home, "models_cache.json")) as ModelsCache | null;
+  const cache = (yield* host.io.fs.readJson(joinPath(home, "models_cache.json"))) as ModelsCache | null;
   if (!cache || !cache.models) return null;
   const models: ModelInfo[] = [];
   const ids = Object.keys(cache.models);
@@ -335,8 +336,8 @@ function discoverFromCache(): ModelInfo[] | null {
   return models.length ? models : null;
 }
 
-function discoverFromCli(): ModelInfo[] | null {
-  const raw = host.exec(JSON.stringify({ bin: "grok", args: ["models"], timeoutMs: 5000 }));
+function* discoverFromCli(): HostIoSteps<ModelInfo[] | null> {
+  const raw = (yield* ioEncoded(host.io.exec({ bin: "grok", args: ["models"], timeoutMs: 5000 })));
   let result: { code?: number; stdout?: string } | null = null;
   try { result = JSON.parse(String(raw || "null")); } catch (_) { return null; }
   if (!result || result.code !== 0 || typeof result.stdout !== "string") return null;
@@ -344,9 +345,9 @@ function discoverFromCli(): ModelInfo[] | null {
 }
 
 
-function sessionUpdates(cwd: string, sessionId: string): Record<string, unknown>[] {
+function* sessionUpdates(cwd: string, sessionId: string): HostIoSteps<Record<string, unknown>[]> {
   const dir = sessionDir(cwd, sessionId);
-  const raw = dir && host.fs.readFile(joinPath(dir, "updates.jsonl"));
+  const raw = dir && (yield* host.io.fs.readFile(joinPath(dir, "updates.jsonl")));
   if (!raw) return [];
   return String(raw).split("\n").flatMap(line => {
     try {
@@ -361,7 +362,7 @@ function eventId(row: Record<string, unknown>): string | null {
   return params?._meta?.eventId ?? null;
 }
 
-const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: string): string | null } = {
+const plugin: IoExports<PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: string): string | null }> = {
   checkForUpdate: checkGrokUpdate,
   starterPromptText(prompt) {
     if (prompt === "no_starter" || prompt === "team_bootstrap") return undefined;
@@ -409,29 +410,29 @@ const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: 
     return true;
   },
 
-  buildLaunchCommand(params: LaunchParams): string {
+  *buildLaunchCommand(params: LaunchParams): HostIoSteps<string> {
     const p = params || {};
     const parts = ["grok"];
     appendLaunchFlags(parts, p);
-    appendRules(parts, String(p.task || ""));
+    (yield* appendRules(parts, String(p.task || "")));
     const task = starterTask(p);
     if (task) parts.push("--", quote(task));
     return parts.join(" ");
   },
 
-  buildResumeCommand(sessionId: string, skipPermissions?: boolean): string {
-    return resumeCommand({ sessionId, skipPermissions });
+  *buildResumeCommand(sessionId: string, skipPermissions?: boolean): HostIoSteps<string> {
+    return (yield* resumeCommand({ sessionId, skipPermissions }));
   },
 
-  buildResumeCommandWithContext(params: ResumeParams): string {
-    return resumeCommand(params);
+  *buildResumeCommandWithContext(params: ResumeParams): HostIoSteps<string> {
+    return (yield* resumeCommand(params));
   },
 
-  discoverModels(): ModelInfo[] | null {
+  *discoverModels(): HostIoSteps<ModelInfo[] | null> {
     try {
-      const live = discoverFromCli();
+      const live = (yield* discoverFromCli());
       if (live) {
-        const cached = discoverFromCache() ?? [];
+        const cached = (yield* discoverFromCache()) ?? [];
         return live.map(model => cached.find(entry => entry.id === model.id) ?? model);
       }
     } catch { }
@@ -440,7 +441,7 @@ const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: 
 
   parseDirectoryTrustPrompt: grokDirectoryTrustPrompt,
   parsePrompt: grokDirectoryTrustPrompt,
-  buildPromptResponse: grokTrustPromptResponse,
+  buildPromptResponse: (index, screen) => grokTrustPromptResponse(index, screen ?? ""),
 
   directoryTrustPromptResponse(screen: string): string[] | null {
     return grokDirectoryTrustPrompt(screen) ? grokTrustPromptResponse(0, screen) : null;
@@ -451,22 +452,22 @@ const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: 
       ? { state: "clarifying_question", confidence: 1 } : null;
   },
 
-  sessionExists(cwd: string, sessionId: string): boolean {
-    return sessionExistsAt(cwd, sessionId);
+  *sessionExists(cwd: string, sessionId: string): HostIoSteps<boolean> {
+    return (yield* sessionExistsAt(cwd, sessionId));
   },
 
-  sessionJsonlPath(cwd: string, sessionId: string): string | null {
+  *sessionJsonlPath(cwd: string, sessionId: string): HostIoSteps<string | null> {
     const dir = sessionDir(cwd, sessionId);
     if (!dir) return null;
     const path = joinPath(dir, "chat_history.jsonl");
-    return host.fs.fileExists(path) ? path : null;
+    return (yield* host.io.fs.fileExists(path)) ? path : null;
   },
 
-  sessionFilePath(cwd: string, sessionId: string): string | null {
+  *sessionFilePath(cwd: string, sessionId: string): HostIoSteps<string | null> {
     const dir = sessionDir(cwd, sessionId);
-    if (!dir || !sessionExistsAt(cwd, sessionId)) return null;
+    if (!dir || !(yield* sessionExistsAt(cwd, sessionId))) return null;
     const path = joinPath(dir, "updates.jsonl");
-    return host.fs.fileExists(path) ? path : null;
+    return (yield* host.io.fs.fileExists(path)) ? path : null;
   },
 
   parseSessionMessages(text: string): unknown[] {
@@ -482,24 +483,24 @@ const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: 
     return true;
   },
 
-  readStructuredChat(cwd: string, sessionId: string, cursor?: string | null): unknown {
-    return readGrokChat(cwd, sessionId, cursor);
+  *readStructuredChat(cwd: string, sessionId: string, cursor?: string | null): HostIoSteps<unknown> {
+    return (yield* readGrokChat(cwd, sessionId, cursor));
   },
 
-  sessionCreatedMs(cwd: string, sessionId: string): number | null {
-    return parseTimeMs(readSummary(cwd, sessionId)?.created_at);
+  *sessionCreatedMs(cwd: string, sessionId: string): HostIoSteps<number | null> {
+    return parseTimeMs((yield* readSummary(cwd, sessionId))?.created_at);
   },
 
-  detectSessionId(cwd: string, exclude?: string | string[], maxAgeMs?: number): string | null {
+  *detectSessionId(cwd: string, exclude?: string | string[], maxAgeMs?: number): HostIoSteps<string | null> {
     const skip = new Set(Array.isArray(exclude) ? exclude : exclude ? [exclude] : []);
     const now = host.unixNowMs();
-    const ids = listSessionIds(cwd);
+    const ids = (yield* listSessionIds(cwd));
     const viable: string[] = [];
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i];
       if (skip.has(id)) continue;
       if (typeof maxAgeMs === "number") {
-        const created = parseTimeMs(readSummary(cwd, id)?.created_at);
+        const created = parseTimeMs((yield* readSummary(cwd, id))?.created_at);
         if (created == null || now - created > maxAgeMs) continue;
       }
       viable.push(id);
@@ -508,10 +509,10 @@ const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: 
     return null;
   },
 
-  detectLaunchSession(evidence: LaunchSessionEvidence): LaunchSessionDetection | null {
+  *detectLaunchSession(evidence: LaunchSessionEvidence): HostIoSteps<LaunchSessionDetection | null> {
     const home = grokHome();
     if (!home) return null;
-    const rows = host.fs.readJson(joinPath(home, "active_sessions.json")) as ActiveSession[] | null;
+    const rows = (yield* host.io.fs.readJson(joinPath(home, "active_sessions.json"))) as ActiveSession[] | null;
     if (!evidence || !evidence.processes) return null;
     const pids: Record<number, true> = {};
     for (let i = 0; i < evidence.processes.length; i++) pids[evidence.processes[i].pid] = true;
@@ -526,7 +527,7 @@ const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: 
     }
     if (matches.length === 1) return { sessionId: matches[0], source: "pid_registry" };
     const marker = String(evidence.launchMarker || "").trim();
-    const summary = isUuid(marker) ? readSummary(evidence.cwd, marker) : null;
+    const summary = isUuid(marker) ? (yield* readSummary(evidence.cwd, marker)) : null;
     const created = parseTimeMs(summary?.created_at);
     if (summary?.info?.id === marker && created !== null && created >= evidence.launchedAtMs) {
       return { sessionId: marker, source: "launch_marker" };
@@ -534,29 +535,29 @@ const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: 
     return null;
   },
 
-  detectSessionModel(cwd: string, sessionId: string): string | null {
-    const model = readSummary(cwd, sessionId)?.current_model_id;
+  *detectSessionModel(cwd: string, sessionId: string): HostIoSteps<string | null> {
+    const model = (yield* readSummary(cwd, sessionId))?.current_model_id;
     return model ? String(model) : null;
   },
 
-  sessionModelIdentityPath(cwd: string, sessionId: string): string | null {
+  *sessionModelIdentityPath(cwd: string, sessionId: string): HostIoSteps<string | null> {
     if (!isUuid(sessionId)) return null;
     const dir = sessionDir(cwd, sessionId);
     if (!dir) return null;
     const path = joinPath(dir, "summary.json");
-    return host.fs.fileExists(path) ? path : null;
+    return (yield* host.io.fs.fileExists(path)) ? path : null;
   },
 
-  sessionModelTranscriptBoundary(cwd: string, sessionId: string): SessionModelTranscriptBoundary {
-    const rows = sessionUpdates(cwd, sessionId);
+  *sessionModelTranscriptBoundary(cwd: string, sessionId: string): HostIoSteps<SessionModelTranscriptBoundary> {
+    const rows = (yield* sessionUpdates(cwd, sessionId));
     const last = rows[rows.length - 1];
     const id = last && eventId(last);
     return {lastEntryUuid: id ?? null, lastEntryTimestamp: null, lastEntryType: null, boundaryFound: !!id};
   },
 
-  detectSessionModelAfterBoundary(cwd: string, sessionId: string, boundary: SessionModelTranscriptBoundary): string | null {
+  *detectSessionModelAfterBoundary(cwd: string, sessionId: string, boundary: SessionModelTranscriptBoundary): HostIoSteps<string | null> {
     if (!boundary.boundaryFound || !boundary.lastEntryUuid) return null;
-    const rows = sessionUpdates(cwd, sessionId);
+    const rows = (yield* sessionUpdates(cwd, sessionId));
     const index = rows.findIndex(row => eventId(row) === boundary.lastEntryUuid);
     if (index < 0) return null;
     let model: string | null = null;
@@ -569,32 +570,34 @@ const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: 
     return null;
   },
 
-  detectSessionReasoningEffort(cwd: string, sessionId: string): string | null {
-    const effort = readSummary(cwd, sessionId)?.reasoning_effort;
+  *detectSessionReasoningEffort(cwd: string, sessionId: string): HostIoSteps<string | null> {
+    const effort = (yield* readSummary(cwd, sessionId))?.reasoning_effort;
     return effort ? String(effort) : null;
   },
 
-  findSession(sessionId: string): unknown | null {
+  *findSession(sessionId: string): HostIoSteps<unknown | null> {
     const root = sessionsRoot();
-    if (!root || !isUuid(sessionId) || !host.fs.fileExists(root)) return null;
-    const cwdDirs = host.fs.readDir(root) || [];
+    if (!root || !isUuid(sessionId) || !(yield* host.io.fs.fileExists(root))) return null;
+    const cwdDirs = (yield* host.io.fs.readDir(root)) || [];
     for (let i = 0; i < cwdDirs.length; i++) {
       if (!cwdDirs[i].isDir) continue;
-      const metadata = sessionMetadata(joinPath(cwdDirs[i].path, sessionId), sessionId);
+      const metadata = (yield* sessionMetadata(joinPath(cwdDirs[i].path, sessionId), sessionId));
       if (metadata) return metadata;
     }
     return null;
   },
 
-  enumerateSessions(): unknown[] {
+  *enumerateSessions(): HostIoSteps<unknown[]> {
     const root = sessionsRoot();
     if (!root) return [];
     const result: unknown[] = [];
-    for (const cwdDir of host.fs.readDir(root) || []) {
+    const cwdDirs = (yield* host.io.fs.readDir(root)) || [];
+    for (const cwdDir of cwdDirs) {
       if (!cwdDir.isDir) continue;
-      for (const entry of host.fs.readDir(cwdDir.path) || []) {
+      const entries = (yield* host.io.fs.readDir(cwdDir.path)) || [];
+      for (const entry of entries) {
         if (!entry.isDir || !isUuid(entry.name)) continue;
-        const metadata = sessionMetadata(entry.path, entry.name);
+        const metadata = (yield* sessionMetadata(entry.path, entry.name));
         if (metadata) result.push(metadata);
       }
     }
@@ -641,10 +644,10 @@ const plugin: PluginModule & { sessionModelIdentityPath(cwd: string, sessionId: 
     };
   },
 
-  fetchUsage(nowMs: number): unknown {
-    const credential = safeJson(String(host.credentialPublic(GROK_AUTH_CREDENTIAL) || "")) as { userId?: unknown } | null;
+  *fetchUsage(nowMs: number): HostIoSteps<unknown> {
+    const credential = safeJson(String((yield* ioJson({ op: "credentialPublic", id: GROK_AUTH_CREDENTIAL }, true)) || "")) as { userId?: unknown } | null;
     if (typeof credential?.userId !== "string" || !credential.userId) return null;
-    const weekly = fetchWeeklyUsage();
+    const weekly = (yield* fetchWeeklyUsage());
     return JSON.stringify({
       billingMode: "subscription",
       weeklyPct: weekly.weeklyPct,
@@ -658,17 +661,17 @@ function safeJson(raw: string): unknown {
   try { return JSON.parse(raw); } catch (_) { return null; }
 }
 
-function fetchWeeklyUsage(): { weeklyPct: number | null; weeklyResetsAtMs: number | null } {
+function* fetchWeeklyUsage(): HostIoSteps<{ weeklyPct: number | null; weeklyResetsAtMs: number | null }> {
   const empty = { weeklyPct: null, weeklyResetsAtMs: null };
   try {
-    const credential = safeJson(String(host.credentialPublic(GROK_AUTH_CREDENTIAL) || "")) as {
+    const credential = safeJson(String((yield* ioJson({ op: "credentialPublic", id: GROK_AUTH_CREDENTIAL }, true)) || "")) as {
       userId?: unknown;
     } | null;
     if (!credential || typeof credential.userId !== "string" || !credential.userId) return empty;
 
-    const version = grokClientVersion();
+    const version = (yield* grokClientVersion());
     if (!version) return empty;
-    const response = safeJson(host.fetch(JSON.stringify({
+    const response = safeJson((yield* ioEncoded(host.io.fetch({
       url: GROK_BILLING_URL,
       method: "GET",
       timeoutMs: 15000,
@@ -684,7 +687,7 @@ function fetchWeeklyUsage(): { weeklyPct: number | null; weeklyResetsAtMs: numbe
           "x-userid": "{userId}",
         },
       },
-    }))) as { status?: unknown; body?: unknown } | null;
+    })))) as { status?: unknown; body?: unknown } | null;
     if (!response || typeof response.status !== "number" || response.status < 200 || response.status >= 300) {
       return empty;
     }
@@ -712,10 +715,10 @@ function fetchWeeklyUsage(): { weeklyPct: number | null; weeklyResetsAtMs: numbe
   }
 }
 
-function grokClientVersion(): string | null {
+function* grokClientVersion(): HostIoSteps<string | null> {
   if (cachedGrokClientVersion !== undefined) return cachedGrokClientVersion;
   try {
-    const result = safeJson(host.exec(JSON.stringify({ bin: "grok", args: ["--version"], timeoutMs: 5000 }))) as {
+    const result = safeJson((yield* ioEncoded(host.io.exec({ bin: "grok", args: ["--version"], timeoutMs: 5000 })))) as {
       code?: unknown;
       stdout?: unknown;
     } | null;
@@ -728,4 +731,4 @@ function grokClientVersion(): string | null {
   return cachedGrokClientVersion;
 }
 
-export default plugin;
+export default defineProviderIo(plugin, () => host.io);

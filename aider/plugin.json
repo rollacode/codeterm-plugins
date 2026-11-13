@@ -1,7 +1,7 @@
 {
   "id": "aider",
-  "version": "0.1.2",
-  "minCodeterm": "1.14.2",
+  "version": "0.1.3",
+  "minCodeterm": "1.19.0",
   "hostApi": 2,
   "displayName": "Aider",
   "description": "Interactive aider-chat 0.86.2 adapter. Worker dispatch is disabled because autonomous shell execution is unsupported.",
@@ -121,5 +121,6 @@
         ]
       }
     ]
-  }
+  },
+  "hostIoJobs": true
 }

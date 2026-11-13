@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
-const {installTestHostIo} = require('../../scripts/test-host-io.cjs');
+const {installTestHostIo} = require('../../scripts/host-io-fixture.cjs');
 function fixture() {
   const calls=[], writes=[], secrets={session:'session-fixture'};
   let networkFailure=false, stopped=false;
@@ -48,6 +48,8 @@ test('locking during a suspended HTTP read discards the late item',()=>{
     const r=next.value;let reply;
     if(r.op==='secretGet')reply=f.host.secretGet(r.name);
     else if(r.op==='execStart')reply=f.host.exec.start(r.options);
+    else if(r.op==='execPoll')reply=f.host.exec.poll(r.job);
+    else if(r.op==='writeFile')reply=f.host.fs.writeFile(r.path,r.contents);
     else reply=f.host.fs[r.op](r.path,...(r.args||[]));
     next=steps.next(reply);
   }

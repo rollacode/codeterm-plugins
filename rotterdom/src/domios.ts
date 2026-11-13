@@ -1,3 +1,4 @@
+import { ioValue, type HostIoSteps, type HostIoResult } from "@codeterm/plugin-sdk";
 import type { Profile } from "./types";
 import { instanceBinDir } from "./instanceCli";
 export function domiosCommand(profile: Profile, tool: string, a: Record<string, string>): { args: string[]; stdin?: string } | null {
@@ -21,13 +22,13 @@ export function domiosCommand(profile: Profile, tool: string, a: Record<string, 
     default: return null;
   }
 }
-export function startDomios(profile: Profile, name: string, args: Record<string, string>, deadline: number) {
+export function* startDomios(profile: Profile, name: string, args: Record<string, string>, deadline: number): HostIoSteps<{ jobId: string; } | null> {
   const command = domiosCommand(profile, name, args);
   if (!command) return null;
   const dir = instanceBinDir();
   if (!dir) throw new Error("instance CLI directory unavailable");
   const bin = `${dir.replace(/[\\/]+$/, "")}/${host.platform() === "windows" ? "codeterm.exe" : "codeterm"}`;
-  const result = host.exec.start({ bin, ...command, timeoutMs: Math.max(1, Math.min(30000, deadline - host.unixNowMs())) });
+  const result = (yield* ioValue<HostIoResult<"execStart">>({ op: "execStart", options: { bin, ...command, timeoutMs: Math.max(1, Math.min(30000, deadline - host.unixNowMs())) } }));
   if (!result.jobId) throw new Error(result.error || "Domios command start failed");
   return { jobId: result.jobId };
 }

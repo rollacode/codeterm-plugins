@@ -1,7 +1,7 @@
 {
   "id": "chat-preprocessor",
-  "version": "0.1.1",
-  "minCodeterm": "1.0.0",
+  "version": "0.1.2",
+  "minCodeterm": "1.19.0",
   "hostApi": 2,
   "displayName": "Chat Preprocessor",
   "description": "Augments your outbound chat messages before the agent sees them. A chatPreprocessor stage in the outbound pipeline (match: text): it pulls relevant context — from your CodeTerm memory, a one-shot worker agent, or a Groq model — and folds it into the message as a <context> block. Toggle it off for plain passthrough.",
@@ -21,5 +21,6 @@
         "api.groq.com"
       ]
     }
-  }
+  },
+  "hostIoJobs": true
 }

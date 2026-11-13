@@ -1,3 +1,4 @@
+import { defineProviderIo, ioValue, type HostIoSteps, type IoExports, type HostIoResult } from "@codeterm/plugin-sdk";
 import { batteryFromStatus } from "./battery";
 import { connectionFromStatus } from "./connection";
 import { selectRecordingDevices } from "./selection";
@@ -5,32 +6,32 @@ import type { Host, PluginModule, ViewNode } from "@codeterm/plugin-sdk";
 
 declare const host: Host;
 
-function diagnostics() {
-  const hostStatus = host.localRecording.status();
+function* diagnostics(): HostIoSteps<{ connection: ReturnType<typeof connectionFromStatus>; hostStatus: HostIoResult<"localRecordingStatus">; receiverReport: HostIoResult<"receiverStatusReport">; batteries: ReturnType<typeof batteryFromStatus> }> {
+  const hostStatus = (yield* ioValue<HostIoResult<"localRecordingStatus">>({ op: "localRecordingStatus" }));
   const connection = connectionFromStatus(hostStatus);
-  const receiverReport = connection.state === "connected" ? host.localRecording.statusReport() : null;
+  const receiverReport = connection.state === "connected" ? (yield* ioValue<HostIoResult<"receiverStatusReport">>({ op: "receiverStatusReport" })) : null;
   return { connection, hostStatus, receiverReport, batteries: batteryFromStatus(receiverReport) };
 }
 
-const plugin: Pick<PluginModule, "viewCall" | "statusBubble" | "renderGlance" | "onAgentCommand"> = {
-  renderGlance() {
-    const status = host.localRecording.status();
+const plugin: IoExports<Pick<PluginModule, "viewCall" | "statusBubble" | "renderGlance" | "onAgentCommand">> = {
+  *renderGlance(): HostIoSteps<{ title: string; nodes: ViewNode[]; }> {
+    const status = (yield* ioValue<HostIoResult<"localRecordingStatus">>({ op: "localRecordingStatus" }));
     const connection = connectionFromStatus(status);
     const ready = connection.state === "connected";
     const nodes: ViewNode[] = [
       { kind: "keyVal", key: "Recording button", value: connection.label, style: { tone: ready ? "ok" : "muted" } },
       { kind: "text", text: connection.detail },
     ];
-    const batteries = ready ? batteryFromStatus(host.localRecording.statusReport()) : [];
+    const batteries = ready ? batteryFromStatus((yield* ioValue<HostIoResult<"receiverStatusReport">>({ op: "receiverStatusReport" }))) : [];
     if (!batteries.length) nodes.push({ kind: "keyVal", key: "Battery", value: ready ? "No valid receiver report" : "Connect receiver first", style: { tone: "muted" } });
     for (const battery of batteries) nodes.push({ kind: "keyVal", key: `Microphone ${battery.slot}`, value: battery.connected ? `${battery.percent}%` : "Disconnected", style: { tone: !battery.connected ? "muted" : battery.percent! <= 15 ? "warn" : "ok" } });
     return { title: "LARK M2", nodes };
   },
-  statusBubble(ctx) {
-    const target = host.receiverTarget.get();
-    const status = host.localRecording.status();
+  *statusBubble(ctx): HostIoSteps<{ label: string; tone: "warn" | "accent"; icon: string; tooltip: string; action: string; } | null> {
+    const target = (yield* ioValue<HostIoResult<"receiverTarget">>({ op: "receiverTarget" }));
+    const status = (yield* ioValue<HostIoResult<"localRecordingStatus">>({ op: "localRecordingStatus" }));
     if (!target || !("tabId" in target) || target.tabId !== ctx.tabId || !status || "error" in status || !status.granted || !status.enabled || !status.available) return null;
-    const batteries = batteryFromStatus(host.localRecording.statusReport()).filter(battery => battery.connected);
+    const batteries = batteryFromStatus((yield* ioValue<HostIoResult<"receiverStatusReport">>({ op: "receiverStatusReport" }))).filter(battery => battery.connected);
     if (!batteries.length) return null;
     return {
       label: `LARK ${batteries.map(battery => `${battery.percent}%`).join(" · ")}`,
@@ -40,25 +41,25 @@ const plugin: Pick<PluginModule, "viewCall" | "statusBubble" | "renderGlance" | 
       action: "openPanel:view:lark",
     };
   },
-  onAgentCommand(ctx) {
+  *onAgentCommand(ctx): HostIoSteps<{ error: string; result?: undefined; } | { result: string; error?: undefined; }> {
     if (ctx.args.length) return { error: "LARK diagnostic commands take no arguments." };
-    if (ctx.verb === "status") return { result: JSON.stringify(connectionFromStatus(host.localRecording.status())) };
-    if (ctx.verb === "diagnostics") return { result: JSON.stringify(diagnostics()) };
+    if (ctx.verb === "status") return { result: JSON.stringify(connectionFromStatus((yield* ioValue<HostIoResult<"localRecordingStatus">>({ op: "localRecordingStatus" })))) };
+    if (ctx.verb === "diagnostics") return { result: JSON.stringify((yield* diagnostics())) };
     if (ctx.verb === "help") return { result: "Read-only verbs: status, diagnostics. Run codeterm plugin get lark first; settings show Refresh status, Enable LARK, Disable LARK, Show diagnostics. Device selection is host-owned and may have no picker when no receiver is offered." };
     return { error: "unsupported_lark_command" };
   },
-  viewCall(method, args) {
+  *viewCall(method, args): HostIoSteps<unknown> {
     if (method === "selectRecordingDevices") return selectRecordingDevices(args);
-    if (method === "connection") return connectionFromStatus(host.localRecording.status());
-    if (method === "diagnostics") return diagnostics();
-    if (method === "battery") return batteryFromStatus(host.localRecording.statusReport());
-    if (method === "status") return host.localRecording.status();
-    if (method === "enable") return host.localRecording.setEnabled(true);
-    if (method === "disable") return host.localRecording.setEnabled(false);
-    if (method === "receiverTarget") return host.receiverTarget.get();
-    if (method === "resetReceiverTarget") return host.receiverTarget.clear();
+    if (method === "connection") return connectionFromStatus((yield* ioValue<HostIoResult<"localRecordingStatus">>({ op: "localRecordingStatus" })));
+    if (method === "diagnostics") return (yield* diagnostics());
+    if (method === "battery") return batteryFromStatus((yield* ioValue<HostIoResult<"receiverStatusReport">>({ op: "receiverStatusReport" })));
+    if (method === "status") return (yield* ioValue<HostIoResult<"localRecordingStatus">>({ op: "localRecordingStatus" }));
+    if (method === "enable") return (yield* ioValue<HostIoResult<"localRecordingSetEnabled">>({ op: "localRecordingSetEnabled", enabled: true }));
+    if (method === "disable") return (yield* ioValue<HostIoResult<"localRecordingSetEnabled">>({ op: "localRecordingSetEnabled", enabled: false }));
+    if (method === "receiverTarget") return (yield* ioValue<HostIoResult<"receiverTarget">>({ op: "receiverTarget" }));
+    if (method === "resetReceiverTarget") return (yield* ioValue<HostIoResult<"receiverTargetClear">>({ op: "receiverTargetClear" }));
     return { error: "unsupported_lark_action" };
   },
 };
 
-export default plugin;
+export default defineProviderIo(plugin, () => host.io);

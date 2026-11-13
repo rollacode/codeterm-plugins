@@ -1,7 +1,7 @@
 {
   "id": "git",
-  "version": "0.1.8",
-  "minCodeterm": "1.10.0",
+  "version": "0.1.9",
+  "minCodeterm": "1.19.0",
   "hostApi": 2,
   "displayName": "Git",
   "description": "Live Git branch and working-tree status in the pane footer, a glance popover, and a full Git view. Reads each pane's repo with the local git binary.",
@@ -15,7 +15,10 @@
   },
   "permissions": {
     "subprocess": {
-      "allow": ["git"]
+      "allow": [
+        "git"
+      ]
     }
-  }
+  },
+  "hostIoJobs": true
 }

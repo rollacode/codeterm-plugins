@@ -1,6 +1,7 @@
+import { type HostIoSteps } from "@codeterm/plugin-sdk";
 export interface UpdateHost {
-  exec: (opts: string) => string;
-  fetch: (opts: string) => string;
+  exec: (opts: string) => HostIoSteps<string>;
+  fetch: (opts: string) => HostIoSteps<string>;
 }
 
 export interface CliCompatibility {
@@ -61,19 +62,20 @@ export function newestSupportedVersion(versions: string[], compatibility: CliCom
   }, null);
 }
 
-export function checkProviderUpdate(
+export function* checkProviderUpdate(
   host: UpdateHost,
   binary: string,
   metadataUrl: string,
   compatibility?: CliCompatibility,
-): UpdateAvailability | null {
-  const installed = record(host.exec(JSON.stringify({ bin: binary, args: ["--version"], timeoutMs: 5000 })));
+): HostIoSteps<UpdateAvailability | null> {
+  try {
+  const installed = record((yield* host.exec(JSON.stringify({ bin: binary, args: ["--version"], timeoutMs: 5000 }))));
   if (installed?.code !== 0 || typeof installed.stdout !== "string") return null;
   const currentVersion = installed.stdout.match(/(?:^|\s)(\d+\.\d+\.\d+)(?=\s|$)/)?.[1];
   if (!currentVersion || !versionParts(currentVersion)) return null;
-  const response = record(host.fetch(JSON.stringify({ url: metadataUrl, method: "GET", timeoutMs: 6000,
+  const response = record((yield* host.fetch(JSON.stringify({ url: metadataUrl, method: "GET", timeoutMs: 6000,
     headers: { Accept: "application/vnd.npm.install-v1+json" },
-  })));
+  }))));
   if (response?.status !== 200) return null;
   const metadata = record(response.body);
   let latestVersion: string | null = typeof metadata?.version === "string" ? metadata.version : null;
@@ -83,4 +85,5 @@ export function checkProviderUpdate(
   }
   return latestVersion && compare(latestVersion, currentVersion) === 1
     ? { currentVersion, latestVersion } : null;
+  } catch { return null; }
 }

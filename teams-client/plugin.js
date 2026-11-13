@@ -1530,10 +1530,10 @@ function* startSignIn(p) {
   if (!started.jobId) return { done: true, state: "sign-in-failed", error: started.error || "exo-teams sign-in did not start." };
   let pid = null;
   try {
-    const poll = host.exec.poll(started.jobId);
+    const poll = yield* ioValue({ op: "execPoll", job: started.jobId });
     const result = poll && typeof poll.stdout === "string" ? parseJson(poll.stdout) : null;
     pid = Number.isInteger(poll?.pid) ? poll.pid : Number.isInteger(result?.pid) ? result.pid : null;
-    if (poll && poll.done) host.exec.close(started.jobId);
+    if (poll && poll.done) yield* ioValue({ op: "execClose", job: started.jobId });
   } catch {
   }
   yield* host.io.fs.writeFile(p.loginState, JSON.stringify({ startedAt: now(), pid }));
@@ -1565,14 +1565,14 @@ function* loginPoll() {
     const job = installJobs[jobId];
     let poll;
     try {
-      poll = host.exec.poll(jobId);
+      poll = yield* ioValue({ op: "execPoll", job: jobId });
     } catch {
       activeInstallJobId = null;
       return { done: true, state: "install-failed", error: "Could not read the install job." };
     }
     if (!poll.done) return { done: false, jobId, state: "install-in-progress", message: STAGE_MESSAGES[job.stage] };
     try {
-      host.exec.close(jobId);
+      yield* ioValue({ op: "execClose", job: jobId });
     } catch {
     }
     return yield* finishInstallStage(jobId, job, poll);
@@ -1847,4 +1847,4 @@ var plugin = defineProviderIo({
   __test_boundedHistory: boundedHistory,
   __test_failureMessage: failureMessage
 }, () => host.io);
-var plugin_default = plugin;
+var plugin_default = defineProviderIo(plugin, () => host.io);

@@ -1,11 +1,11 @@
 {
   "name": "@codeterm/plugin-bitwarden",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "license": "PolyForm-Shield-1.0.0",
   "private": true,
   "type": "module",
   "description": "CodeTerm Bitwarden plugin: secret backend, glance popover, and connection view.",
   "devDependencies": {
-    "@codeterm/plugin-sdk": "^1.18.7"
+    "@codeterm/plugin-sdk": "^1.20.0"
   }
 }

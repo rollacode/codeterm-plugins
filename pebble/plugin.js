@@ -23,6 +23,25 @@ __export(plugin_exports, {
   default: () => plugin_default
 });
 module.exports = __toCommonJS(plugin_exports);
+
+// ../../codeterm/codeterm/packages/plugin-sdk/src/ioPrograms.ts
+function* ioValue(request) {
+  return yield request;
+}
+function defineProviderIo(source, io) {
+  const exports = { ...source };
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (typeof value !== "function") continue;
+    exports[key] = function(...args) {
+      const result = value.apply(source, args);
+      return result && typeof result.next === "function" ? io().run(result) : result;
+    };
+  }
+  return exports;
+}
+
+// pebble/src/plugin.ts
 var TRANSCRIPT_MAX_LENGTH = 8e3;
 var FIELD_MAX_LENGTH = 256;
 var TRUNCATION_MARKER = "... [truncated]";
@@ -92,11 +111,6 @@ var TARGET_UNAVAILABLE = "This CodeTerm build cannot report the receiver target.
 function unavailable(error, message = TARGET_UNAVAILABLE) {
   return { status: "unavailable", error, message };
 }
-function receiverTargetApi() {
-  if (typeof host === "undefined" || host === null) return null;
-  const api = host.receiverTarget;
-  return typeof api === "object" && api !== null ? api : null;
-}
 function normalizeTarget(raw) {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return unavailable("receiver_target_unavailable");
@@ -117,22 +131,19 @@ function normalizeTarget(raw) {
   const tabId = truncateWithMarker(sanitizeField(value.tabId), FIELD_MAX_LENGTH);
   return value.live ? { status: "bound", tabId } : { status: "notLive", tabId };
 }
-function callReceiverTarget(verb) {
-  const api = receiverTargetApi();
-  const fn = api?.[verb];
-  if (typeof fn !== "function") return unavailable("receiver_target_unavailable");
+function* callReceiverTarget(verb) {
   try {
-    return normalizeTarget(fn.call(api));
+    return normalizeTarget(yield* ioValue({ op: verb === "get" ? "receiverTarget" : "receiverTargetClear" }));
   } catch {
     return unavailable("receiver_target_unavailable");
   }
 }
-function viewCall(method) {
+function* viewCall(method) {
   if (method === "webhookSettings") {
     return { error: "This CodeTerm build does not provide webhook settings yet" };
   }
-  if (method === "receiverTarget") return callReceiverTarget("get");
-  if (method === "resetReceiverTarget") return callReceiverTarget("clear");
+  if (method === "receiverTarget") return yield* callReceiverTarget("get");
+  if (method === "resetReceiverTarget") return yield* callReceiverTarget("clear");
   return { error: `unknown view method: ${method}` };
 }
 var plugin = {
@@ -145,8 +156,8 @@ var plugin = {
       text: formatMessage(payload)
     };
   },
-  renderGlance() {
-    const target = callReceiverTarget("get");
+  *renderGlance() {
+    const target = yield* callReceiverTarget("get");
     return { title: "Pebble", nodes: [
       { kind: "keyVal", key: "Recipient", value: target.status === "bound" ? "Attached to this tab" : target.status === "general" ? "General Agent" : "Unavailable" },
       { kind: "keyVal", key: "Battery", value: "Not reported by CoreApp", style: { tone: "muted" } }
@@ -154,4 +165,4 @@ var plugin = {
   },
   viewCall
 };
-var plugin_default = plugin;
+var plugin_default = defineProviderIo(plugin, () => host.io);

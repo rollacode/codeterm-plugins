@@ -1,3 +1,4 @@
+import { ioValue, type HostIoSteps } from "@codeterm/plugin-sdk";
 import { openAiMessage, pairToolCalls } from "./toolwire";
 import type { ChatTurn, Endpoint, Profile } from "./types";
 import { offeredTools } from "./policy";
@@ -7,13 +8,13 @@ export function endpointRequest(endpoint: Endpoint, path: string, key: string | 
   return { url: `${endpoint.baseUrl.replace(/\/+$/, "")}${path}`,
     headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) } };
 }
-export function endpointKey(endpoint: Endpoint): string | null {
-  const key = endpoint.secret ? host.secretGet(endpoint.secret) : null;
+export function* endpointKey(endpoint: Endpoint): HostIoSteps<string | null> {
+  const key = endpoint.secret ? (yield* ioValue<string | null>({ op: "secretGet", name: endpoint.secret })) : null;
   if (endpoint.secret && !key) throw new Error("endpoint secret unavailable");
   return key;
 }
-export function request(endpoint: Endpoint, profile: Profile, turns: ChatTurn[], key: string | null, remainingTokens: number, enableTools = true) {
-  const tools = enableTools ? openAiTools(offeredTools(profile, host.projectWriteAllowed(profile.root))) : [];
+export function* request(endpoint: Endpoint, profile: Profile, turns: ChatTurn[], key: string | null, remainingTokens: number, enableTools = true): HostIoSteps<{ method: string; body: string; timeoutMs: number; url: string; headers: { authorization?: string | undefined; "content-type": string; }; }> {
+  const tools = enableTools ? openAiTools(offeredTools(profile, (yield* ioValue<boolean>({ op: "projectWriteAllowed", root: profile.root })))) : [];
   return { ...endpointRequest(endpoint, "/chat/completions", key), method: "POST",
     body: JSON.stringify({ temperature: profile.params?.temperature, top_p: profile.params?.top_p, seed: profile.params?.seed, model: profile.model, stream: false,
       max_tokens: Math.min(4096, remainingTokens),

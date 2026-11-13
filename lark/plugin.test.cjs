@@ -1,3 +1,4 @@
+require("../scripts/host-io-fixture.cjs").installTestHostIo();
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -26,6 +27,7 @@ const sandbox = {
     },
   },
 };
+require("../scripts/host-io-fixture.cjs").attachHostIo(sandbox.host);
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, "plugin.js"), "utf8"), sandbox);
 const plugin = sandbox.module.exports.default;
 const offered = { inputs: [{ inputId: "receiver", collectionId: "Col01" }],

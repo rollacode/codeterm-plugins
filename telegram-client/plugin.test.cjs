@@ -1,4 +1,4 @@
-require("../scripts/test-host-io.cjs").installTestHostIo();
+require("../scripts/host-io-fixture.cjs").installTestHostIo();
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -1860,11 +1860,13 @@ test("an outbox lock spans yielded reads and refuses a concurrent send before a 
     const locks=new Set();
     const resolve=r=> {
       if(r.op==="lockFile"){if(locks.has(r.path))return null;locks.add(r.path);return r.path;}
-      if(r.op==="unlockFile"){locks.delete(r.path);return true;}
+      if(r.op==="unlockFile"){locks.delete(r.id);return true;}
       if(r.op==="exec")return JSON.parse(host.exec(JSON.stringify(r.options)));
       if(r.op==="secretGet")return host.secretGet(r.name);
       if(r.op==="secretSet")return host.secretSet(r.name,r.value);
       const op=r.op==="writeFileAtomic"?"writeFile":r.op;
+      if(op==="writeFile")return host.fs[op](r.path,r.contents);
+      if(op==="readFileHead"||op==="readFileTail")return host.fs[op](r.path,r.maxBytes);
       return host.fs[op](r.path,...(r.args||[]));
     };
     const advance=(steps,next)=>{while(!next.done)next=steps.next(resolve(next.value));return next.value;};

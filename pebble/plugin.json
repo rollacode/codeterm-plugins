@@ -1,7 +1,7 @@
 {
   "id": "pebble",
-  "version": "0.2.3",
-  "minCodeterm": "1.10.21",
+  "version": "0.2.4",
+  "minCodeterm": "1.19.0",
   "hostApi": 2,
   "displayName": "Pebble",
   "description": "Receives authenticated Pebble ring events and delivers their sanitized metadata and transcript to the tab you pick, or to the CodeTerm General Agent.",
@@ -21,6 +21,7 @@
     "view": true,
     "glanceView": true
   },
-  "configHelp": "Requires CodeTerm 1.10.21+ (host-owned receiver targets). Open the Pebble view to copy this machine's webhook URL and pebble_webhook_secret into CoreApp as Authorization: Bearer <token>, with Send set to Transcription only and no manual Content-Type. Pick a tab with its \u22ee menu \u2192 Attach Pebble ring; without one, events go to the General Agent.",
-  "icon": "icon.svg"
+  "configHelp": "Requires CodeTerm 1.10.21+ (host-owned receiver targets). Open the Pebble view to copy this machine's webhook URL and pebble_webhook_secret into CoreApp as Authorization: Bearer <token>, with Send set to Transcription only and no manual Content-Type. Pick a tab with its ⋮ menu → Attach Pebble ring; without one, events go to the General Agent.",
+  "icon": "icon.svg",
+  "hostIoJobs": true
 }

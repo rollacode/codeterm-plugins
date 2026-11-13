@@ -1,3 +1,4 @@
+require("../scripts/host-io-fixture.cjs").installTestHostIo();
 const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
@@ -11,6 +12,7 @@ function load(over = {}) {
     fs: { readDir: () => [], readFileHead: () => null, readFile: () => null, expandHome: p => p.replace("~/.codeterm", "/installed") },
     ...over,
   };
+  require("../scripts/host-io-fixture.cjs").attachHostIo(host);
   const context = { host, module: { exports: {} }, exports: {} };
   new vm.Script(readFileSync(join(__dirname, "plugin.js"), "utf8")).runInNewContext(context);
   return context.module.exports.default;
@@ -36,7 +38,7 @@ test("marketplace metadata, icon and model catalogue", () => {
   assert.equal(manifest.version, channel.version);
   assert.equal(channel.path, "aider");
   assert.equal(channel.minCodeterm, manifest.minCodeterm);
-  assert.equal(manifest.minCodeterm, "1.14.2");
+  assert.equal(manifest.minCodeterm, "1.19.0");
   assert.equal(manifest.icon, "icon.svg");
   assert.ok(readFileSync(join(__dirname, manifest.icon), "utf8").includes("<svg"));
   assert.deepEqual(manifest.models, []);
@@ -1171,7 +1173,25 @@ test("recorded applied edits resolve their own commit into Changes diffs", () =>
 
 require("../provider-shared/updateTests.cjs")(tests, load, __dirname);
 
+test("repeated commit hashes keep each turn's recorded edit paths", () => {
+  const history = "#### first\n\n> Applied edit to first.txt\n> Commit 680496f first\n\n#### second\n\n> Applied edit to second.txt\n> Commit 680496f second\n";
+  const p = load({exec: raw => {
+    const opts = JSON.parse(raw);
+    if (opts.args.includes("rev-parse")) return JSON.stringify({code: 0, stdout: "/repo\n"});
+    const file = opts.args.at(-1);
+    return JSON.stringify({code: 0, stdout: `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-old\n+new\n`});
+  }});
+  const rows = plain(p.parseSessionDelta(history, {session_key: "/repo/.aider/history/own.md", from_offset: 0})).messages;
+  const paths = rows.flatMap(row => row.blocks).flatMap(block => (block.data.file_diffs ?? []).map(diff => diff.path));
+  assert.deepEqual(paths, ["first.txt", "second.txt"]);
+});
+
 let failed = 0;
+test("history discovery uses the job surface without a legacy filesystem binding", () => {
+  const io = {run: steps => steps.next().value, fs: {readDir: function* () { return [{name: "own.md"}]; }}};
+  assert.equal(load({fs: {}, io}).sessionExists("/repo", "own"), true);
+});
+
 for (const [name, run] of tests) {
   try { run(); console.log(`  ok  ${name}`); }
   catch (err) { failed++; console.error(`  FAIL ${name}`); console.error(err); }
