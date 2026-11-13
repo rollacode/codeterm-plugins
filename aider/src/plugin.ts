@@ -1,3 +1,4 @@
+import { bundleDir } from "../../shared/src/host-paths";
 import { defineProviderIo, ioResolve, type HostIoSteps, type IoExports } from "@codeterm/plugin-sdk";
 import { checkAiderUpdate } from "./update";
 import type {
@@ -318,7 +319,7 @@ const plugin: IoExports<PluginModule> = {
     const selected = launchEndpoint(configuredEndpoints(settings), requestedModel);
     let startupDir: string | undefined;
     if (settings.plainMode !== true) {
-      startupDir = host.fs.expandHome("~/.codeterm/plugins/aider/startup") || undefined;
+      try { startupDir = `${bundleDir(host.dataDir(), "aider")}/startup`; } catch { startupDir = undefined; }
       if (!startupDir) throw new Error("Domios Aider adapter is missing. Reinstall the plugin or explicitly set plainMode=true.");
     }
     // Preserve aider's normal entry point in the PTY process tree. Python's
@@ -358,9 +359,7 @@ const plugin: IoExports<PluginModule> = {
       // Missing or unreadable instructions must not prevent starting Aider.
     }
     try {
-      // expandHome maps ~/.codeterm to this instance's data directory, so
-      // the bundled primer resolves inside the installed plugin on DEV too.
-      const primer = host.fs.expandHome("~/.codeterm/plugins/aider/domios-primer.md");
+      const primer = `${bundleDir(host.dataDir(), "aider")}/domios-primer.md`;
       if (primer && (yield* host.io.fs.readFileHead(primer, 1)) !== null) {
         parts.push("--read", quote(primer));
       }

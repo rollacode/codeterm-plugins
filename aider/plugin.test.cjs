@@ -7,6 +7,7 @@ const vm = require("node:vm");
 function load(over = {}) {
   const host = {
     platform: () => "linux",
+    dataDir: () => "/installed",
     settingsJson: () => "{}",
     shell: { quoteFor: (v) => "'" + v.replace(/'/g, "'\\''") + "'" },
     fs: { readDir: () => [], readFileHead: () => null, readFile: () => null, expandHome: p => p.replace("~/.codeterm", "/installed") },
@@ -122,7 +123,7 @@ test("launch loads project instructions as read-only context", () => {
     return "#";
   }}});
   assert.match(p.buildLaunchCommand({cwd: "/some repo/"}), /--read '\/some repo\/AGENTS.md'/);
-  assert.deepEqual(paths, [["/some repo/AGENTS.md", 1]]);
+  assert.deepEqual(paths, [["/some repo/AGENTS.md", 1], ["/installed/plugins/aider/domios-primer.md", 1]]);
 });
 
 test("launch tolerates missing or unreadable project instructions", () => {
@@ -138,12 +139,8 @@ test("Windows instructions path is quoted and empty instructions still load", ()
 
 test("launch reads the primer from the installed instance plugin beside AGENTS", () => {
   const paths = [];
-  const primer = "/home/dev/.codeterm-dev/plugins/aider/domios-primer.md";
-  const p = configured([mimoEndpoint], {fs: {
-    expandHome: path => {
-      assert.equal(path, "~/.codeterm/plugins/aider/domios-primer.md");
-      return primer;
-    },
+  const primer = "/home/dev/instance data/plugins/aider/domios-primer.md";
+  const p = configured([mimoEndpoint], {dataDir: () => "/home/dev/instance data", fs: {
     readFileHead: (path, bytes) => { paths.push([path, bytes]); return "R"; },
   }});
   const command = p.buildLaunchCommand({cwd: "/project"});
@@ -166,9 +163,8 @@ test("missing or unreadable primer does not prevent launch", () => {
 });
 
 test("primer loads without project instructions and Windows paths stay quoted", () => {
-  const primer = "C:/Users/Some User/.codeterm-dev/plugins/aider/domios-primer.md";
-  const p = configured([mimoEndpoint], {platform: () => "windows", fs: {
-    expandHome: () => primer,
+  const primer = "C:/Users/Some User/instance data/plugins/aider/domios-primer.md";
+  const p = configured([mimoEndpoint], {platform: () => "windows", dataDir: () => "C:/Users/Some User/instance data", fs: {
     readFileHead: path => path === primer ? "Rules" : null,
   }});
   const command = p.buildLaunchCommand({cwd: "D:/project"});
@@ -176,16 +172,16 @@ test("primer loads without project instructions and Windows paths stay quoted", 
   assert.doesNotMatch(command, /--read 'D:\/project\/AGENTS.md'/);
 });
 
-test("unresolved or failed primer path expansion does not block launch", () => {
-  for (const expandHome of [() => null, () => {throw new Error("unavailable");}]) {
-    const command = configured([mimoEndpoint], {fs: {expandHome, readFileHead: () => null}}).buildLaunchCommand({});
+test("unavailable host data root does not block plain launch", () => {
+  for (const dataDir of [() => "", () => {throw new Error("unavailable");}]) {
+    const command = configured([mimoEndpoint], {dataDir, fs: {readFileHead: () => null}}).buildLaunchCommand({});
     assert.match(command, /--chat-history-file/);
     assert.doesNotMatch(command, /domios-primer/);
   }
 });
 
 test("resume launch paths also include the installed Domios primer", () => {
-  const primer = "/installed/aider/domios-primer.md";
+  const primer = "/installed/plugins/aider/domios-primer.md";
   const p = configured([mimoEndpoint], {fs: {
     expandHome: () => primer,
     readFileHead: path => path === primer ? "Rules" : null,
@@ -930,7 +926,7 @@ test("Windows adapter uses an argument array and runtime secret, never its value
 });
 
 test("missing adapter path refuses instead of silently launching plain Aider", () => {
-  const p = load({settingsJson: () => JSON.stringify({endpoints: [mimoEndpoint]}), fs: {expandHome: () => null}});
+  const p = load({settingsJson: () => JSON.stringify({endpoints: [mimoEndpoint]}), dataDir: () => ""});
   assert.throws(() => p.buildLaunchCommand({}), /Reinstall.*plainMode=true/);
 });
 

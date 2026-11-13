@@ -34,9 +34,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// ../../codeterm-plugins/node_modules/qrcode-generator/qrcode.js
+// node_modules/qrcode-generator/qrcode.js
 var require_qrcode = __commonJS({
-  "../../codeterm-plugins/node_modules/qrcode-generator/qrcode.js"(exports, module2) {
+  "node_modules/qrcode-generator/qrcode.js"(exports, module2) {
     var qrcode2 = (function() {
       var qrcode3 = function(typeNumber, errorCorrectionLevel) {
         var PAD0 = 236;
@@ -1728,6 +1728,16 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
+// shared/src/host-paths.ts
+function stateDir(dataDir, pluginId) {
+  if (!dataDir || !dataDir.trim()) throw new Error("Host data directory is unavailable");
+  if (!/^[a-z][a-z0-9-]*$/.test(pluginId)) throw new Error("Invalid plugin id");
+  return `${dataDir.replace(/[\\/]+$/, "")}/${pluginId}`;
+}
+function bundleDir(dataDir, pluginId) {
+  return stateDir(stateDir(dataDir, "plugins"), pluginId);
+}
+
 // ../../codeterm/codeterm/packages/plugin-sdk/src/ioPrograms.ts
 function* ioValue(request) {
   return yield request;
@@ -2076,8 +2086,6 @@ function searchHits(data, query, scope, chat) {
 
 // telegram-client/src/plugin.ts
 var VERSION = "0.11.0";
-var ROOT = "~/.codeterm/telegram-client";
-var BUNDLE = "~/.codeterm/plugins/telegram-client";
 var CONFIG_NAME = "gotd.cli.yaml";
 var SCAN_MESSAGE = "Render qrSvg in chat as a scannable QR and show tgLink as text. Scan it in Telegram Settings \u2192 Devices \u2192 Link Desktop Device, then poll login-status and follow its `next` field.";
 var MAX_COUNT = 50;
@@ -2113,7 +2121,7 @@ function childPath(root, name) {
 }
 function paths() {
   try {
-    const expanded = host.fs.expandHome(ROOT);
+    const expanded = stateDir(host.dataDir(), "telegram-client");
     const root = expanded ? nativePath(expanded) : "";
     if (!root) return null;
     return {
@@ -2192,13 +2200,8 @@ function* resetRejectedConfig(p, label) {
   }
 }
 function installCommand(p) {
-  let bundle = null;
-  try {
-    bundle = host.fs.expandHome(BUNDLE);
-  } catch {
-    bundle = null;
-  }
-  const script = bundle ? childPath(childPath(nativePath(bundle), "scripts"), "install-tg.cjs") : "telegram-client/scripts/install-tg.cjs";
+  const bundle = nativePath(bundleDir(host.dataDir(), "telegram-client"));
+  const script = childPath(childPath(bundle, "scripts"), "install-tg.cjs");
   return `node "${script}" --root "${p.root}"`;
 }
 function notInstalledMessage(p) {

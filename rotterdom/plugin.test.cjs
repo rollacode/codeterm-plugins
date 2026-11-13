@@ -11,7 +11,7 @@ function fixture(replies = []) {
   projectWriteAllowed:()=>true,canonicalPath:p => p==='/project'||files.has(p) ? p : null,isSymlink:()=>false,fileExists:p=>files.has(p),
   readFile:p=>files.get(p)??null,readFileHead:(p,n)=>(files.get(p)??null)?.slice(0,n),
   writeFileAtomic:(p,s)=>{files.set(p,s);writes.push(p);return true},makeDirs:()=>true,lockFile:()=> 'lock',unlockFile:()=>true,
-  fs:{expandHome:()=>'/state',readDir:()=>[]},shell:{quoteFor:s=>`'${s}'`},
+  dataDir:()=>'/instance',fs:{expandHome:()=>{throw new Error('home alias must not be used')},readDir:()=>[]},shell:{quoteFor:s=>`'${s}'`},
   fetch:{stream:opts=>{requests.push(JSON.parse(opts.body));return {jobId:String(job++)}},streamPoll:()=>({done:true,status:200,chunks:[JSON.stringify(replies.shift())]}),streamClose:()=>{}},
   exec:{start:()=>({jobId:'exec'}),poll:()=>({done:true,code:0,stdout:'ok'}),close:()=>{}} };
  require("../scripts/host-io-fixture.cjs").attachHostIo(host);
@@ -64,7 +64,7 @@ test('tool loop writes, edits, persists history and returns final response',()=>
  assert.equal(f.files.get('/project/a.txt'),'two');
  assert.equal(p.profilePoll('session').done,true);
  assert.equal(p.profilePoll('session').messages.at(-1).content,'finished');
- const h=JSON.parse(f.files.get('/state/session-session.json'));
+ const h=JSON.parse(f.files.get('/instance/rotterdom/session-session.json'));
  assert.equal(h.ledger.write.state,'completed');assert.equal(h.ledger.edit.state,'completed');
  assert.equal(f.requests[1].messages.at(-1).role,'tool');
  p.profileClose('session');p.profileOpen('session','coding',true);
@@ -123,7 +123,7 @@ test('Blueprint Agent entry returns structured output, executes native tools and
   projectWriteAllowed:()=>true,canonicalPath:path=>path==='/project'||files.has(path)?path:null,isSymlink:()=>false,fileExists:path=>files.has(path),
   readFile:path=>files.get(path)??null,readFileHead:(path,n)=>(files.get(path)??null)?.slice(0,n),
   writeFileAtomic:(path,text)=>{files.set(path,text);return true},makeDirs:()=>true,lockFile:()=> 'lock',unlockFile:()=>true,
-  fs:{expandHome:()=>'/state'},fetchStart:()=>JSON.stringify({jobId:'fetch'}),
+  dataDir:()=>'/instance',fs:{expandHome:()=>{throw new Error('home alias must not be used')}},fetchStart:()=>JSON.stringify({jobId:'fetch'}),
   awaitJob:(job,then)=>then({status:200,body:JSON.stringify(replies.shift())}),exec:{close:()=>{}}});
  require('../scripts/host-io-fixture.cjs').attachHostIo(context.host);
  vm.runInNewContext(fs.readFileSync(__dirname+'/plugin.js','utf8'),context);

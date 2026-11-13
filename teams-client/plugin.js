@@ -24,6 +24,13 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
+// shared/src/host-paths.ts
+function stateDir(dataDir, pluginId) {
+  if (!dataDir || !dataDir.trim()) throw new Error("Host data directory is unavailable");
+  if (!/^[a-z][a-z0-9-]*$/.test(pluginId)) throw new Error("Invalid plugin id");
+  return `${dataDir.replace(/[\\/]+$/, "")}/${pluginId}`;
+}
+
 // ../../codeterm/codeterm/packages/plugin-sdk/src/ioPrograms.ts
 function* ioValue(request) {
   return yield request;
@@ -188,7 +195,6 @@ var GO_ARCHIVES = {
   "win32/x64": { file: "go1.26.8.windows-amd64.zip", sha256: "b92c3b2adae85a11ba71fe7216daf0d84e82af4c8ab6c5625807f28622043a59" },
   "win32/arm64": { file: "go1.26.8.windows-arm64.zip", sha256: "4bc560ed3ccb64eec0be6180b8c29185c07f5215276820adb4303d7bf3365435" }
 };
-var ROOT = "~/.codeterm/teams-client";
 var EXO_HOME_DIR = "exo-home";
 var EXO_TOKEN_DIR = ".exo-teams";
 var EXO_TOKEN_FILES = ["token-skype.jwt", "token-chatsvcagg.jwt", "token-teams.jwt", "token-graph.jwt", "token-assignments.jwt", "refresh-token.jwt"];
@@ -497,7 +503,7 @@ function exeName(platform, name) {
 }
 function paths() {
   try {
-    const expanded = host.fs.expandHome(ROOT);
+    const expanded = stateDir(host.dataDir(), "teams-client");
     if (!expanded) return null;
     const root = host.path.normalize(expanded);
     const home = joinPath(root, EXO_HOME_DIR);

@@ -29,6 +29,16 @@ __export(plugin_exports, {
 });
 module.exports = __toCommonJS(plugin_exports);
 
+// shared/src/host-paths.ts
+function stateDir(dataDir, pluginId) {
+  if (!dataDir || !dataDir.trim()) throw new Error("Host data directory is unavailable");
+  if (!/^[a-z][a-z0-9-]*$/.test(pluginId)) throw new Error("Invalid plugin id");
+  return `${dataDir.replace(/[\\/]+$/, "")}/${pluginId}`;
+}
+function bundleDir(dataDir, pluginId) {
+  return stateDir(stateDir(dataDir, "plugins"), pluginId);
+}
+
 // ../../codeterm/codeterm/packages/plugin-sdk/src/fileDiffs.ts
 function recordedPatchDiff(path, patch, kind) {
   if (!path.trim()) return [];
@@ -896,7 +906,11 @@ var plugin = {
     const selected = launchEndpoint(configuredEndpoints(settings), requestedModel);
     let startupDir;
     if (settings.plainMode !== true) {
-      startupDir = host.fs.expandHome("~/.codeterm/plugins/aider/startup") || void 0;
+      try {
+        startupDir = `${bundleDir(host.dataDir(), "aider")}/startup`;
+      } catch {
+        startupDir = void 0;
+      }
       if (!startupDir) throw new Error("Domios Aider adapter is missing. Reinstall the plugin or explicitly set plainMode=true.");
     }
     const parts = ["aider", ...modelLaunchArgs(p.args || [], selected.entry).map(quote)];
@@ -935,7 +949,7 @@ var plugin = {
     } catch (_) {
     }
     try {
-      const primer = host.fs.expandHome("~/.codeterm/plugins/aider/domios-primer.md");
+      const primer = `${bundleDir(host.dataDir(), "aider")}/domios-primer.md`;
       if (primer && (yield* host.io.fs.readFileHead(primer, 1)) !== null) {
         parts.push("--read", quote(primer));
       }

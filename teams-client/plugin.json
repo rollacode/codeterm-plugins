@@ -1,6 +1,6 @@
 {
   "id": "teams-client",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "minCodeterm": "1.20.0",
   "hostApi": 2,
   "displayName": "Teams Client",
@@ -41,42 +41,42 @@
     }
   },
   "sessions": {
-    "rootDir": "~/.codeterm/teams-client"
+    "rootDir": "~/.domios/teams-client"
   },
   "credentials": [
     {
       "id": "teams-exo-token-skype",
-      "file": "~/.codeterm/teams-client/exo-home/.exo-teams/token-skype.jwt",
+      "file": "~/.domios/teams-client/exo-home/.exo-teams/token-skype.jwt",
       "public": {},
       "secret": {}
     },
     {
       "id": "teams-exo-token-chatsvcagg",
-      "file": "~/.codeterm/teams-client/exo-home/.exo-teams/token-chatsvcagg.jwt",
+      "file": "~/.domios/teams-client/exo-home/.exo-teams/token-chatsvcagg.jwt",
       "public": {},
       "secret": {}
     },
     {
       "id": "teams-exo-token-teams",
-      "file": "~/.codeterm/teams-client/exo-home/.exo-teams/token-teams.jwt",
+      "file": "~/.domios/teams-client/exo-home/.exo-teams/token-teams.jwt",
       "public": {},
       "secret": {}
     },
     {
       "id": "teams-exo-token-graph",
-      "file": "~/.codeterm/teams-client/exo-home/.exo-teams/token-graph.jwt",
+      "file": "~/.domios/teams-client/exo-home/.exo-teams/token-graph.jwt",
       "public": {},
       "secret": {}
     },
     {
       "id": "teams-exo-token-assignments",
-      "file": "~/.codeterm/teams-client/exo-home/.exo-teams/token-assignments.jwt",
+      "file": "~/.domios/teams-client/exo-home/.exo-teams/token-assignments.jwt",
       "public": {},
       "secret": {}
     },
     {
       "id": "teams-exo-refresh-token",
-      "file": "~/.codeterm/teams-client/exo-home/.exo-teams/refresh-token.jwt",
+      "file": "~/.domios/teams-client/exo-home/.exo-teams/refresh-token.jwt",
       "public": {},
       "secret": {}
     }

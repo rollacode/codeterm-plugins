@@ -43,7 +43,9 @@ function writeJson(file, value) {
 function envelope(data) { return JSON.stringify({ schema: 1, data }); }
 
 function mockHost(options = {}) {
-  const root = mkdtempSync(join(os.tmpdir(), "telegram-client-test-"));
+  const dataDir = mkdtempSync(join(os.tmpdir(), "telegram-client-test-"));
+  const root = join(dataDir, "telegram-client");
+  mkdirSync(root);
   const binDir = join(root, "bin");
   mkdirSync(binDir, { recursive: true, mode: 0o700 });
   const platform = options.platform || "darwin";
@@ -218,7 +220,8 @@ function mockHost(options = {}) {
       toNative: (value) => path.normalize(value),
       equal: (left, right) => path.normalize(left) === path.normalize(right),
     },
-    homeDir: () => root,
+    homeDir: () => join(dataDir, "unused-home"),
+    dataDir: () => dataDir,
     envGet: () => null,
     settingsJson: () => JSON.stringify(options.settings || { historyCount: 20, historyMaxBytes: 32768 }),
     secretGet: (key) => secrets[key] || null,
@@ -253,7 +256,7 @@ function mockHost(options = {}) {
     setSearchData(value) { searchData = value; },
     finishJob(id) { jobs.set(id, { ...(jobs.get(id) || {}), done: true }); },
     finishLogin(id) { loginJobs.set(id, { ...(loginJobs.get(id) || {}), done: true }); },
-    cleanup() { globalThis.host = new Proxy({}, { get: () => () => { throw new Error("host called at load time"); } }); rmSync(root, { recursive: true, force: true }); },
+    cleanup() { globalThis.host = new Proxy({}, { get: () => () => { throw new Error("host called at load time"); } }); rmSync(dataDir, { recursive: true, force: true }); },
   };
 }
 
@@ -363,7 +366,7 @@ test("manifest exposes only Telegram capabilities and the helper binary", () => 
   assert.deepEqual(fields.filter((field) => field.kind === "api_key").map((field) => field.env_var), ["api_id", "api_hash", "login_password"]);
   assert.match(manifest.configHelp, /printf .%s. .<PASSWORD>. \| codeterm plugin config telegram-client --secret login_password && codeterm plugin telegram-client login-password/);
   assert.match(manifest.configHelp, /session history/);
-  assert.deepEqual(manifest.credentials.map((entry) => entry.file), ["~/.codeterm/telegram-client/gotd.cli.yaml"]);
+  assert.deepEqual(manifest.credentials.map((entry) => entry.file), ["~/.domios/telegram-client/gotd.cli.yaml"]);
   assert.equal(manifest.credentials.some((entry) => entry.file.includes("gotd.session")), false, "no guessed dynamic session-file credential");
 });
 
@@ -1229,7 +1232,8 @@ test("health reports the runtime dir and an install command rooted in it when tg
     assert.equal(health.state, "not-installed");
     assert.equal(health.runtimeDir, plugin.__test_paths().root);
     assert.ok(health.installCommand.includes(`--root "${health.runtimeDir}"`), health.installCommand);
-    assert.match(health.installCommand, /install-tg\.cjs/);
+    assert.equal(health.installCommand, `node "${join(path.dirname(env.root), "plugins", "telegram-client", "scripts", "install-tg.cjs")}" --root "${env.root}"`);
+    assert.equal(existsSync(join(host.homeDir(), ".codeterm")), false);
   } finally { env.cleanup(); }
 });
 
