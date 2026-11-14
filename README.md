@@ -1,6 +1,6 @@
-# CodeTerm Plugins
+# Domios Plugins
 
-Marketplace plugin channel for [CodeTerm](https://github.com/rollacode/codeterm).
+Marketplace plugin channel for [Domios](https://github.com/domios-dev/domios).
 This channel is pre-registered out of the box — its plugins show up under
 **Extensions → Marketplace** ready to install (nothing is installed by default).
 
@@ -63,7 +63,7 @@ If `npm run check:icons` reports that a manifest still carries `iconHint` or `ic
 
 `channel.json` is the manifest CodeTerm reads when the channel is added. Keep
 each entry's `version` in sync with the plugin's `plugin.json`. CodeTerm seeds
-this channel automatically (register-only) from `github.com/rollacode/codeterm-plugins`.
+this channel automatically (register-only) from `github.com/domios-dev/domios-plugins`.
 
 ### Releasing a plugin
 

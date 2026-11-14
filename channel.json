@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "name": "codeterm-plugins",
-  "displayName": "CodeTerm Plugins",
-  "description": "Andrey's CodeTerm capability plugins — Git, Transcriber, Bitwarden, Chat Preprocessor, Pebble, Grok, Aider, Telegram Client, Teams Client, Rotterdom, LARK.",
+  "displayName": "Domios Plugins",
+  "description": "Official Domios capability plugins — Git, Transcriber, Bitwarden, Chat Preprocessor, Pebble, Grok, Aider, Telegram Client, Teams Client, Rotterdom, LARK.",
   "plugins": [
     {
       "id": "lark",
